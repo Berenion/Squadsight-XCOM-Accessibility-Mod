@@ -20,3 +20,8 @@ __pycache__/
 *.obj
 *.lib
 *.exp
+
+# Screen-reader runtime DLLs are supplied by the user, not the project.
+# They must match the game (x86); see HANDOFF.md.
+Tolk.dll
+nvdaControllerClient*.dll
