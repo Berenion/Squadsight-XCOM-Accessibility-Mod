@@ -27,6 +27,9 @@ if errorlevel 1 (popd & echo INJECTOR BUILD FAILED & exit /b 1)
 cl /nologo /W3 /O2 /MT "%HERE%test_natives.c" "%HERE%natives.c" /Fe:test_natives.exe
 if errorlevel 1 (popd & echo TEST BUILD FAILED & exit /b 1)
 
+cl /nologo /W3 /O2 /MT "%HERE%test_speech.c" "%HERE%speech.c" /Fe:test_speech.exe /link ole32.lib oleaut32.lib sapi.lib
+if errorlevel 1 (popd & echo SPEECH TEST BUILD FAILED & exit /b 1)
+
 popd
 echo.
 echo Built: %OUT%\xcom_uihook.dll

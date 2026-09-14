@@ -28,6 +28,19 @@ static HMODULE       g_tolk;
 static TolkOutputFn  g_tolk_output;
 static TolkSilenceFn g_tolk_silence;
 
+// NVDA's controller client is driven directly when Tolk is unavailable.
+// Tolk is only a thin multiplexer over exactly these entry points, and it
+// ships x64-first, so depending on it would add a dependency without adding
+// capability for an NVDA user.  Exports are undecorated __stdcall.
+typedef unsigned long(__stdcall* NvdaTestFn)(void);
+typedef unsigned long(__stdcall* NvdaSpeakFn)(const wchar_t*);
+typedef unsigned long(__stdcall* NvdaCancelFn)(void);
+
+static HMODULE      g_nvda;
+static NvdaTestFn   g_nvda_test;
+static NvdaSpeakFn  g_nvda_speak;
+static NvdaCancelFn g_nvda_cancel;
+
 static ISpVoice*     g_voice;
 
 static wchar_t       g_queue[QUEUE_SIZE][MAX_UTTER];
@@ -45,6 +58,14 @@ static void speak_now(const wchar_t* text, int interrupt)
         g_tolk_output(text, interrupt);
         return;
     }
+    if (g_nvda_speak) {
+        // NVDA can be shut down mid-session; testIfRunning keeps us from
+        // speaking into a dead pipe on every single UI update.
+        if (g_nvda_test && g_nvda_test() != 0) return;
+        if (interrupt && g_nvda_cancel) g_nvda_cancel();
+        g_nvda_speak(text);
+        return;
+    }
     if (g_voice) {
         DWORD flags = SPF_ASYNC | (interrupt ? SPF_PURGEBEFORESPEAK : 0);
         g_voice->lpVtbl->Speak(g_voice, text, flags, NULL);
@@ -58,7 +79,7 @@ static DWORD WINAPI worker(LPVOID param)
     HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     int owns_com = SUCCEEDED(hr);
 
-    if (!g_tolk_output) {
+    if (!g_tolk_output && !g_nvda_speak) {
         hr = CoCreateInstance(&CLSID_SpVoice, NULL, CLSCTX_ALL, &IID_ISpVoice,
                               (void**)&g_voice);
         if (FAILED(hr)) g_voice = NULL;
@@ -87,7 +108,8 @@ static DWORD WINAPI worker(LPVOID param)
 // ERROR_BAD_EXE_FORMAT, which is worth saying out loud rather than reporting
 // as "not found" -- the person who needs this message may not be able to see
 // the file they just copied.
-static HMODULE try_load_tolk(const char* path, char* why, size_t why_sz)
+static HMODULE try_load(const char* path, const char* what,
+                        char* why, size_t why_sz)
 {
     HMODULE h = LoadLibraryA(path);
     if (h) return h;
@@ -95,14 +117,47 @@ static HMODULE try_load_tolk(const char* path, char* why, size_t why_sz)
     DWORD err = GetLastError();
     if (err == ERROR_BAD_EXE_FORMAT) {
         _snprintf_s(why, why_sz, _TRUNCATE,
-                    "Tolk.dll at %s is 64-bit; XCOM is a 32-bit process and "
-                    "needs the x86 Tolk.dll plus nvdaControllerClient32.dll",
-                    path);
+                    "%s at %s is 64-bit; XCOM is a 32-bit process and needs "
+                    "the x86 build", what, path);
     } else if (err != ERROR_MOD_NOT_FOUND && err != ERROR_FILE_NOT_FOUND) {
         _snprintf_s(why, why_sz, _TRUNCATE,
-                    "Tolk.dll at %s failed to load (error %lu)", path, err);
+                    "%s at %s failed to load (error %lu)", what, path, err);
     }
     return NULL;
+}
+
+// Looks beside this DLL, then one directory up.  A build/ subdirectory is not
+// where anyone would naturally drop a screen-reader DLL.
+static HMODULE load_from_nearby(const char* dll_dir, const char* name,
+                                char* detail, size_t detail_sz)
+{
+    char path[MAX_PATH];
+    char more[256];
+
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s%s", dll_dir, name);
+    HMODULE h = try_load(path, name, detail, detail_sz);
+    if (h) return h;
+
+    char parent[MAX_PATH];
+    strcpy_s(parent, sizeof parent, dll_dir);
+    size_t len = strlen(parent);
+    if (len > 1) {
+        parent[len - 1] = 0;                       /* drop trailing slash */
+        char* slash = strrchr(parent, '\\');
+        if (slash) {
+            *(slash + 1) = 0;
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s%s", parent, name);
+            more[0] = 0;
+            h = try_load(path, name, more, sizeof more);
+            if (!detail[0] && more[0]) strcpy_s(detail, detail_sz, more);
+            if (h) return h;
+        }
+    }
+
+    more[0] = 0;
+    h = try_load(name, name, more, sizeof more);
+    if (!detail[0] && more[0]) strcpy_s(detail, detail_sz, more);
+    return h;
 }
 
 int speech_init(const char* dll_dir, char* why, size_t why_sz)
@@ -110,40 +165,12 @@ int speech_init(const char* dll_dir, char* why, size_t why_sz)
     InitializeCriticalSection(&g_qlock);
     g_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
 
-    // Tolk is optional: with it we drive the player's real screen reader,
-    // without it we fall back to the SAPI voice built into Windows.  Look
-    // beside this DLL, then one directory up (a build/ layout puts the DLL
-    // below where people naturally drop things), then the default search path.
+    // Preference order: Tolk (drives whatever reader the player uses), then
+    // NVDA directly, then the SAPI voice built into Windows.
     char detail[256];
     detail[0] = 0;
 
-    char path[MAX_PATH];
-    _snprintf_s(path, sizeof path, _TRUNCATE, "%sTolk.dll", dll_dir);
-    g_tolk = try_load_tolk(path, detail, sizeof detail);
-
-    if (!g_tolk) {
-        char parent[MAX_PATH];
-        strcpy_s(parent, sizeof parent, dll_dir);
-        size_t len = strlen(parent);
-        if (len > 1) {
-            parent[len - 1] = 0;                        // drop trailing slash
-            char* slash = strrchr(parent, '\\');
-            if (slash) {
-                *(slash + 1) = 0;
-                _snprintf_s(path, sizeof path, _TRUNCATE, "%sTolk.dll", parent);
-                char more[256];
-                more[0] = 0;
-                g_tolk = try_load_tolk(path, more, sizeof more);
-                if (!detail[0] && more[0]) strcpy_s(detail, sizeof detail, more);
-            }
-        }
-    }
-    if (!g_tolk) {
-        char more[256];
-        more[0] = 0;
-        g_tolk = try_load_tolk("Tolk.dll", more, sizeof more);
-        if (!detail[0] && more[0]) strcpy_s(detail, sizeof detail, more);
-    }
+    g_tolk = load_from_nearby(dll_dir, "Tolk.dll", detail, sizeof detail);
 
     if (g_tolk) {
         TolkLoadFn load = (TolkLoadFn)GetProcAddress(g_tolk, "Tolk_Load");
@@ -152,15 +179,42 @@ int speech_init(const char* dll_dir, char* why, size_t why_sz)
         if (load && g_tolk_output) {
             load();
             _snprintf_s(why, why_sz, _TRUNCATE, "Tolk (screen reader bridge)");
+            g_thread = CreateThread(NULL, 0, worker, NULL, 0, NULL);
+            return g_thread != NULL;
+        }
+        g_tolk_output = NULL;
+    }
+
+    // No Tolk: talk to NVDA directly.  Same two directories, same reasoning.
+    g_nvda = load_from_nearby(dll_dir, "nvdaControllerClient32.dll",
+                              detail, sizeof detail);
+    if (g_nvda) {
+        g_nvda_test = (NvdaTestFn)GetProcAddress(g_nvda, "nvdaController_testIfRunning");
+        g_nvda_speak = (NvdaSpeakFn)GetProcAddress(g_nvda, "nvdaController_speakText");
+        g_nvda_cancel = (NvdaCancelFn)GetProcAddress(g_nvda, "nvdaController_cancelSpeech");
+
+        if (g_nvda_speak && g_nvda_test) {
+            unsigned long st = g_nvda_test();
+            if (st == 0) {
+                _snprintf_s(why, why_sz, _TRUNCATE, "NVDA (controller client)");
+            } else {
+                // The client loads fine whether or not NVDA is up; say which
+                // it is, because "silence" has two very different causes.
+                g_nvda_speak = NULL;
+                _snprintf_s(why, why_sz, _TRUNCATE,
+                            "SAPI -- nvdaControllerClient32 loaded but NVDA is "
+                            "not running (status %lu)", st);
+            }
         } else {
-            g_tolk_output = NULL;
+            g_nvda_speak = NULL;
             _snprintf_s(why, why_sz, _TRUNCATE,
-                        "Tolk.dll loaded but lacks Tolk_Load/Tolk_Output; using SAPI");
+                        "SAPI -- nvdaControllerClient32 lacks the expected exports");
         }
     } else if (detail[0]) {
         _snprintf_s(why, why_sz, _TRUNCATE, "SAPI -- %s", detail);
     } else {
-        _snprintf_s(why, why_sz, _TRUNCATE, "SAPI (no Tolk.dll on the search path)");
+        _snprintf_s(why, why_sz, _TRUNCATE,
+                    "SAPI (no Tolk.dll or nvdaControllerClient32.dll found)");
     }
 
     g_thread = CreateThread(NULL, 0, worker, NULL, 0, NULL);
