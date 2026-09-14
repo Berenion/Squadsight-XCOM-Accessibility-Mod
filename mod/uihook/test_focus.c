@@ -88,6 +88,36 @@ int main(void)
           strcmp(buf, "third") == 0, "out-of-order slot 2");
     check(!focus_label_at(screenD, 1, buf, sizeof buf), "gap stays empty");
 
+    // Regression: SetDropdownOptions crashed the game by overrunning the
+    // join buffer. strcat_s does not truncate -- on a full destination it
+    // calls the CRT invalid-parameter handler, which __fastfail()s past SEH,
+    // so no handler in this DLL could catch it. Same shape, must survive.
+    printf("\nlabel join bounds\n");
+    {
+        const char* opts[] = {
+            "1280 x 720", "1024 x 768", "1366 x 768", "1280 x 800",
+            "1152 x 864", "1152 x 870", "1440 x 900", "1600 x 900",
+            "1280 x 960", "1760 x 990", "1280 x 1024", "1680 x 1050",
+            "1920 x 1080", "1600 x 1200", "1920 x 1200", "2560 x 1440",
+            "2048 x 1536", "3072 x 1728", "3200 x 1800", "3840 x 2160",
+        };
+        char joined[FOCUS_MAX_LABEL];
+        size_t used = 0;
+        joined[0] = 0;
+        for (int k = 0; k < (int)(sizeof opts / sizeof *opts); k++) {
+            size_t want = strlen(opts[k]);
+            size_t sep = used ? 2 : 0;
+            if (used + sep + want >= sizeof joined) break;
+            if (sep) { memcpy(joined + used, ", ", 2); used += 2; }
+            memcpy(joined + used, opts[k], want);
+            used += want;
+            joined[used] = 0;
+        }
+        check(used < sizeof joined, "join stays inside the buffer");
+        check(joined[used] == 0, "join stays terminated");
+        check(strlen(joined) == used, "join length matches");
+    }
+
     printf("\nspeech debounce\n");
     char dir[MAX_PATH];
     GetModuleFileNameA(NULL, dir, MAX_PATH);

@@ -40,6 +40,7 @@
 #include <share.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "ue3.h"
 #include "natives.h"
@@ -321,9 +322,18 @@ static void capture(const char* tag, LONG n, void* stack)
     object_name(node, fn_name, sizeof fn_name);
     object_name(object, obj_name, sizeof obj_name);
 
-    Payload p;
-    p.nstrings = 0;
-    p.nnumbers = 0;
+    // Payload is ~64KB. Putting that on the game's own thread stack, inside
+    // a script VM that is already deep, is asking for trouble; it lives in
+    // thread-local storage instead. The re-entrancy guard covers the case of
+    // a hooked native being reached from inside another one.
+    static __declspec(thread) Payload tls_payload;
+    static __declspec(thread) int tls_busy;
+    if (tls_busy) return;
+    tls_busy = 1;
+
+    Payload* p = &tls_payload;
+    p->nstrings = 0;
+    p->nnumbers = 0;
 
     void* prop = NULL;
     if (readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
@@ -343,21 +353,21 @@ static void capture(const char* tag, LONG n, void* stack)
             char val[MAX_STR];
             if (read_fstring((const FString*)slot, val, sizeof val)) {
                 strip_markup(val);
-                if (*val) payload_add_string(&p, val);
+                if (*val) payload_add_string(p, val);
             } else {
-                read_array((const FArray*)slot, &p);
+                read_array((const FArray*)slot, p);
             }
         }
         prop = next;
     }
 
-    if (!p.nstrings && !p.nnumbers) {
+    if (!p->nstrings && !p->nnumbers) {
         logf_("[%ld] %s %s.%s (no text)\n", n, tag, obj_name, fn_name);
         return;
     }
 
-    for (int i = 0; i < p.nstrings; i++)
-        logf_("[%ld] %s %s.%s  \"%s\"\n", n, tag, obj_name, fn_name, p.strings[i]);
+    for (int i = 0; i < p->nstrings; i++)
+        logf_("[%ld] %s %s.%s  \"%s\"\n", n, tag, obj_name, fn_name, p->strings[i]);
 
     ULONGLONG now = GetTickCount64();
     // Compare against the last call that actually carried text, not the last
@@ -372,19 +382,30 @@ static void capture(const char* tag, LONG n, void* stack)
                          (strcmp(fn_name, g_last_fn) == 0) &&
                          (now - g_last_at < LIST_WINDOW_MS);
 
-    if (p.nstrings && p.nnumbers && p.numbers[0] >= 0 && p.numbers[0] < FOCUS_MAX_LABELS) {
+    if (p->nstrings && p->nnumbers && p->numbers[0] >= 0 && p->numbers[0] < FOCUS_MAX_LABELS) {
         // The call carries its own slot number, so place the label there
         // rather than inferring order from arrival:
         //     AS_SetCheckboxLabel(int Index, string strText)
         //     AS_AddListItem(int Id, string Desc, ...)
         // Refreshing one row no longer disturbs the rest of the list.
-        int idx = (int)p.numbers[0];
+        int idx = (int)p->numbers[0];
+        // Bounds tracked by hand. strcat_s does NOT truncate: on a full
+        // destination it invokes the CRT invalid-parameter handler, which
+        // __fastfail()s and takes the process with it -- past SEH, so the
+        // handler above cannot catch it. SetDropdownOptions ships twenty
+        // resolution strings and overran this.
         char joined[FOCUS_MAX_LABEL];
+        size_t used = 0;
         joined[0] = 0;
-        for (int i = 0; i < p.nstrings; i++) {
-            if (looks_like_asset(p.strings[i])) continue;
-            if (joined[0]) strcat_s(joined, sizeof joined, ", ");
-            strncat_s(joined, sizeof joined, p.strings[i], _TRUNCATE);
+        for (int i = 0; i < p->nstrings; i++) {
+            if (looks_like_asset(p->strings[i])) continue;
+            size_t want = strlen(p->strings[i]);
+            size_t sep = used ? 2 : 0;
+            if (used + sep + want >= sizeof joined) break;
+            if (sep) { memcpy(joined + used, ", ", 2); used += 2; }
+            memcpy(joined + used, p->strings[i], want);
+            used += want;
+            joined[used] = 0;
         }
         if (joined[0]) {
             focus_set(object, idx, joined);
@@ -392,30 +413,30 @@ static void capture(const char* tag, LONG n, void* stack)
                   n, tag, obj_name, fn_name, idx, joined);
         }
         speech_cancel_pending();
-    } else if (p.nstrings) {
+    } else if (p->nstrings) {
         // No index given. Several strings at once is a screen publishing its
         // contents; repeated single-string calls are the same thing spread
         // out. Either way it is a list, and a list must not read itself
         // aloud -- it is recorded so a later index can be resolved.
-        if (p.nstrings > 1) {
+        if (p->nstrings > 1) {
             focus_begin(object);
-            for (int i = 0; i < p.nstrings; i++) focus_add(object, p.strings[i]);
+            for (int i = 0; i < p->nstrings; i++) focus_add(object, p->strings[i]);
             speech_cancel_pending();
         } else if (continues_list) {
-            focus_add(object, p.strings[0]);
+            focus_add(object, p->strings[0]);
             speech_cancel_pending();
         } else {
             // Might be an announcement, might be the first row of a list.
             // Hold it briefly; a second call will cancel it.
             focus_begin(object);
-            focus_add(object, p.strings[0]);
-            if (!looks_like_asset(p.strings[0]))
-                speech_say_after(p.strings[0], SETTLE_MS);
+            focus_add(object, p->strings[0]);
+            if (!looks_like_asset(p->strings[0]))
+                speech_say_after(p->strings[0], SETTLE_MS);
         }
-    } else if (p.nnumbers && focus_count(object) > 0) {
+    } else if (p->nnumbers && focus_count(object) > 0) {
         // No text, just an index: this is the cursor moving. XCOM never
         // re-sends the label, so resolve it from what the screen published.
-        int idx = (int)p.numbers[0];
+        int idx = (int)p->numbers[0];
         char label[FOCUS_MAX_LABEL];
         if (focus_label_at(object, idx, label, sizeof label)) {
             logf_("[%ld] %s %s.%s  FOCUS %d -> \"%s\"\n",
@@ -425,11 +446,12 @@ static void capture(const char* tag, LONG n, void* stack)
         }
     }
 
-    if (p.nstrings) {
+    if (p->nstrings) {
         g_last_obj = object;
         strncpy_s(g_last_fn, sizeof g_last_fn, fn_name, _TRUNCATE);
         g_last_at = now;
     }
+    tls_busy = 0;
 }
 
 // MinHook needs a distinct trampoline per target, so each native gets its own
@@ -472,10 +494,22 @@ static int arm(const NativeEntry* tbl, int n, HMODULE mod,
 
 static HINSTANCE g_self;
 
+// The CRT's default invalid-parameter handler calls __fastfail, which no
+// SEH frame can intercept. Injected into someone else's process, a mistake in
+// this DLL should degrade rather than terminate the game, so it is replaced.
+static void __cdecl on_invalid_parameter(const wchar_t* expr, const wchar_t* func,
+                                         const wchar_t* file, unsigned line,
+                                         uintptr_t reserved)
+{
+    (void)expr; (void)func; (void)file; (void)reserved;
+    logf_("CRT invalid parameter at line %u -- call ignored\n", line);
+}
+
 static DWORD WINAPI init(LPVOID param)
 {
     (void)param;
     InitializeCriticalSection(&g_lock);
+    _set_invalid_parameter_handler(on_invalid_parameter);
 
     char path[MAX_PATH];
     GetModuleFileNameA(NULL, path, MAX_PATH);
