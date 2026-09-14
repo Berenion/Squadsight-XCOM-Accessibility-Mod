@@ -2,9 +2,9 @@
 // speak it.
 //
 // All of the game's on-screen text reaches Flash through a small number of
-// natives that share a useful property: the text is a parameter of the
-// *calling* UnrealScript function, already evaluated and sitting in
-// Stack.Locals by the time the native runs.
+// natives that share a useful property: the text is already evaluated and
+// sitting in the *calling* UnrealScript function's frame by the time the
+// native runs.
 //
 //   GFxMoviePlayer.ActionScriptVoid  -- 85% of text.  The call site passes
 //       only a movieclip path and the native reads the rest off the caller:
@@ -13,19 +13,25 @@
 //           { manager.ActionScriptVoid(string(GetMCPath()) $ ".SetText"); }
 //
 //   UI_FxsPanel.Invoke               -- the remaining 15%.  Its arguments are
-//       explicit ASValues, but the strings they are built from are still
-//       locals of the caller:
+//       an explicit ASValue array, which the caller fills from locals:
 //
-//           function SetShotChance(string Label, string Desc)
-//           { ...; myValue.S = Label; ...; Invoke("SetShotChance", myArray); }
+//           simulated function SetText()            // no parameters at all
+//           {
+//               myValue.S = m_sSinglePlayer; myArray.AddItem(myValue);
+//               myValue.S = m_sMultiplayer;  myArray.AddItem(myValue);
+//               Invoke("SetDisplay", myArray);
+//           }
 //
-// So one capture routine serves every target: read Stack.Locals, never
+// So one capture routine serves every target: read the caller's frame, never
 // Stack.Code.  Re-stepping the bytecode would re-evaluate argument
-// expressions and double any side effects they carry; reading locals cannot.
+// expressions and double any side effects they carry; reading the frame
+// cannot.
 //
-// Parameters are located by walking the caller's UProperty chain -- the same
+// The frame is decoded by walking the caller's UProperty chain -- the same
 // walk the engine's own ActionScript marshaller performs -- so each value is
-// read at its declared offset and reported with its declared name.
+// read at its declared offset and reported with its declared name.  That
+// includes locals, not just parameters: the example above shows why a
+// parameter-only filter would report "no string params" for a whole menu.
 
 #include <windows.h>
 #include <stdio.h>
@@ -43,7 +49,8 @@
 
 #define MAX_NATIVES 8192
 #define MAX_STR     4096
-#define MAX_PARAMS  32
+#define MAX_FIELDS  64
+#define MAX_ELEMS   64      // array elements inspected per property
 
 static FILE*            g_log;
 static CRITICAL_SECTION g_lock;
@@ -52,7 +59,7 @@ static int              g_speak = 1;
 
 // Consecutive duplicates are collapsed: the UI re-sends the same string on
 // every refresh, which would otherwise bury the interesting transitions --
-// and, more importantly, would make the speech unusable.
+// and would make the speech unusable.
 static char g_last[MAX_STR + 256];
 static long g_repeat;
 static char g_last_spoken[MAX_STR];
@@ -74,8 +81,16 @@ static void logf_(const char* fmt, ...)
     _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
     va_end(ap);
 
+    // Compare past the "[N] " counter, otherwise every line is unique and the
+    // collapsing never fires.
+    const char* key = line;
+    if (key[0] == '[') {
+        const char* b = strchr(key, ']');
+        if (b) key = b + 1;
+    }
+
     EnterCriticalSection(&g_lock);
-    if (strcmp(line, g_last) == 0) {
+    if (strcmp(key, g_last) == 0) {
         g_repeat++;
     } else {
         if (g_repeat) {
@@ -86,7 +101,7 @@ static void logf_(const char* fmt, ...)
             g_repeat = 0;
         }
         emit(line);
-        strcpy_s(g_last, sizeof g_last, line);
+        strcpy_s(g_last, sizeof g_last, key);
     }
     LeaveCriticalSection(&g_lock);
 }
@@ -114,7 +129,7 @@ int readable(const void* p, size_t n)
     return 1;
 }
 
-// Reads an FString at a known-good address.  Num counts the terminating NUL.
+// Reads an FString.  Num counts the terminating NUL.
 static int read_fstring(const FString* s, char* out, size_t out_sz)
 {
     if (!readable(s, sizeof *s)) return 0;
@@ -122,6 +137,12 @@ static int read_fstring(const FString* s, char* out, size_t out_sz)
     if (s->Max < s->Num) return 0;
     if (!readable(s->Data, (size_t)s->Num * sizeof(wchar_t))) return 0;
     if (s->Data[s->Num - 1] != 0) return 0;
+
+    for (int i = 0; i < s->Num - 1; i++) {
+        wchar_t c = s->Data[i];
+        if (c == 0) return 0;
+        if (c < 32 && c != '\n' && c != '\t' && c != '\r') return 0;
+    }
 
     int n = WideCharToMultiByte(CP_UTF8, 0, s->Data, s->Num - 1,
                                 out, (int)out_sz - 1, NULL, NULL);
@@ -143,7 +164,6 @@ static void strip_markup(char* s)
     }
     *w = 0;
 
-    // Collapse runs of whitespace left behind by the removed tags.
     char* out = s;
     int space = 0;
     for (char* r = s; *r; r++) {
@@ -158,6 +178,59 @@ static void strip_markup(char* s)
     }
     while (out > s && out[-1] == ' ') out--;
     *out = 0;
+}
+
+typedef struct {
+    char  text[MAX_STR];
+    int   len;
+} Utterance;
+
+static void utter_add(Utterance* u, const char* s)
+{
+    int len = (int)strlen(s);
+    if (u->len + len + 2 >= MAX_STR) return;
+    if (u->len) { strcat_s(u->text, MAX_STR, ". "); u->len += 2; }
+    strcat_s(u->text, MAX_STR, s);
+    u->len += len;
+}
+
+// A property holding a TArray needs its elements inspected too: the Invoke
+// path passes text as a TArray<ASValue>, so the strings live one level down.
+// The element stride is not known here, so the array's own memory is swept at
+// pointer alignment -- bounded by the array, which makes this far tighter
+// than sweeping a whole stack frame.
+static int scan_array(const FArray* a, const char* tag, LONG n,
+                      const char* obj_name, const char* fn_name,
+                      const char* kind, const char* pname, Utterance* u)
+{
+    if (!readable(a, sizeof *a)) return 0;
+    if (a->Num < 1 || a->Num > 1024) return 0;
+    if (a->Max < a->Num) return 0;
+
+    // Cap the region so a bogus Num cannot walk us off into nowhere.
+    int elems = a->Num > MAX_ELEMS ? MAX_ELEMS : a->Num;
+    size_t span = (size_t)elems * 64;
+    if (!readable(a->Data, span)) {
+        span = (size_t)elems * 16;
+        if (!readable(a->Data, span)) return 0;
+    }
+
+    int found = 0;
+    const uint8_t* base = (const uint8_t*)a->Data;
+    for (size_t off = 0; off + sizeof(FString) <= span; off += 4) {
+        char val[MAX_STR];
+        if (read_fstring((const FString*)(base + off), val, sizeof val)) {
+            strip_markup(val);
+            if (*val) {
+                logf_("[%ld] %s %s.%s  %s %s[%zu]=\"%s\"\n",
+                      n, tag, obj_name, fn_name, kind, pname, off / 4, val);
+                utter_add(u, val);
+                found++;
+            }
+            off += sizeof(FString) - 4;
+        }
+    }
+    return found;
 }
 
 static void capture(const char* tag, LONG n, void* stack)
@@ -175,65 +248,59 @@ static void capture(const char* tag, LONG n, void* stack)
     object_name(node, fn_name, sizeof fn_name);
     object_name(object, obj_name, sizeof obj_name);
 
-    // Walk the caller's declared parameters, exactly as the engine's own
-    // ActionScript marshaller does: Children -> Next, keeping CPF_Parm
-    // entries that are not the return value, and reading each at its
-    // declared offset into the frame.
-    char utterance[MAX_STR];
-    utterance[0] = 0;
-    int spoken_len = 0, shown = 0;
+    Utterance u;
+    u.text[0] = 0;
+    u.len = 0;
+    int shown = 0;
 
     void* prop = NULL;
     if (readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
         prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
 
-    for (int guard = 0; prop && guard < MAX_PARAMS; guard++) {
+    for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
         if (!readable(prop, 0x68)) break;
 
         uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
         uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
         void* next     = *(void**)((uint8_t*)prop + UFIELD_NEXT);
 
-        if ((flags & (CPF_PARM | CPF_RETURNPARM)) == CPF_PARM && locals) {
+        // Locals count as much as parameters: UIFinalShell.SetText takes no
+        // arguments and builds the whole main menu out of locals.  Only the
+        // return slot is uninteresting.
+        if (locals && (flags & CPF_RETURNPARM) == 0 && off < 0x1000) {
+            const char* kind = (flags & CPF_PARM) ? "arg" : "local";
+            char pname[128] = "?";
+            object_name(prop, pname, sizeof pname);
+
             char val[MAX_STR];
-            const FString* s = (const FString*)(locals + off);
-            if (read_fstring(s, val, sizeof val)) {
+            const void* slot = locals + off;
+            if (read_fstring((const FString*)slot, val, sizeof val)) {
                 strip_markup(val);
                 if (*val) {
-                    char pname[128] = "?";
-                    object_name(prop, pname, sizeof pname);
-                    logf_("[%ld] %s %s.%s  %s=\"%s\"\n",
-                          n, tag, obj_name, fn_name, pname, val);
+                    logf_("[%ld] %s %s.%s  %s %s=\"%s\"\n",
+                          n, tag, obj_name, fn_name, kind, pname, val);
+                    utter_add(&u, val);
                     shown++;
-                    // Several parameters can make up one announcement (a
-                    // label and its description), so join rather than speak
-                    // each separately.
-                    int len = (int)strlen(val);
-                    if (spoken_len + len + 2 < MAX_STR) {
-                        if (spoken_len) {
-                            strcat_s(utterance, MAX_STR, ". ");
-                            spoken_len += 2;
-                        }
-                        strcat_s(utterance, MAX_STR, val);
-                        spoken_len += len;
-                    }
                 }
+            } else {
+                shown += scan_array((const FArray*)slot, tag, n,
+                                    obj_name, fn_name, kind, pname, &u);
             }
         }
         prop = next;
     }
 
     if (!shown) {
-        logf_("[%ld] %s %s.%s (no string params)\n", n, tag, obj_name, fn_name);
+        logf_("[%ld] %s %s.%s (no text)\n", n, tag, obj_name, fn_name);
         return;
     }
 
-    if (g_speak && spoken_len) {
+    if (g_speak && u.len) {
         EnterCriticalSection(&g_lock);
-        int same = (strcmp(utterance, g_last_spoken) == 0);
-        if (!same) strcpy_s(g_last_spoken, sizeof g_last_spoken, utterance);
+        int same = (strcmp(u.text, g_last_spoken) == 0);
+        if (!same) strcpy_s(g_last_spoken, sizeof g_last_spoken, u.text);
         LeaveCriticalSection(&g_lock);
-        if (!same) speech_say(utterance);
+        if (!same) speech_say(u.text);
     }
 }
 
