@@ -12,3 +12,5 @@
 # Python
 __pycache__/
 *.py[cod]
+# Analysis output derived from decompiled code -- never committed.
+/analysis/
