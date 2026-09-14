@@ -1,0 +1,14 @@
+# Decompiled game code and unwrapped packages -- derived from the user's own
+# game install, never committed.
+/decompressed/
+/decompiled/
+
+# Build output
+[Bb]in/
+[Oo]bj/
+*.user
+.vs/
+
+# Python
+__pycache__/
+*.py[cod]
