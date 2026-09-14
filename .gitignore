@@ -14,3 +14,9 @@ __pycache__/
 *.py[cod]
 # Analysis output derived from decompiled code -- never committed.
 /analysis/
+
+# MinHook build artifacts
+/mod/uihook/build/
+*.obj
+*.lib
+*.exp
