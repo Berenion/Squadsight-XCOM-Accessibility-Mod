@@ -62,6 +62,7 @@ static int              g_speak = 1;
 // and would make the speech unusable.
 static char g_last[MAX_STR + 256];
 static long g_repeat;
+static ULONGLONG g_repeat_since;
 static char g_last_spoken[MAX_STR];
 
 static void emit(const char* line)
@@ -92,6 +93,18 @@ static void logf_(const char* fmt, ...)
     EnterCriticalSection(&g_lock);
     if (strcmp(key, g_last) == 0) {
         g_repeat++;
+        // Flush periodically. Holding the count until a *different* line
+        // arrives makes a live tail look frozen -- which is exactly how this
+        // looked when the main menu was repeating one call.
+        ULONGLONG now = GetTickCount64();
+        if (now - g_repeat_since > 1000) {
+            char note[64];
+            _snprintf_s(note, sizeof note, _TRUNCATE,
+                        "      ... repeated %ld times\n", g_repeat);
+            emit(note);
+            g_repeat = 0;
+            g_repeat_since = now;
+        }
     } else {
         if (g_repeat) {
             char note[64];
@@ -100,6 +113,7 @@ static void logf_(const char* fmt, ...)
             emit(note);
             g_repeat = 0;
         }
+        g_repeat_since = GetTickCount64();
         emit(line);
         strcpy_s(g_last, sizeof g_last, key);
     }
@@ -180,6 +194,24 @@ static void strip_markup(char* s)
     *out = 0;
 }
 
+// Plenty of these "strings" are asset references rather than prose --
+// "Icon_B_CIRCLE", "img:///UILibrary_MapImages.Command1".  They belong in the
+// log, because they identify the call, but reading them aloud is noise.
+static int looks_like_asset(const char* s)
+{
+    if (strncmp(s, "img:", 4) == 0) return 1;
+    if (strncmp(s, "Icon_", 5) == 0) return 1;
+    if (strstr(s, "://")) return 1;
+
+    // package.asset style: dotted, and no spaces anywhere.
+    int dot = 0;
+    for (const char* p = s; *p; p++) {
+        if (*p == ' ') return 0;
+        if (*p == '.') dot = 1;
+    }
+    return dot;
+}
+
 typedef struct {
     char  text[MAX_STR];
     int   len;
@@ -189,6 +221,11 @@ static void utter_add(Utterance* u, const char* s)
 {
     int len = (int)strlen(s);
     if (u->len + len + 2 >= MAX_STR) return;
+    if (looks_like_asset(s)) return;
+    // The same text often arrives twice in one call -- once as a parameter
+    // and again inside the ASValue array built from it.  Saying "Load Game.
+    // Load Game" is worse than useless.
+    if (u->len && strstr(u->text, s)) return;
     if (u->len) { strcat_s(u->text, MAX_STR, ". "); u->len += 2; }
     strcat_s(u->text, MAX_STR, s);
     u->len += len;
