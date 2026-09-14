@@ -69,6 +69,22 @@ void focus_add(void* obj, const char* text)
     LeaveCriticalSection(&g_lock);
 }
 
+void focus_set(void* obj, int index, const char* text)
+{
+    if (!obj || !text || !*text) return;
+    if (index < 0 || index >= FOCUS_MAX_LABELS) return;
+    ensure_init();
+    EnterCriticalSection(&g_lock);
+    Slot* s = slot_for(obj, 1);
+    // Slots skipped over stay empty rather than shifting anything: the index
+    // is the screen's own, so it must map straight through.
+    for (int i = s->count; i < index; i++) s->labels[i][0] = 0;
+    strncpy_s(s->labels[index], FOCUS_MAX_LABEL, text, _TRUNCATE);
+    if (index >= s->count) s->count = index + 1;
+    s->touched = GetTickCount64();
+    LeaveCriticalSection(&g_lock);
+}
+
 int focus_label_at(void* obj, int index, char* out, size_t out_sz)
 {
     out[0] = 0;
@@ -78,7 +94,7 @@ int focus_label_at(void* obj, int index, char* out, size_t out_sz)
     int ok = 0;
     EnterCriticalSection(&g_lock);
     Slot* s = slot_for(obj, 0);
-    if (s && index < s->count) {
+    if (s && index < s->count && s->labels[index][0]) {
         strncpy_s(out, out_sz, s->labels[index], _TRUNCATE);
         s->touched = GetTickCount64();
         ok = 1;

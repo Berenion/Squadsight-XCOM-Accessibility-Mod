@@ -58,6 +58,36 @@ int main(void)
 
     check(!focus_label_at((void*)0x9999, 0, buf, sizeof buf), "unknown object empty");
 
+    // Indexed placement: the screen supplies the slot, and refreshing one row
+    // must leave its neighbours alone.  This is how AS_SetCheckboxLabel and
+    // AS_AddListItem actually arrive, interleaved with untexted calls.
+    void* screenC = (void*)0x3000;
+    focus_set(screenC, 0, "Tutorial");
+    focus_set(screenC, 1, "Operation Slingshot");
+    focus_set(screenC, 2, "Ironman");
+    focus_set(screenC, 3, "Reduce Beginner VO");
+    check(focus_count(screenC) == 4, "four indexed slots");
+    check(focus_label_at(screenC, 0, buf, sizeof buf) &&
+          strcmp(buf, "Tutorial") == 0, "slot 0 is the first, not the last");
+    check(focus_label_at(screenC, 3, buf, sizeof buf) &&
+          strcmp(buf, "Reduce Beginner VO") == 0, "slot 3 resolves");
+
+    focus_set(screenC, 1, "Slingshot (refreshed)");
+    check(focus_label_at(screenC, 0, buf, sizeof buf) &&
+          strcmp(buf, "Tutorial") == 0, "refreshing one slot spares the rest");
+    check(focus_label_at(screenC, 1, buf, sizeof buf) &&
+          strcmp(buf, "Slingshot (refreshed)") == 0, "refreshed slot updated");
+
+    // Out-of-order arrival must not shift anything.
+    void* screenD = (void*)0x4000;
+    focus_set(screenD, 2, "third");
+    focus_set(screenD, 0, "first");
+    check(focus_label_at(screenD, 0, buf, sizeof buf) &&
+          strcmp(buf, "first") == 0, "out-of-order slot 0");
+    check(focus_label_at(screenD, 2, buf, sizeof buf) &&
+          strcmp(buf, "third") == 0, "out-of-order slot 2");
+    check(!focus_label_at(screenD, 1, buf, sizeof buf), "gap stays empty");
+
     printf("\nspeech debounce\n");
     char dir[MAX_PATH];
     GetModuleFileNameA(NULL, dir, MAX_PATH);

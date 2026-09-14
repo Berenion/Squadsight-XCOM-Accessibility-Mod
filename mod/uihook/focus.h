@@ -26,6 +26,14 @@ void focus_begin(void* obj);
 // Appends one label to `obj`'s current list.
 void focus_add(void* obj, const char* text);
 
+// Places a label at a specific slot, growing the list to fit.  Several of the
+// game's setters carry their own index --
+//     AS_SetCheckboxLabel(int Index, string strText)
+//     AS_AddListItem(int Id, string Desc, ...)
+// -- which is better than inferring order from arrival, because labels are
+// interleaved with other traffic and can be refreshed one at a time.
+void focus_set(void* obj, int index, const char* text);
+
 // Resolves an index against `obj`'s list.  Returns 0 if unknown.
 int  focus_label_at(void* obj, int index, char* out, size_t out_sz);
 

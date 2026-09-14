@@ -360,15 +360,43 @@ static void capture(const char* tag, LONG n, void* stack)
         logf_("[%ld] %s %s.%s  \"%s\"\n", n, tag, obj_name, fn_name, p.strings[i]);
 
     ULONGLONG now = GetTickCount64();
+    // Compare against the last call that actually carried text, not the last
+    // call of any kind.  Screens interleave their labels with other traffic --
+    //     AS_SetCheckboxLabel "Tutorial"
+    //     AS_SetCheckboxValue      (no text)
+    //     AS_SetCheckboxStyle      (no text)
+    //     AS_SetCheckboxLabel "Ironman"
+    // and treating those as a break started a new list per label, leaving one
+    // entry behind and resolving every index to the last thing seen.
     int continues_list = (object == g_last_obj) &&
                          (strcmp(fn_name, g_last_fn) == 0) &&
                          (now - g_last_at < LIST_WINDOW_MS);
 
-    if (p.nstrings) {
-        // A call carrying several strings is a screen publishing its contents;
-        // repeated single-string calls are the same thing spread out. Either
-        // way it is a list, and a list must not read itself aloud -- it is
-        // recorded so the next selection index can be resolved against it.
+    if (p.nstrings && p.nnumbers && p.numbers[0] >= 0 && p.numbers[0] < FOCUS_MAX_LABELS) {
+        // The call carries its own slot number, so place the label there
+        // rather than inferring order from arrival:
+        //     AS_SetCheckboxLabel(int Index, string strText)
+        //     AS_AddListItem(int Id, string Desc, ...)
+        // Refreshing one row no longer disturbs the rest of the list.
+        int idx = (int)p.numbers[0];
+        char joined[FOCUS_MAX_LABEL];
+        joined[0] = 0;
+        for (int i = 0; i < p.nstrings; i++) {
+            if (looks_like_asset(p.strings[i])) continue;
+            if (joined[0]) strcat_s(joined, sizeof joined, ", ");
+            strncat_s(joined, sizeof joined, p.strings[i], _TRUNCATE);
+        }
+        if (joined[0]) {
+            focus_set(object, idx, joined);
+            logf_("[%ld] %s %s.%s  SLOT %d = \"%s\"\n",
+                  n, tag, obj_name, fn_name, idx, joined);
+        }
+        speech_cancel_pending();
+    } else if (p.nstrings) {
+        // No index given. Several strings at once is a screen publishing its
+        // contents; repeated single-string calls are the same thing spread
+        // out. Either way it is a list, and a list must not read itself
+        // aloud -- it is recorded so a later index can be resolved.
         if (p.nstrings > 1) {
             focus_begin(object);
             for (int i = 0; i < p.nstrings; i++) focus_add(object, p.strings[i]);
@@ -381,11 +409,8 @@ static void capture(const char* tag, LONG n, void* stack)
             // Hold it briefly; a second call will cancel it.
             focus_begin(object);
             focus_add(object, p.strings[0]);
-            char speakable[MAX_STR];
-            speakable[0] = 0;
             if (!looks_like_asset(p.strings[0]))
-                strncpy_s(speakable, sizeof speakable, p.strings[0], _TRUNCATE);
-            if (*speakable) speech_say_after(speakable, SETTLE_MS);
+                speech_say_after(p.strings[0], SETTLE_MS);
         }
     } else if (p.nnumbers && focus_count(object) > 0) {
         // No text, just an index: this is the cursor moving. XCOM never
@@ -400,9 +425,11 @@ static void capture(const char* tag, LONG n, void* stack)
         }
     }
 
-    g_last_obj = object;
-    strncpy_s(g_last_fn, sizeof g_last_fn, fn_name, _TRUNCATE);
-    g_last_at = now;
+    if (p.nstrings) {
+        g_last_obj = object;
+        strncpy_s(g_last_fn, sizeof g_last_fn, fn_name, _TRUNCATE);
+        g_last_at = now;
+    }
 }
 
 // MinHook needs a distinct trampoline per target, so each native gets its own
