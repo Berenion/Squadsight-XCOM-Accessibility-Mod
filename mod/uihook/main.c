@@ -1,7 +1,8 @@
-// XCOM EU/EW accessibility prototype: capture UI text on its way to Scaleform.
+// XCOM EU/EW accessibility hook: capture UI text on its way to Scaleform and
+// speak it.
 //
 // All of the game's on-screen text reaches Flash through a small number of
-// natives.  They share a useful property: the text is a parameter of the
+// natives that share a useful property: the text is a parameter of the
 // *calling* UnrealScript function, already evaluated and sitting in
 // Stack.Locals by the time the native runs.
 //
@@ -11,8 +12,8 @@
 //           simulated function AS_SetText(string DisplayText)
 //           { manager.ActionScriptVoid(string(GetMCPath()) $ ".SetText"); }
 //
-//   UI_FxsPanel.Invoke               -- the remaining 15%.  Arguments here
-//       are explicit ASValues, but the strings they are built from are still
+//   UI_FxsPanel.Invoke               -- the remaining 15%.  Its arguments are
+//       explicit ASValues, but the strings they are built from are still
 //       locals of the caller:
 //
 //           function SetShotChance(string Label, string Desc)
@@ -21,6 +22,10 @@
 // So one capture routine serves every target: read Stack.Locals, never
 // Stack.Code.  Re-stepping the bytecode would re-evaluate argument
 // expressions and double any side effects they carry; reading locals cannot.
+//
+// Parameters are located by walking the caller's UProperty chain -- the same
+// walk the engine's own ActionScript marshaller performs -- so each value is
+// read at its declared offset and reported with its declared name.
 
 #include <windows.h>
 #include <stdio.h>
@@ -32,20 +37,25 @@
 
 #include "ue3.h"
 #include "natives.h"
+#include "names.h"
+#include "speech.h"
 #include "../../tools/vendor/MinHook/include/MinHook.h"
 
-#define MAX_NATIVES   8192
-#define LOCALS_WINDOW 0x120   // bytes of the caller frame to sweep for FStrings
-#define MAX_STR       4096
+#define MAX_NATIVES 8192
+#define MAX_STR     4096
+#define MAX_PARAMS  32
 
 static FILE*            g_log;
 static CRITICAL_SECTION g_lock;
 static volatile LONG    g_calls;
+static int              g_speak = 1;
 
 // Consecutive duplicates are collapsed: the UI re-sends the same string on
-// every refresh, which would otherwise bury the interesting transitions.
-static char g_last[MAX_STR + 128];
+// every refresh, which would otherwise bury the interesting transitions --
+// and, more importantly, would make the speech unusable.
+static char g_last[MAX_STR + 256];
 static long g_repeat;
+static char g_last_spoken[MAX_STR];
 
 static void emit(const char* line)
 {
@@ -58,7 +68,7 @@ static void emit(const char* line)
 static void logf_(const char* fmt, ...)
 {
     if (!g_log) return;
-    char line[MAX_STR + 128];
+    char line[MAX_STR + 256];
     va_list ap;
     va_start(ap, fmt);
     _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
@@ -83,8 +93,8 @@ static void logf_(const char* fmt, ...)
 
 // A pointer is only dereferenced after VirtualQuery says the whole range is
 // committed and readable -- this runs on the game's own UI thread and a stray
-// read would take the process down with it.
-static int readable(const void* p, size_t n)
+// read would take the process down with it.  Non-static: names.c uses it too.
+int readable(const void* p, size_t n)
 {
     if (!p) return 0;
     MEMORY_BASIC_INFORMATION mbi;
@@ -104,28 +114,50 @@ static int readable(const void* p, size_t n)
     return 1;
 }
 
-// Does this look like a live UE3 FString?  Num counts the terminating NUL.
-// The caller validates the whole locals window, so the triple itself is safe
-// to read; only Data needs a check, and only after the cheap tests pass.
-static int looks_like_fstring(const FString* s, char* out, size_t out_sz)
+// Reads an FString at a known-good address.  Num counts the terminating NUL.
+static int read_fstring(const FString* s, char* out, size_t out_sz)
 {
+    if (!readable(s, sizeof *s)) return 0;
     if (s->Num < 2 || s->Num > MAX_STR) return 0;
     if (s->Max < s->Num) return 0;
     if (!readable(s->Data, (size_t)s->Num * sizeof(wchar_t))) return 0;
     if (s->Data[s->Num - 1] != 0) return 0;
-
-    for (int i = 0; i < s->Num - 1; i++) {
-        wchar_t c = s->Data[i];
-        // Reject control-character soup; real UI text is printable.
-        if (c == 0) return 0;
-        if (c < 32 && c != '\n' && c != '\t' && c != '\r') return 0;
-    }
 
     int n = WideCharToMultiByte(CP_UTF8, 0, s->Data, s->Num - 1,
                                 out, (int)out_sz - 1, NULL, NULL);
     if (n <= 0) return 0;
     out[n] = 0;
     return 1;
+}
+
+// Flash markup leaks into a lot of these strings; a screen reader should not
+// read tags aloud.
+static void strip_markup(char* s)
+{
+    char* w = s;
+    int depth = 0;
+    for (char* r = s; *r; r++) {
+        if (*r == '<') { depth++; continue; }
+        if (*r == '>') { if (depth) depth--; continue; }
+        if (!depth) *w++ = *r;
+    }
+    *w = 0;
+
+    // Collapse runs of whitespace left behind by the removed tags.
+    char* out = s;
+    int space = 0;
+    for (char* r = s; *r; r++) {
+        unsigned char c = (unsigned char)*r;
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            if (!space && out != s) *out++ = ' ';
+            space = 1;
+        } else {
+            *out++ = (char)c;
+            space = 0;
+        }
+    }
+    while (out > s && out[-1] == ' ') out--;
+    *out = 0;
 }
 
 static void capture(const char* tag, LONG n, void* stack)
@@ -139,23 +171,70 @@ static void capture(const char* tag, LONG n, void* stack)
     void* object    = *(void**)((uint8_t*)stack + FFRAME_OBJECT);
     uint8_t* locals = *(uint8_t**)((uint8_t*)stack + FFRAME_LOCALS);
 
-    char buf[MAX_STR];
-    int found = 0;
-    if (readable(locals, LOCALS_WINDOW)) {
-        // Parameters sit at 4-byte-aligned property offsets, so sweep the
-        // frame for anything shaped like an FString.
-        for (size_t off = 0; off + sizeof(FString) <= LOCALS_WINDOW; off += 4) {
+    char fn_name[128] = "?", obj_name[128] = "?";
+    object_name(node, fn_name, sizeof fn_name);
+    object_name(object, obj_name, sizeof obj_name);
+
+    // Walk the caller's declared parameters, exactly as the engine's own
+    // ActionScript marshaller does: Children -> Next, keeping CPF_Parm
+    // entries that are not the return value, and reading each at its
+    // declared offset into the frame.
+    char utterance[MAX_STR];
+    utterance[0] = 0;
+    int spoken_len = 0, shown = 0;
+
+    void* prop = NULL;
+    if (readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
+        prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
+
+    for (int guard = 0; prop && guard < MAX_PARAMS; guard++) {
+        if (!readable(prop, 0x68)) break;
+
+        uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
+        uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
+        void* next     = *(void**)((uint8_t*)prop + UFIELD_NEXT);
+
+        if ((flags & (CPF_PARM | CPF_RETURNPARM)) == CPF_PARM && locals) {
+            char val[MAX_STR];
             const FString* s = (const FString*)(locals + off);
-            if (looks_like_fstring(s, buf, sizeof buf)) {
-                logf_("[%ld] %s node=%p obj=%p +%03zu \"%s\"\n",
-                      n, tag, node, object, off, buf);
-                found++;
-                off += sizeof(FString) - 4;   // do not re-match inside it
+            if (read_fstring(s, val, sizeof val)) {
+                strip_markup(val);
+                if (*val) {
+                    char pname[128] = "?";
+                    object_name(prop, pname, sizeof pname);
+                    logf_("[%ld] %s %s.%s  %s=\"%s\"\n",
+                          n, tag, obj_name, fn_name, pname, val);
+                    shown++;
+                    // Several parameters can make up one announcement (a
+                    // label and its description), so join rather than speak
+                    // each separately.
+                    int len = (int)strlen(val);
+                    if (spoken_len + len + 2 < MAX_STR) {
+                        if (spoken_len) {
+                            strcat_s(utterance, MAX_STR, ". ");
+                            spoken_len += 2;
+                        }
+                        strcat_s(utterance, MAX_STR, val);
+                        spoken_len += len;
+                    }
+                }
             }
         }
+        prop = next;
     }
-    if (!found)
-        logf_("[%ld] %s node=%p obj=%p (no string params)\n", n, tag, node, object);
+
+    if (!shown) {
+        logf_("[%ld] %s %s.%s (no string params)\n", n, tag, obj_name, fn_name);
+        return;
+    }
+
+    if (g_speak && spoken_len) {
+        EnterCriticalSection(&g_lock);
+        int same = (strcmp(utterance, g_last_spoken) == 0);
+        if (!same) strcpy_s(g_last_spoken, sizeof g_last_spoken, utterance);
+        LeaveCriticalSection(&g_lock);
+        if (!same) speech_say(utterance);
+    }
 }
 
 // MinHook needs a distinct trampoline per target, so each native gets its own
@@ -196,6 +275,8 @@ static int arm(const NativeEntry* tbl, int n, HMODULE mod,
     return 1;
 }
 
+static HINSTANCE g_self;
+
 static DWORD WINAPI init(LPVOID param)
 {
     (void)param;
@@ -213,11 +294,24 @@ static DWORD WINAPI init(LPVOID param)
     HMODULE mod = GetModuleHandleA(NULL);
     logf_("xcom_uihook: module base %p\n", (void*)mod);
 
+    char why[256];
+    if (names_init(mod, why, sizeof why))
+        logf_("names: %s\n", why);
+    else
+        logf_("names: UNAVAILABLE (%s) -- falling back to raw pointers\n", why);
+
+    char dll_dir[MAX_PATH];
+    GetModuleFileNameA(g_self, dll_dir, MAX_PATH);
+    slash = strrchr(dll_dir, '\\');
+    if (slash) *(slash + 1) = 0;
+    speech_init(dll_dir, why, sizeof why);
+    logf_("speech: %s\n", why);
+
     NativeEntry* tbl = (NativeEntry*)malloc(sizeof(NativeEntry) * MAX_NATIVES);
     if (!tbl) { logf_("FATAL: out of memory\n"); return 1; }
 
     int n = natives_scan(mod, tbl, MAX_NATIVES);
-    logf_("xcom_uihook: %d natives discovered\n", n);
+    logf_("natives: %d discovered\n", n);
     if (n == 0) {
         logf_("FATAL: native table not found -- unexpected build?\n");
         free(tbl);
@@ -241,8 +335,7 @@ static DWORD WINAPI init(LPVOID param)
     free(tbl);
     if (!armed) { logf_("FATAL: nothing armed\n"); return 1; }
 
-    logf_("xcom_uihook: %d/3 hooks armed -- navigate the UI to produce traffic\n---\n",
-          armed);
+    logf_("%d/3 hooks armed -- navigate the UI to produce traffic\n---\n", armed);
     return 0;
 }
 
@@ -250,6 +343,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
+        g_self = inst;
         DisableThreadLibraryCalls(inst);
         CreateThread(NULL, 0, init, NULL, 0, NULL);   // stay off the loader lock
     }

@@ -14,7 +14,8 @@
 #include "natives.h"
 #include <string.h>
 
-static int section_of(HMODULE mod, const char* want, uint8_t** base, size_t* size)
+// Shared with names.c, which scans .data for the name table.
+int module_section(HMODULE mod, const char* want, uint8_t** base, size_t* size)
 {
     uint8_t* m = (uint8_t*)mod;
     IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)m;
@@ -64,9 +65,9 @@ int natives_scan(HMODULE mod, NativeEntry* out, int max)
 {
     uint8_t *data, *text, *rdata;
     size_t data_sz, text_sz, rdata_sz;
-    if (!section_of(mod, ".data", &data, &data_sz)) return 0;
-    if (!section_of(mod, ".text", &text, &text_sz)) return 0;
-    if (!section_of(mod, ".rdata", &rdata, &rdata_sz)) return 0;
+    if (!module_section(mod, ".data", &data, &data_sz)) return 0;
+    if (!module_section(mod, ".text", &text, &text_sz)) return 0;
+    if (!module_section(mod, ".rdata", &rdata, &rdata_sz)) return 0;
 
     int n = 0;
     // Entries are 8 bytes but are not guaranteed 8-byte aligned, so step by 4.
