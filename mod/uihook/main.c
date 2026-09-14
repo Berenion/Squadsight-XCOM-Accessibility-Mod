@@ -45,6 +45,7 @@
 #include "natives.h"
 #include "names.h"
 #include "speech.h"
+#include "focus.h"
 #include "../../tools/vendor/MinHook/include/MinHook.h"
 
 #define MAX_NATIVES 8192
@@ -212,63 +213,98 @@ static int looks_like_asset(const char* s)
     return dot;
 }
 
-typedef struct {
-    char  text[MAX_STR];
-    int   len;
-} Utterance;
 
-static void utter_add(Utterance* u, const char* s)
+// UnrealScript's ASValue is a 24-byte { int Type; int B; float N; FString S },
+// which the observed array offsets confirm: the main menu's labels landed at
+// byte 12, 36, 60, 84, 108 -- stride 24, string at +12.  Type at +0 says which
+// member is live (2 = AS_Number, 3 = AS_String), so these arrays are parsed
+// rather than swept, and a selection index is as readable as a label.
+#define ASVALUE_STRIDE 24
+#define ASVALUE_TYPE   0
+#define ASVALUE_N      8
+#define ASVALUE_S      12
+
+#define AS_NUMBER 2
+#define AS_STRING 3
+
+typedef struct {
+    char  strings[FOCUS_MAX_LABELS][FOCUS_MAX_LABEL];
+    int   nstrings;
+    float numbers[8];
+    int   nnumbers;
+} Payload;
+
+static void payload_add_string(Payload* p, const char* s)
 {
-    int len = (int)strlen(s);
-    if (u->len + len + 2 >= MAX_STR) return;
-    if (looks_like_asset(s)) return;
-    // The same text often arrives twice in one call -- once as a parameter
-    // and again inside the ASValue array built from it.  Saying "Load Game.
-    // Load Game" is worse than useless.
-    if (u->len && strstr(u->text, s)) return;
-    if (u->len) { strcat_s(u->text, MAX_STR, ". "); u->len += 2; }
-    strcat_s(u->text, MAX_STR, s);
-    u->len += len;
+    if (p->nstrings >= FOCUS_MAX_LABELS) return;
+    strncpy_s(p->strings[p->nstrings], FOCUS_MAX_LABEL, s, _TRUNCATE);
+    p->nstrings++;
 }
 
-// A property holding a TArray needs its elements inspected too: the Invoke
-// path passes text as a TArray<ASValue>, so the strings live one level down.
-// The element stride is not known here, so the array's own memory is swept at
-// pointer alignment -- bounded by the array, which makes this far tighter
-// than sweeping a whole stack frame.
-static int scan_array(const FArray* a, const char* tag, LONG n,
-                      const char* obj_name, const char* fn_name,
-                      const char* kind, const char* pname, Utterance* u)
+static void payload_add_number(Payload* p, float v)
 {
-    if (!readable(a, sizeof *a)) return 0;
-    if (a->Num < 1 || a->Num > 1024) return 0;
-    if (a->Max < a->Num) return 0;
+    if (p->nnumbers >= 8) return;
+    p->numbers[p->nnumbers++] = v;
+}
 
-    // Cap the region so a bogus Num cannot walk us off into nowhere.
-    int elems = a->Num > MAX_ELEMS ? MAX_ELEMS : a->Num;
-    size_t span = (size_t)elems * 64;
-    if (!readable(a->Data, span)) {
-        span = (size_t)elems * 16;
-        if (!readable(a->Data, span)) return 0;
+// Reads a TArray as ASValues when it looks like one, falling back to a sweep
+// for plain TArray<string>.
+static void read_array(const FArray* a, Payload* out)
+{
+    if (!readable(a, sizeof *a)) return;
+    if (a->Num < 1 || a->Num > 4096) return;
+    if (a->Max < a->Num) return;
+
+    int elems = a->Num > FOCUS_MAX_LABELS ? FOCUS_MAX_LABELS : a->Num;
+    const uint8_t* base = (const uint8_t*)a->Data;
+
+    if (readable(base, (size_t)elems * ASVALUE_STRIDE)) {
+        int typed = 0;
+        for (int i = 0; i < elems; i++) {
+            int32_t ty = *(const int32_t*)(base + (size_t)i * ASVALUE_STRIDE + ASVALUE_TYPE);
+            if (ty >= 0 && ty <= 4) typed++;
+        }
+        // Every element carrying a valid ASType is strong evidence; a random
+        // struct array will not satisfy it.
+        if (typed == elems) {
+            char val[MAX_STR];
+            for (int i = 0; i < elems; i++) {
+                const uint8_t* e = base + (size_t)i * ASVALUE_STRIDE;
+                int32_t ty = *(const int32_t*)(e + ASVALUE_TYPE);
+                if (ty == AS_STRING) {
+                    if (read_fstring((const FString*)(e + ASVALUE_S), val, sizeof val)) {
+                        strip_markup(val);
+                        if (*val) payload_add_string(out, val);
+                    }
+                } else if (ty == AS_NUMBER) {
+                    payload_add_number(out, *(const float*)(e + ASVALUE_N));
+                }
+            }
+            return;
+        }
     }
 
-    int found = 0;
-    const uint8_t* base = (const uint8_t*)a->Data;
+    // Not an ASValue array: sweep for FStrings inside the array's own memory.
+    size_t span = (size_t)elems * 16;
+    if (!readable(base, span)) return;
+    char val[MAX_STR];
     for (size_t off = 0; off + sizeof(FString) <= span; off += 4) {
-        char val[MAX_STR];
         if (read_fstring((const FString*)(base + off), val, sizeof val)) {
             strip_markup(val);
-            if (*val) {
-                logf_("[%ld] %s %s.%s  %s %s[%zu]=\"%s\"\n",
-                      n, tag, obj_name, fn_name, kind, pname, off / 4, val);
-                utter_add(u, val);
-                found++;
-            }
+            if (*val) payload_add_string(out, val);
             off += sizeof(FString) - 4;
         }
     }
-    return found;
 }
+
+// Remembers which (object, function) last spoke, so that a screen publishing
+// one row per call can be told apart from a genuine announcement.
+static void*     g_last_obj;
+static char      g_last_fn[128];
+static ULONGLONG g_last_at;
+
+#define LIST_WINDOW_MS 400   // repeats closer than this are one list
+#define SETTLE_MS      250   // how long a lone line waits to see if more follow
 
 static void capture(const char* tag, LONG n, void* stack)
 {
@@ -285,10 +321,9 @@ static void capture(const char* tag, LONG n, void* stack)
     object_name(node, fn_name, sizeof fn_name);
     object_name(object, obj_name, sizeof obj_name);
 
-    Utterance u;
-    u.text[0] = 0;
-    u.len = 0;
-    int shown = 0;
+    Payload p;
+    p.nstrings = 0;
+    p.nnumbers = 0;
 
     void* prop = NULL;
     if (readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
@@ -302,43 +337,72 @@ static void capture(const char* tag, LONG n, void* stack)
         void* next     = *(void**)((uint8_t*)prop + UFIELD_NEXT);
 
         // Locals count as much as parameters: UIFinalShell.SetText takes no
-        // arguments and builds the whole main menu out of locals.  Only the
-        // return slot is uninteresting.
+        // arguments and builds the whole main menu out of locals.
         if (locals && (flags & CPF_RETURNPARM) == 0 && off < 0x1000) {
-            const char* kind = (flags & CPF_PARM) ? "arg" : "local";
-            char pname[128] = "?";
-            object_name(prop, pname, sizeof pname);
-
-            char val[MAX_STR];
             const void* slot = locals + off;
+            char val[MAX_STR];
             if (read_fstring((const FString*)slot, val, sizeof val)) {
                 strip_markup(val);
-                if (*val) {
-                    logf_("[%ld] %s %s.%s  %s %s=\"%s\"\n",
-                          n, tag, obj_name, fn_name, kind, pname, val);
-                    utter_add(&u, val);
-                    shown++;
-                }
+                if (*val) payload_add_string(&p, val);
             } else {
-                shown += scan_array((const FArray*)slot, tag, n,
-                                    obj_name, fn_name, kind, pname, &u);
+                read_array((const FArray*)slot, &p);
             }
         }
         prop = next;
     }
 
-    if (!shown) {
+    if (!p.nstrings && !p.nnumbers) {
         logf_("[%ld] %s %s.%s (no text)\n", n, tag, obj_name, fn_name);
         return;
     }
 
-    if (g_speak && u.len) {
-        EnterCriticalSection(&g_lock);
-        int same = (strcmp(u.text, g_last_spoken) == 0);
-        if (!same) strcpy_s(g_last_spoken, sizeof g_last_spoken, u.text);
-        LeaveCriticalSection(&g_lock);
-        if (!same) speech_say(u.text);
+    for (int i = 0; i < p.nstrings; i++)
+        logf_("[%ld] %s %s.%s  \"%s\"\n", n, tag, obj_name, fn_name, p.strings[i]);
+
+    ULONGLONG now = GetTickCount64();
+    int continues_list = (object == g_last_obj) &&
+                         (strcmp(fn_name, g_last_fn) == 0) &&
+                         (now - g_last_at < LIST_WINDOW_MS);
+
+    if (p.nstrings) {
+        // A call carrying several strings is a screen publishing its contents;
+        // repeated single-string calls are the same thing spread out. Either
+        // way it is a list, and a list must not read itself aloud -- it is
+        // recorded so the next selection index can be resolved against it.
+        if (p.nstrings > 1) {
+            focus_begin(object);
+            for (int i = 0; i < p.nstrings; i++) focus_add(object, p.strings[i]);
+            speech_cancel_pending();
+        } else if (continues_list) {
+            focus_add(object, p.strings[0]);
+            speech_cancel_pending();
+        } else {
+            // Might be an announcement, might be the first row of a list.
+            // Hold it briefly; a second call will cancel it.
+            focus_begin(object);
+            focus_add(object, p.strings[0]);
+            char speakable[MAX_STR];
+            speakable[0] = 0;
+            if (!looks_like_asset(p.strings[0]))
+                strncpy_s(speakable, sizeof speakable, p.strings[0], _TRUNCATE);
+            if (*speakable) speech_say_after(speakable, SETTLE_MS);
+        }
+    } else if (p.nnumbers && focus_count(object) > 0) {
+        // No text, just an index: this is the cursor moving. XCOM never
+        // re-sends the label, so resolve it from what the screen published.
+        int idx = (int)p.numbers[0];
+        char label[FOCUS_MAX_LABEL];
+        if (focus_label_at(object, idx, label, sizeof label)) {
+            logf_("[%ld] %s %s.%s  FOCUS %d -> \"%s\"\n",
+                  n, tag, obj_name, fn_name, idx, label);
+            speech_cancel_pending();
+            if (g_speak) speech_say(label);
+        }
     }
+
+    g_last_obj = object;
+    strncpy_s(g_last_fn, sizeof g_last_fn, fn_name, _TRUNCATE);
+    g_last_at = now;
 }
 
 // MinHook needs a distinct trampoline per target, so each native gets its own

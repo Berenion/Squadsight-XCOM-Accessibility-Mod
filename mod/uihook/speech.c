@@ -51,6 +51,12 @@ static HANDLE        g_thread;
 static volatile LONG g_stop;
 static volatile LONG g_dropped;
 
+// A single utterance held back briefly.  Screens that publish one item per
+// call look identical to a real announcement until the *second* call arrives,
+// so the first is delayed just long enough to find out which it was.
+static wchar_t  g_pending[MAX_UTTER];
+static ULONGLONG g_pending_due;
+
 static void speak_now(const wchar_t* text, int interrupt)
 {
     if (g_tolk_output) {
@@ -86,7 +92,21 @@ static DWORD WINAPI worker(LPVOID param)
     }
 
     while (!g_stop) {
-        WaitForSingleObject(g_wake, 250);
+        WaitForSingleObject(g_wake, 50);
+
+        EnterCriticalSection(&g_qlock);
+        if (g_pending_due && GetTickCount64() >= g_pending_due) {
+            int next = (g_head + 1) % QUEUE_SIZE;
+            if (next == g_tail) {
+                g_tail = (g_tail + 1) % QUEUE_SIZE;
+                InterlockedIncrement(&g_dropped);
+            }
+            wcscpy_s(g_queue[g_head], MAX_UTTER, g_pending);
+            g_head = next;
+            g_pending_due = 0;
+        }
+        LeaveCriticalSection(&g_qlock);
+
         for (;;) {
             wchar_t line[MAX_UTTER];
             EnterCriticalSection(&g_qlock);
@@ -240,6 +260,26 @@ void speech_say(const char* utf8)
     g_head = next;
     LeaveCriticalSection(&g_qlock);
     SetEvent(g_wake);
+}
+
+void speech_say_after(const char* utf8, unsigned delay_ms)
+{
+    if (!g_thread || !utf8 || !*utf8) return;
+    wchar_t wide[MAX_UTTER];
+    if (MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, MAX_UTTER) <= 0) return;
+
+    EnterCriticalSection(&g_qlock);
+    wcscpy_s(g_pending, MAX_UTTER, wide);
+    g_pending_due = GetTickCount64() + delay_ms;
+    LeaveCriticalSection(&g_qlock);
+}
+
+void speech_cancel_pending(void)
+{
+    if (!g_thread) return;
+    EnterCriticalSection(&g_qlock);
+    g_pending_due = 0;
+    LeaveCriticalSection(&g_qlock);
 }
 
 long speech_dropped(void) { return g_dropped; }
