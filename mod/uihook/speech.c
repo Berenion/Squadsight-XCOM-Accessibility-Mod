@@ -82,17 +82,68 @@ static DWORD WINAPI worker(LPVOID param)
     return 0;
 }
 
+// Tolk and its screen-reader client DLLs must match the *host process*, and
+// XCOM is 32-bit.  A 64-bit Tolk.dll fails LoadLibrary with
+// ERROR_BAD_EXE_FORMAT, which is worth saying out loud rather than reporting
+// as "not found" -- the person who needs this message may not be able to see
+// the file they just copied.
+static HMODULE try_load_tolk(const char* path, char* why, size_t why_sz)
+{
+    HMODULE h = LoadLibraryA(path);
+    if (h) return h;
+
+    DWORD err = GetLastError();
+    if (err == ERROR_BAD_EXE_FORMAT) {
+        _snprintf_s(why, why_sz, _TRUNCATE,
+                    "Tolk.dll at %s is 64-bit; XCOM is a 32-bit process and "
+                    "needs the x86 Tolk.dll plus nvdaControllerClient32.dll",
+                    path);
+    } else if (err != ERROR_MOD_NOT_FOUND && err != ERROR_FILE_NOT_FOUND) {
+        _snprintf_s(why, why_sz, _TRUNCATE,
+                    "Tolk.dll at %s failed to load (error %lu)", path, err);
+    }
+    return NULL;
+}
+
 int speech_init(const char* dll_dir, char* why, size_t why_sz)
 {
     InitializeCriticalSection(&g_qlock);
     g_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
 
-    // Tolk is optional: if the player drops Tolk.dll next to this DLL we use
-    // their real screen reader instead of the generic SAPI voice.
-    char tolk_path[MAX_PATH];
-    _snprintf_s(tolk_path, sizeof tolk_path, _TRUNCATE, "%sTolk.dll", dll_dir);
-    g_tolk = LoadLibraryA(tolk_path);
-    if (!g_tolk) g_tolk = LoadLibraryA("Tolk.dll");
+    // Tolk is optional: with it we drive the player's real screen reader,
+    // without it we fall back to the SAPI voice built into Windows.  Look
+    // beside this DLL, then one directory up (a build/ layout puts the DLL
+    // below where people naturally drop things), then the default search path.
+    char detail[256];
+    detail[0] = 0;
+
+    char path[MAX_PATH];
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%sTolk.dll", dll_dir);
+    g_tolk = try_load_tolk(path, detail, sizeof detail);
+
+    if (!g_tolk) {
+        char parent[MAX_PATH];
+        strcpy_s(parent, sizeof parent, dll_dir);
+        size_t len = strlen(parent);
+        if (len > 1) {
+            parent[len - 1] = 0;                        // drop trailing slash
+            char* slash = strrchr(parent, '\\');
+            if (slash) {
+                *(slash + 1) = 0;
+                _snprintf_s(path, sizeof path, _TRUNCATE, "%sTolk.dll", parent);
+                char more[256];
+                more[0] = 0;
+                g_tolk = try_load_tolk(path, more, sizeof more);
+                if (!detail[0] && more[0]) strcpy_s(detail, sizeof detail, more);
+            }
+        }
+    }
+    if (!g_tolk) {
+        char more[256];
+        more[0] = 0;
+        g_tolk = try_load_tolk("Tolk.dll", more, sizeof more);
+        if (!detail[0] && more[0]) strcpy_s(detail, sizeof detail, more);
+    }
 
     if (g_tolk) {
         TolkLoadFn load = (TolkLoadFn)GetProcAddress(g_tolk, "Tolk_Load");
@@ -103,10 +154,13 @@ int speech_init(const char* dll_dir, char* why, size_t why_sz)
             _snprintf_s(why, why_sz, _TRUNCATE, "Tolk (screen reader bridge)");
         } else {
             g_tolk_output = NULL;
-            _snprintf_s(why, why_sz, _TRUNCATE, "Tolk.dll present but unusable; using SAPI");
+            _snprintf_s(why, why_sz, _TRUNCATE,
+                        "Tolk.dll loaded but lacks Tolk_Load/Tolk_Output; using SAPI");
         }
+    } else if (detail[0]) {
+        _snprintf_s(why, why_sz, _TRUNCATE, "SAPI -- %s", detail);
     } else {
-        _snprintf_s(why, why_sz, _TRUNCATE, "SAPI (no Tolk.dll found)");
+        _snprintf_s(why, why_sz, _TRUNCATE, "SAPI (no Tolk.dll on the search path)");
     }
 
     g_thread = CreateThread(NULL, 0, worker, NULL, 0, NULL);
