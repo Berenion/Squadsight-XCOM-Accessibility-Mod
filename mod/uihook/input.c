@@ -6,12 +6,14 @@
 // UI_FxsInput constants, by name so the table below reads as the game's own.
 #define FXS_BUTTON_X        302
 #define FXS_BUTTON_Y        303
+#define FXS_BUTTON_START    321
 #define FXS_BUTTON_LBUMPER  330
 #define FXS_BUTTON_RBUMPER  331
 
 #define FXS_KEY_TAB         571
 #define FXS_KEY_1           612
 #define FXS_KEY_2           613
+#define FXS_KEY_3           614
 
 typedef struct {
     const char* screen;   // matched by prefix; the game appends _0, _1, ...
@@ -43,6 +45,20 @@ static const Remap g_remaps[] = {
     { "UIShellDifficulty", FXS_KEY_1,   FXS_BUTTON_X       },
     { "UIShellDifficulty", FXS_KEY_2,   FXS_BUTTON_Y       },
 
+    // Starting the game is behind Start, which no keyboard has.  EW moved it
+    // there: EU confirms on `case 300: case 511: OnDifficultyConfirm()`, and
+    // EW's switch has neither, only `case 321`.  So on EW the difficulty
+    // screen could be read and set and never left -- Enter and Space are
+    // taken by the checkbox under the cursor (OnUnrealCommand_Checkbox calls
+    // ToggleCheckbox for 300, 511 and 513, and the widget helper gets the
+    // command first), and the only other way through is clicking the help
+    // bar with the mouse.
+    //
+    // Harmless on EU, where 321 matches no case at all and 3 does nothing
+    // either way, so the table stays one list rather than growing a build
+    // column for a single row.
+    { "UIShellDifficulty", FXS_KEY_3,   FXS_BUTTON_START   },
+
     // Every options tab after the first is behind the bumpers.  Tab cycles
     // forward and wraps, and is already proven to arrive; 1 goes back.
     { "UIOptionsPCScreen", FXS_KEY_TAB, FXS_BUTTON_RBUMPER },
@@ -73,11 +89,13 @@ const char* input_cmd_name(int cmd)
     switch (cmd) {
         case FXS_BUTTON_X:       return "X";
         case FXS_BUTTON_Y:       return "Y";
+        case FXS_BUTTON_START:   return "Start";
         case FXS_BUTTON_LBUMPER: return "LB";
         case FXS_BUTTON_RBUMPER: return "RB";
         case FXS_KEY_TAB:        return "Tab";
         case FXS_KEY_1:          return "1";
         case FXS_KEY_2:          return "2";
+        case FXS_KEY_3:          return "3";
         default:                 return NULL;
     }
 }

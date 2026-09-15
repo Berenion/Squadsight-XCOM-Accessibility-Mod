@@ -6,14 +6,16 @@
 // Three screens in the shell put real functionality behind a controller
 // button and never provided a keyboard equivalent:
 //
-//     UIShellDifficulty     case 302 (X)  -> OnToggleAdvancedOptions()
-//                           case 303 (Y)  -> OnShowGameplayToggles()
-//     UIOptionsPCScreen     case 330 (LB) -> previous tab
-//                           case 331 (RB) -> next tab
-//                           case 302 (X)  -> SaveAndExit()
+//     UIShellDifficulty     case 302 (X)     -> OnToggleAdvancedOptions()
+//                           case 303 (Y)     -> OnShowGameplayToggles()
+//                           case 321 (Start) -> OnDifficultyConfirm()   (EW)
+//     UIOptionsPCScreen     case 330 (LB)    -> previous tab
+//                           case 331 (RB)    -> next tab
+//                           case 302 (X)     -> SaveAndExit()
 //
 // so Ironman, the tutorial toggle, Second Wave, every options tab past the
-// first and saving the options at all are unreachable without a controller.  That the omission is an
+// first, saving the options at all, and on EW starting the game once the
+// difficulty is chosen, are unreachable without a controller.  That the omission is an
 // oversight rather than a policy is visible two cases further down the same
 // switch, where cancel is bound to both the B button and Escape.
 //

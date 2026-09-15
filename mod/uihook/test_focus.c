@@ -240,6 +240,12 @@ int main(void)
           "1 opens advanced options");
     check(input_remap("UIShellDifficulty_0", 613) == 303,
           "2 opens Second Wave");
+    // EW confirms the difficulty on Start alone; Enter and Space belong to
+    // the checkbox under the cursor, so the screen had no keyboard way out.
+    check(input_remap("UIShellDifficulty_0", 614) == 321,
+          "3 starts the game");
+    check(input_remap("UIOptionsPCScreen_0", 614) == 0,
+          "3 is free elsewhere");
     check(input_remap("UIOptionsPCScreen_0", 571) == 331, "Tab is next tab");
     check(input_remap("UIOptionsPCScreen_0", 612) == 330, "1 is previous tab");
     // Escape only ever discards: saving lives on X and nowhere else.
