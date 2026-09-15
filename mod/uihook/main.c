@@ -937,6 +937,13 @@ static DWORD WINAPI init(LPVOID param)
     logf_("%d/3 text hooks armed, key remap %s"
           " -- navigate the UI to produce traffic\n---\n",
           armed, input_armed ? "on" : "OFF");
+
+    // Said aloud, because the log is the one part of this mod its user cannot
+    // read.  Now that the launcher attaches during startup rather than on
+    // request, this is the only sign that anything happened at all.
+    speech_say(armed == 3 && input_armed
+               ? "Accessibility mod ready."
+               : "Accessibility mod loaded with errors. Check the log.");
     return 0;
 }
 

@@ -21,8 +21,19 @@ cl /nologo /W3 /O2 /MT /LD ^
    /link /OUT:xcom_uihook.dll ole32.lib oleaut32.lib sapi.lib
 if errorlevel 1 (popd & echo DLL BUILD FAILED & exit /b 1)
 
-cl /nologo /W3 /O2 /MT "%HERE%inject.c" /Fe:inject.exe
+cl /nologo /W3 /O2 /MT "%HERE%inject.c" "%HERE%injector.c" /Fe:inject.exe /link user32.lib
 if errorlevel 1 (popd & echo INJECTOR BUILD FAILED & exit /b 1)
+
+rem The launcher is a GUI app so that no console window steals focus from the
+rem game, and its dialog comes from a compiled resource rather than from code.
+rem NB: %HERE% ends in a backslash, which would escape the closing quote.
+rc /nologo /fo launcher.res /i "%HERE:~0,-1%" "%HERE%launcher.rc"
+if errorlevel 1 (popd & echo RESOURCE BUILD FAILED & exit /b 1)
+
+cl /nologo /W3 /O2 /MT "%HERE%launcher.c" "%HERE%gamepaths.c" "%HERE%injector.c" ^
+   launcher.res /Fe:launcher.exe ^
+   /link /SUBSYSTEM:WINDOWS user32.lib advapi32.lib shlwapi.lib
+if errorlevel 1 (popd & echo LAUNCHER BUILD FAILED & exit /b 1)
 
 cl /nologo /W3 /O2 /MT "%HERE%test_natives.c" "%HERE%natives.c" /Fe:test_natives.exe
 if errorlevel 1 (popd & echo TEST BUILD FAILED & exit /b 1)
@@ -33,7 +44,12 @@ if errorlevel 1 (popd & echo SPEECH TEST BUILD FAILED & exit /b 1)
 cl /nologo /W3 /O2 /MT "%HERE%test_focus.c" "%HERE%focus.c" "%HERE%speech.c" "%HERE%input.c" /Fe:test_focus.exe /link ole32.lib oleaut32.lib sapi.lib
 if errorlevel 1 (popd & echo FOCUS TEST BUILD FAILED & exit /b 1)
 
+cl /nologo /W3 /O2 /MT "%HERE%test_paths.c" "%HERE%gamepaths.c" /Fe:test_paths.exe ^
+   /link advapi32.lib shlwapi.lib
+if errorlevel 1 (popd & echo PATHS TEST BUILD FAILED & exit /b 1)
+
 popd
 echo.
-echo Built: %OUT%\xcom_uihook.dll
+echo Built: %OUT%\launcher.exe   (start here)
+echo        %OUT%\xcom_uihook.dll
 echo        %OUT%\inject.exe

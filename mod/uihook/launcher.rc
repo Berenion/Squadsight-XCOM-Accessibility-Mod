@@ -1,0 +1,17 @@
+#include <windows.h>
+#include "resource.h"
+
+// A real dialog resource rather than a hand-built window: the #32770 class is
+// what makes a screen reader announce this as a dialog, read the prompt on
+// open, and then track the focused button as Tab and the arrow keys move.
+IDD_LAUNCHER DIALOGEX 0, 0, 232, 108
+STYLE DS_MODALFRAME | DS_CENTER | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "XCOM Accessibility Launcher"
+FONT 8, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    LTEXT           "Which game do you want to play?", IDC_PROMPT, 12, 10, 208, 10
+    PUSHBUTTON      "XCOM: Enemy &Unknown", IDC_EU, 12, 26, 208, 18
+    PUSHBUTTON      "XCOM: Enemy &Within", IDC_EW, 12, 48, 208, 18
+    LTEXT           "", IDC_STATUS, 12, 72, 208, 16
+    PUSHBUTTON      "Cancel", IDCANCEL, 170, 88, 50, 14
+END
