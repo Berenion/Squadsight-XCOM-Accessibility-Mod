@@ -47,6 +47,14 @@ static const Remap g_remaps[] = {
     // forward and wraps, and is already proven to arrive; 1 goes back.
     { "UIOptionsPCScreen", FXS_KEY_TAB, FXS_BUTTON_RBUMPER },
     { "UIOptionsPCScreen", FXS_KEY_1,   FXS_BUTTON_LBUMPER },
+
+    // Saving is behind X, and only behind X (UIOptionsPCScreen, case 302 ->
+    // SaveAndExit).  Escape is not an alternative: it runs
+    // IgnoreChangesAndExit, whose prompt offers "EXIT WITHOUT CHANGES" and
+    // "BACK TO OPTIONS" and nothing else.  Without this the keyboard can
+    // change a setting and be told, correctly, that its only two choices are
+    // to throw the change away or go back and look at it again.
+    { "UIOptionsPCScreen", FXS_KEY_2,   FXS_BUTTON_X       },
 };
 
 int input_remap(const char* screen, int cmd)

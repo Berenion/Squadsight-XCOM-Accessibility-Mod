@@ -10,9 +10,10 @@
 //                           case 303 (Y)  -> OnShowGameplayToggles()
 //     UIOptionsPCScreen     case 330 (LB) -> previous tab
 //                           case 331 (RB) -> next tab
+//                           case 302 (X)  -> SaveAndExit()
 //
-// so Ironman, the tutorial toggle, Second Wave and every options tab past the
-// first are unreachable without a controller.  That the omission is an
+// so Ironman, the tutorial toggle, Second Wave, every options tab past the
+// first and saving the options at all are unreachable without a controller.  That the omission is an
 // oversight rather than a policy is visible two cases further down the same
 // switch, where cancel is bound to both the B button and Escape.
 //

@@ -1,15 +1,19 @@
-// Offline checks for the focus table and the speech debounce.
+// Offline checks for the focus table, the dialogue box and the speech
+// debounce.
 //
-// These encode the two rules the live behaviour depends on:
+// These encode the rules the live behaviour depends on:
 //   - a list published once can be indexed later, per object
+//   - a modal prompt is spoken whole, once, when its last call arrives
 //   - a lone line is spoken, but a line followed by more is not
 //
-// Neither needs the game, so neither should first be exercised inside it.
+// None of it needs the game, so none of it should first be exercised inside
+// it.
 
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
 #include "focus.h"
+#include "dialog.h"
 #include "props.h"
 #include "input.h"
 #include "speech.h"
@@ -225,6 +229,10 @@ int main(void)
           "2 opens Second Wave");
     check(input_remap("UIOptionsPCScreen_0", 571) == 331, "Tab is next tab");
     check(input_remap("UIOptionsPCScreen_0", 612) == 330, "1 is previous tab");
+    // Escape only ever discards: saving lives on X and nowhere else.
+    check(input_remap("UIOptionsPCScreen_0", 613) == 302, "2 saves and exits");
+    check(input_remap("UIShellDifficulty_0", 613) == 303,
+          "2 still opens Second Wave where it already did");
 
     // The screen name arrives with the game's instance suffix, and matching
     // has to survive it.
@@ -273,6 +281,143 @@ int main(void)
         check(!ends_with_property("UIWidgetHelper"), "class name rejected");
         check(!ends_with_property(""), "empty rejected");
         check(!ends_with_property("Propert"), "near miss rejected");
+    }
+
+    // The options screen's exit prompt: five calls, none of which says
+    // anything on its own, and which cancelled one another on the general
+    // text path. This is the sequence UIDialogueBox.Realize sends, with the
+    // strings the log recorded live.
+    printf("\ndialogue box\n");
+    {
+        void* box = (void*)0xD000;
+        char say[DIALOG_MAX_TEXT];
+
+        dialog_reset();
+        check(dialog_is_box("UIDialogueBox_0"), "instance name recognised");
+        check(!dialog_is_box("UIProgressDialogue_0"), "progress dialogue is not it");
+        check(!dialog_is_box("UIOptionsPCScreen_0"), "options screen is not it");
+        check(!dialog_is_box(NULL), "null name rejected");
+
+        check(dialog_note(box, "AS_SetStyleNormal", -1, "", say, sizeof say)
+              == DIALOG_SILENT, "style starts the box");
+        // The title arrives empty: IgnoreChangesAndExit sets no strTitle, and
+        // the struct default "<DEFAULT TITLE>" is stripped as markup long
+        // before it gets here.
+        check(dialog_note(box, "AS_SetTitle", -1, "", say, sizeof say)
+              == DIALOG_SILENT, "an empty title says nothing yet");
+        check(dialog_note(box, "AS_SetText", -1,
+                          "Do you want to exit and discard your changes?",
+                          say, sizeof say) == DIALOG_SILENT,
+              "the question alone is not announced");
+        check(dialog_note(box, "AS_SetHelp", 0, "EXIT WITHOUT CHANGES",
+                          say, sizeof say) == DIALOG_SILENT,
+              "the first answer waits for the second");
+        check(dialog_note(box, "AS_SetHelp", 1, "BACK TO OPTIONS",
+                          say, sizeof say) == DIALOG_SPEAK,
+              "the last call announces the box");
+        check(strcmp(say, "Do you want to exit and discard your changes? "
+                          "Enter: EXIT WITHOUT CHANGES. "
+                          "Escape: BACK TO OPTIONS") == 0,
+              "question and both answers, with the keys");
+
+        // RefreshNavigationHelp is also a watch-variable callback on
+        // m_bMouseIsActive, so the help pair re-arrives whenever the mouse
+        // wakes up. Nothing has changed, so nothing may be said.
+        dialog_note(box, "AS_SetHelp", 0, "EXIT WITHOUT CHANGES", say, sizeof say);
+        check(dialog_note(box, "AS_SetHelp", 1, "BACK TO OPTIONS",
+                          say, sizeof say) == DIALOG_SILENT,
+              "a help refresh with no change is silent");
+
+        // Raising the same prompt again must announce it again -- the style
+        // call is what says a box is being drawn.
+        dialog_note(box, "AS_SetStyleNormal", -1, "", say, sizeof say);
+        dialog_note(box, "AS_SetTitle", -1, "", say, sizeof say);
+        dialog_note(box, "AS_SetText", -1,
+                    "Do you want to exit and discard your changes?",
+                    say, sizeof say);
+        dialog_note(box, "AS_SetHelp", 0, "EXIT WITHOUT CHANGES", say, sizeof say);
+        check(dialog_note(box, "AS_SetHelp", 1, "BACK TO OPTIONS",
+                          say, sizeof say) == DIALOG_SPEAK,
+              "the same prompt raised again is announced again");
+
+        // The video prompt: a warning style, a title, and a body that
+        // UIOptionsPCScreen.KeepResolutionCountdown replaces once a second
+        // through UpdateDialogText -- which sends the body and nothing else.
+        dialog_reset();
+        dialog_note(box, "AS_SetStyleWarning", -1, "", say, sizeof say);
+        dialog_note(box, "AS_SetTitle", -1, "KEEP SETTINGS?", say, sizeof say);
+        dialog_note(box, "AS_SetText", -1,
+                    "Do you wish to keep the current settings? Settings will "
+                    "automatically revert in 15 seconds.", say, sizeof say);
+        dialog_note(box, "AS_SetHelp", 0, "KEEP SETTINGS", say, sizeof say);
+        check(dialog_note(box, "AS_SetHelp", 1, "CANCEL", say, sizeof say)
+              == DIALOG_SPEAK, "the warning box is announced");
+        check(strcmp(say, "Warning. KEEP SETTINGS? Do you wish to keep the "
+                          "current settings? Settings will automatically "
+                          "revert in 15 seconds. Enter: KEEP SETTINGS. "
+                          "Escape: CANCEL") == 0,
+              "severity, title, question and answers in one sentence");
+        check(dialog_note(box, "AS_SetText", -1,
+                          "Do you wish to keep the current settings? Settings "
+                          "will automatically revert in 14 seconds.",
+                          say, sizeof say) == DIALOG_UPDATE,
+              "a later body change reports itself");
+        check(strstr(say, "14 seconds") && !strstr(say, "Enter:"),
+              "the countdown repeats the line that moved, not the whole box");
+
+        // A box with only one answer still has to be announced: waiting for a
+        // cancel label that never comes would lose it entirely.
+        dialog_reset();
+        dialog_note(box, "AS_SetStyleNormal", -1, "", say, sizeof say);
+        dialog_note(box, "AS_SetText", -1, "Saving your options failed.",
+                    say, sizeof say);
+        dialog_note(box, "AS_SetHelp", 0, "ACCEPT", say, sizeof say);
+        check(dialog_note(box, "AS_SetHelp", 1, "", say, sizeof say)
+              == DIALOG_SPEAK, "an empty cancel still ends the box");
+        check(strcmp(say, "Saving your options failed. Enter: ACCEPT") == 0,
+              "an answer that does not exist is not offered");
+
+        // Everything else the box does keeps to the general path.
+        check(dialog_note(box, "Show", -1, "", say, sizeof say) == DIALOG_IGNORED,
+              "Show is not one of the setters");
+        check(dialog_note(box, "AS_SetImage", -1, "img:///UILibrary.Alien",
+                          say, sizeof say) == DIALOG_IGNORED,
+              "the image is not spoken");
+
+        // The join must not run past its buffer, whatever the game hands it.
+        // speech_say drops an utterance too long for its queue rather than
+        // shortening it, so an over-long box has to be cut here -- at a word,
+        // and keeping the front of the question, which is the part that says
+        // what is being asked.
+        dialog_reset();
+        {
+            char long_body[DIALOG_MAX_TEXT * 2];
+            for (size_t k = 0; k < sizeof long_body - 1; k++)
+                long_body[k] = (k % 5 == 4) ? ' ' : 'x';
+            long_body[sizeof long_body - 1] = 0;
+            dialog_note(box, "AS_SetStyleAlert", -1, "", say, sizeof say);
+            dialog_note(box, "AS_SetText", -1, long_body, say, sizeof say);
+            dialog_note(box, "AS_SetHelp", 0, "ACCEPT", say, sizeof say);
+            dialog_note(box, "AS_SetHelp", 1, "CANCEL", say, sizeof say);
+            check(strlen(say) < DIALOG_MAX_TEXT, "the announcement stays in bounds");
+            check(strncmp(say, "Alert. xxxx xxxx", 16) == 0,
+                  "severity and the start of the question survive");
+            check(say[strlen(say) - 1] != ' ', "no trailing space at the cut");
+
+            // A body with no word boundary at all is dropped rather than cut
+            // mid-word: half a word tells a listener nothing.
+            char unbroken[DIALOG_MAX_TEXT * 2];
+            memset(unbroken, 'x', sizeof unbroken - 1);
+            unbroken[sizeof unbroken - 1] = 0;
+            dialog_reset();
+            dialog_note(box, "AS_SetStyleNormal", -1, "", say, sizeof say);
+            dialog_note(box, "AS_SetText", -1, unbroken, say, sizeof say);
+            dialog_note(box, "AS_SetHelp", 0, "ACCEPT", say, sizeof say);
+            check(dialog_note(box, "AS_SetHelp", 1, "CANCEL", say, sizeof say)
+                  == DIALOG_SPEAK, "the answers are still announced");
+            check(strcmp(say, "Enter: ACCEPT. Escape: CANCEL") == 0,
+                  "an uncuttable body is dropped, not spliced");
+        }
     }
 
     printf("\nspeech debounce\n");

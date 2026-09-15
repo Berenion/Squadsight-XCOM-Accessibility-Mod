@@ -47,6 +47,7 @@
 #include "names.h"
 #include "speech.h"
 #include "focus.h"
+#include "dialog.h"
 #include "props.h"
 #include "input.h"
 #include "../../tools/vendor/MinHook/include/MinHook.h"
@@ -538,6 +539,48 @@ static void capture(const char* tag, LONG n, void* stack)
             }
         }
         prop = next;
+    }
+
+    // A modal prompt is composed rather than narrated call by call.  It
+    // arrives unasked, takes the keyboard from whatever was underneath it,
+    // and has no cursor to move, so nothing will read it a second time --
+    // and the calls that draw it cancel each other on the general path.
+    // dialog.c holds the reasoning and the ordering it depends on.
+    if (dialog_is_box(obj_name)) {
+        // The help calls carry the button's icon beside its label
+        // ("EXIT WITHOUT CHANGES", "Icon_A_X"); the label is what is wanted.
+        const char* text = "";
+        for (int i = 0; i < p->nstrings; i++) {
+            if (looks_like_asset(p->strings[i])) continue;
+            text = p->strings[i];
+            break;
+        }
+        int slot = p->nnumbers ? (int)p->numbers[0] : -1;
+
+        char say[DIALOG_MAX_TEXT];
+        int what = dialog_note(object, fn_name, slot, text, say, sizeof say);
+        if (what != DIALOG_IGNORED) {
+            if (what == DIALOG_SPEAK) {
+                logf_("[%ld] %s %s.%s  DIALOG says \"%s\"\n",
+                      n, tag, obj_name, fn_name, say);
+                // Ahead of anything a screen redrawing underneath has left
+                // waiting: the prompt is what the keyboard is now attached to.
+                speech_cancel_pending();
+                if (g_speak) speech_say(say);
+            } else if (what == DIALOG_UPDATE) {
+                logf_("[%ld] %s %s.%s  DIALOG update \"%s\"\n",
+                      n, tag, obj_name, fn_name, say);
+                if (g_speak) speech_say_after(say, SETTLE_MS);
+            } else if (*text) {
+                logf_("[%ld] %s %s.%s  DIALOG held \"%s\"\n",
+                      n, tag, obj_name, fn_name, text);
+            } else {
+                logf_("[%ld] %s %s.%s  DIALOG held (no text)\n",
+                      n, tag, obj_name, fn_name);
+            }
+            tls_busy = 0;
+            return;
+        }
     }
 
     // A checkbox reports its state separately from its name:
