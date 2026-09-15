@@ -32,10 +32,53 @@
 // elsewhere -- Q and E cycle targets on the tactical HUD, and remapping them
 // everywhere would break something that works today.
 
+// UI_FxsInput's own constants, shared because help.c has to name the same
+// commands from the other direction -- the gamepad glyph a screen publishes.
+#define FXS_BUTTON_A        300
+#define FXS_BUTTON_B        301
+#define FXS_BUTTON_X        302
+#define FXS_BUTTON_Y        303
+#define FXS_BUTTON_SELECT   320
+#define FXS_BUTTON_START    321
+#define FXS_BUTTON_LBUMPER  330
+#define FXS_BUTTON_RBUMPER  331
+#define FXS_BUTTON_LTRIGGER 332
+#define FXS_BUTTON_RTRIGGER 333
+
+#define FXS_KEY_ESCAPE      510
+#define FXS_KEY_ENTER       511
+#define FXS_KEY_SPACEBAR    513
+#define FXS_KEY_TAB         571
+#define FXS_KEY_1           612
+#define FXS_KEY_2           613
+#define FXS_KEY_3           614
+#define FXS_KEY_0           621
+
+#define FXS_ACTION_PRESS    1
+
 // Returns the command to substitute for `cmd` on `screen`, or 0 to leave it
 // alone.  `screen` is the object name the frame reports, e.g.
 // "UIShellDifficulty_0", so it is matched by prefix.
 int input_remap(const char* screen, int cmd);
+
+// The other direction: which key reaches `cmd` on `screen`, or 0 when no key
+// does.  The help bar names a command by its gamepad glyph, and what a player
+// on a keyboard needs to hear is which key stands in for it -- or that none
+// does, which is the whole point of listing them.
+int input_key_for(const char* screen, int cmd);
+
+// Walks the keys this table adds on `screen`, so that they can be read out
+// beside the ones the screen advertises.  Returns 0 once `index` is past the
+// end.
+//
+// They have to be listed separately because the help bar does not mention
+// them: it shows what the *game* offers, and the game never offered these.
+// UIShellDifficulty.UpdateButtonHelp publishes Second Wave and Start and
+// nothing about the advanced options behind X, and the options tabs go
+// through AS_SetTabHelp, which carries no glyph at all.  `what` is a phrase
+// rather than a label for the same reason: there was no label to take.
+int input_added_key(const char* screen, int index, int* key, int* cmd,
+                    const char** what);
 
 // Names a command for the log, e.g. "X" or "RB"; NULL if it is not one we
 // deal in.

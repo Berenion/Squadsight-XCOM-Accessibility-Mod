@@ -3,22 +3,14 @@
 #include "input.h"
 #include <string.h>
 
-// UI_FxsInput constants, by name so the table below reads as the game's own.
-#define FXS_BUTTON_X        302
-#define FXS_BUTTON_Y        303
-#define FXS_BUTTON_START    321
-#define FXS_BUTTON_LBUMPER  330
-#define FXS_BUTTON_RBUMPER  331
-
-#define FXS_KEY_TAB         571
-#define FXS_KEY_1           612
-#define FXS_KEY_2           613
-#define FXS_KEY_3           614
+// The UI_FxsInput constants live in input.h, so that help.c can name the same
+// commands coming the other way -- off a screen's help bar.
 
 typedef struct {
     const char* screen;   // matched by prefix; the game appends _0, _1, ...
     int         from;     // the key actually pressed
     int         to;       // the command the screen is waiting for
+    const char* what;     // what it does, for the list 0 reads out
 } Remap;
 
 // Only a handful of keys exist in a menu at all, and which ones is decided by
@@ -42,8 +34,8 @@ typedef struct {
 // listens for it.
 static const Remap g_remaps[] = {
     // Ironman and the tutorial toggle live behind X; Second Wave behind Y.
-    { "UIShellDifficulty", FXS_KEY_1,   FXS_BUTTON_X       },
-    { "UIShellDifficulty", FXS_KEY_2,   FXS_BUTTON_Y       },
+    { "UIShellDifficulty", FXS_KEY_1,   FXS_BUTTON_X,       "Advanced options" },
+    { "UIShellDifficulty", FXS_KEY_2,   FXS_BUTTON_Y,       "Second Wave" },
 
     // Starting the game is behind Start, which no keyboard has.  EW moved it
     // there: EU confirms on `case 300: case 511: OnDifficultyConfirm()`, and
@@ -57,12 +49,12 @@ static const Remap g_remaps[] = {
     // Harmless on EU, where 321 matches no case at all and 3 does nothing
     // either way, so the table stays one list rather than growing a build
     // column for a single row.
-    { "UIShellDifficulty", FXS_KEY_3,   FXS_BUTTON_START   },
+    { "UIShellDifficulty", FXS_KEY_3,   FXS_BUTTON_START,   "Start the game" },
 
     // Every options tab after the first is behind the bumpers.  Tab cycles
     // forward and wraps, and is already proven to arrive; 1 goes back.
-    { "UIOptionsPCScreen", FXS_KEY_TAB, FXS_BUTTON_RBUMPER },
-    { "UIOptionsPCScreen", FXS_KEY_1,   FXS_BUTTON_LBUMPER },
+    { "UIOptionsPCScreen", FXS_KEY_TAB, FXS_BUTTON_RBUMPER, "Next tab" },
+    { "UIOptionsPCScreen", FXS_KEY_1,   FXS_BUTTON_LBUMPER, "Previous tab" },
 
     // Saving is behind X, and only behind X (UIOptionsPCScreen, case 302 ->
     // SaveAndExit).  Escape is not an alternative: it runs
@@ -70,7 +62,7 @@ static const Remap g_remaps[] = {
     // "BACK TO OPTIONS" and nothing else.  Without this the keyboard can
     // change a setting and be told, correctly, that its only two choices are
     // to throw the change away or go back and look at it again.
-    { "UIOptionsPCScreen", FXS_KEY_2,   FXS_BUTTON_X       },
+    { "UIOptionsPCScreen", FXS_KEY_2,   FXS_BUTTON_X,       "Save changes and exit" },
 };
 
 int input_remap(const char* screen, int cmd)
@@ -80,6 +72,33 @@ int input_remap(const char* screen, int cmd)
         const Remap* r = &g_remaps[i];
         if (r->from != cmd) continue;
         if (strncmp(screen, r->screen, strlen(r->screen)) == 0) return r->to;
+    }
+    return 0;
+}
+
+int input_added_key(const char* screen, int index, int* key, int* cmd,
+                    const char** what)
+{
+    if (!screen || index < 0) return 0;
+    for (int i = 0; i < (int)(sizeof g_remaps / sizeof *g_remaps); i++) {
+        const Remap* r = &g_remaps[i];
+        if (strncmp(screen, r->screen, strlen(r->screen)) != 0) continue;
+        if (index--) continue;
+        if (key)  *key  = r->from;
+        if (cmd)  *cmd  = r->to;
+        if (what) *what = r->what;
+        return 1;
+    }
+    return 0;
+}
+
+int input_key_for(const char* screen, int cmd)
+{
+    if (!screen || !cmd) return 0;
+    for (int i = 0; i < (int)(sizeof g_remaps / sizeof *g_remaps); i++) {
+        const Remap* r = &g_remaps[i];
+        if (r->to != cmd) continue;
+        if (strncmp(screen, r->screen, strlen(r->screen)) == 0) return r->from;
     }
     return 0;
 }

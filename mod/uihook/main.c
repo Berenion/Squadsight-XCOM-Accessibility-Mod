@@ -48,6 +48,7 @@
 #include "speech.h"
 #include "focus.h"
 #include "dialog.h"
+#include "help.h"
 #include "props.h"
 #include "input.h"
 #include "../../tools/vendor/MinHook/include/MinHook.h"
@@ -275,6 +276,30 @@ static int is_option_list_fn(const char* fn)
 #define LIST_WINDOW_MS 400   // repeats closer than this are one list
 #define SETTLE_MS      250   // how long a lone line waits to see if more follow
 
+// A screen redrawing because of a key the game itself ignored has nothing to
+// say, and saying it anyway talks over the answer.
+//
+// UIShellDifficulty.OnUnrealCommand ends with RefreshDescInfo() -- outside the
+// switch, so it runs for *every* command, handled or not -- and that resends
+// the current difficulty's description. Pressing the help key therefore
+// produced the list and then, a moment later, the description again:
+//
+//     [82] Input   UIShellDifficulty_0  HELP MENU (3) "SECOND WAVE: 2. ..."
+//     [83] Input   UIShellDifficulty_0  cmd 621
+//     [86] ASVoid  UIShellDifficulty_0.AS_SetDifficultyDesc  "For players ..."
+//
+// So the hook goes quiet for a moment after answering a key of its own. The
+// window is lifted by the next command rather than only by time, because the
+// player pressing something else means they have moved on and whatever that
+// key redraws is news again.
+static ULONGLONG g_quiet_until;
+#define QUIET_MS 1000
+
+static int muted(void)
+{
+    return g_quiet_until && GetTickCount64() < g_quiet_until;
+}
+
 // Says a slot's full text -- "Enable Ironman?: checked" -- after a short wait.
 //
 // A control that changes while the cursor sits on it has to announce itself,
@@ -285,7 +310,7 @@ static int is_option_list_fn(const char* fn)
 static void speak_slot(void* obj, int idx)
 {
     char text[FOCUS_MAX_LABEL];
-    if (g_speak && focus_label_at(obj, idx, text, sizeof text) && text[0])
+    if (g_speak && !muted() && focus_label_at(obj, idx, text, sizeof text) && text[0])
         speech_say_after(text, SETTLE_MS);
 }
 
@@ -569,6 +594,48 @@ static void capture(const char* tag, LONG n, void* stack)
         prop = next;
     }
 
+    // The help bar: the screen's own list of what it can do, kept so that a
+    // key can read it back.  It is not spoken as it passes -- a screen
+    // publishes it on arrival and on every refresh, and narrating that would
+    // bury whatever the player was actually doing.  help.c says why this is
+    // the list worth having.
+    //
+    // The dialogue box publishes through the same AS_SetHelp and is excluded
+    // above, on purpose: it announces its own two answers with their keys as
+    // part of the prompt, which is more use than an entry in a list the
+    // player would have to go and ask for.
+    if (!dialog_is_box(obj_name) && strstr(fn_name, "Help")) {
+        if (strstr(fn_name, "Clear")) {
+            help_clear(object);
+            logf_("[%ld] %s %s.%s  HELP cleared\n", n, tag, obj_name, fn_name);
+            tls_busy = 0;
+            return;
+        }
+        if (p->nnumbers) {
+            // A glyph name identifies the button; the other string is the
+            // label.  AS_SetTabHelp carries neither an index nor a glyph and
+            // falls through to the general path, which is right: the tabs it
+            // describes are already on Tab and 1.
+            const char* label = "";
+            const char* icon  = "";
+            for (int i = 0; i < p->nstrings; i++) {
+                if (strncmp(p->strings[i], "Icon_", 5) == 0) {
+                    if (!*icon) icon = p->strings[i];
+                } else if (!*label && !looks_like_asset(p->strings[i])) {
+                    label = p->strings[i];
+                }
+            }
+            int slot = (int)p->numbers[0];
+            int disabled = p->nbools ? p->bools[0] : 0;
+            help_set(object, slot, label, icon, disabled);
+            logf_("[%ld] %s %s.%s  HELP %d = \"%s\" on %s%s\n", n, tag, obj_name,
+                  fn_name, slot, label, *icon ? icon : "(no icon)",
+                  disabled ? " (disabled)" : "");
+            tls_busy = 0;
+            return;
+        }
+    }
+
     // A modal prompt is composed rather than narrated call by call.  It
     // arrives unasked, takes the keyboard from whatever was underneath it,
     // and has no cursor to move, so nothing will read it a second time --
@@ -594,11 +661,11 @@ static void capture(const char* tag, LONG n, void* stack)
                 // Ahead of anything a screen redrawing underneath has left
                 // waiting: the prompt is what the keyboard is now attached to.
                 speech_cancel_pending();
-                if (g_speak) speech_say(say);
+                if (g_speak && !muted()) speech_say(say);
             } else if (what == DIALOG_UPDATE) {
                 logf_("[%ld] %s %s.%s  DIALOG update \"%s\"\n",
                       n, tag, obj_name, fn_name, say);
-                if (g_speak) speech_say_after(say, SETTLE_MS);
+                if (g_speak && !muted()) speech_say_after(say, SETTLE_MS);
             } else if (*text) {
                 logf_("[%ld] %s %s.%s  DIALOG held \"%s\"\n",
                       n, tag, obj_name, fn_name, text);
@@ -684,7 +751,7 @@ static void capture(const char* tag, LONG n, void* stack)
             logf_("[%ld] %s %s.%s  ITEM %d -> \"%s\"\n",
                   n, tag, obj_name, fn_name, idx, item);
             speech_cancel_pending();
-            if (g_speak) speech_say(item);
+            if (g_speak && !muted()) speech_say(item);
         } else {
             logf_("[%ld] %s %s.%s  ITEM %d unresolved\n",
                   n, tag, obj_name, fn_name, idx);
@@ -793,7 +860,7 @@ static void capture(const char* tag, LONG n, void* stack)
             // Hold it briefly; a second call will cancel it.
             focus_begin(object);
             focus_add(object, p->strings[0]);
-            if (!looks_like_asset(p->strings[0]))
+            if (!looks_like_asset(p->strings[0]) && !muted())
                 speech_say_after(p->strings[0], SETTLE_MS);
         }
     } else if (p->nnumbers && is_selection_fn(fn_name) && focus_count(object) > 0) {
@@ -806,7 +873,7 @@ static void capture(const char* tag, LONG n, void* stack)
             logf_("[%ld] %s %s.%s  FOCUS %d -> \"%s\"\n",
                   n, tag, obj_name, fn_name, idx, label);
             speech_cancel_pending();
-            if (g_speak) speech_say(label);
+            if (g_speak && !muted()) speech_say(label);
         } else {
             logf_("[%ld] %s %s.%s  FOCUS %d unresolved\n",
                   n, tag, obj_name, fn_name, idx);
@@ -858,6 +925,15 @@ static void rewrite_cmd(LONG n, void* stack)
     if (readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
         prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
 
+    // Both integers are wanted: the command, and the action mask beside it.
+    // The mask is the second int parameter and its name differs by screen --
+    // OnUnrealCommand(int Cmd, int Arg) on the difficulty screen,
+    // (int Cmd, int Actionmask) on the options screen -- so it is taken by
+    // position, while Cmd is still matched by name.
+    int32_t* cmd_slot = NULL;
+    int mask = 0;
+    int have_mask = 0;
+
     for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
         if (!readable(prop, 0x68)) return;
 
@@ -868,40 +944,83 @@ static void rewrite_cmd(LONG n, void* stack)
         char pname[64] = "";
         object_name(prop, pname, sizeof pname);
 
-        if ((flags & CPF_PARM) && props_kind(prop) == PROP_INT &&
-            strcmp(pname, "Cmd") == 0 && off < 0x1000) {
+        if ((flags & CPF_PARM) && props_kind(prop) == PROP_INT && off < 0x1000) {
             int32_t* slot = (int32_t*)(locals + off);
-            // Writing into the caller's frame, so the page must be writable as
-            // well as readable; a local that lives in read-only memory would
-            // mean this is not the frame we think it is.
-            if (!writable(slot, sizeof *slot)) return;
-
-            int cmd = *slot;
-            int to = input_remap(screen, cmd);
-            const char* from_name = input_cmd_name(cmd);
-            if (to) {
-                *slot = to;
-                const char* to_name = input_cmd_name(to);
-                logf_("[%ld] Input        %s  %s(%d) -> %s(%d)\n", n, screen,
-                      from_name ? from_name : "?", cmd,
-                      to_name ? to_name : "?", to);
-            } else {
-                // Every command is logged, not only the remapped ones. With
-                // only the remaps visible there was no way to tell a key that
-                // never arrived from one arriving under a code we did not
-                // expect -- which is exactly the question Q raised.
-                logf_("[%ld] Input        %s  cmd %d%s%s\n", n, screen, cmd,
-                      from_name ? " = " : "", from_name ? from_name : "");
+            if (strcmp(pname, "Cmd") == 0) {
+                // Writing into the caller's frame, so the page must be
+                // writable as well as readable; a local that lives in
+                // read-only memory would mean this is not the frame we think
+                // it is.
+                if (!writable(slot, sizeof *slot)) return;
+                cmd_slot = slot;
+            } else if (cmd_slot && !have_mask && readable(slot, sizeof *slot)) {
+                mask = *slot;
+                have_mask = 1;
+                break;
             }
-            return;
         }
         prop = next;
     }
 
-    // Reached only if no int parameter named "Cmd" was found. Worth saying so:
-    // it would mean this screen's handler is shaped differently, and every key
-    // on it would silently do nothing.
-    logf_("[%ld] Input        %s  no Cmd parameter found\n", n, screen);
+    if (!cmd_slot) {
+        // Reached only if no int parameter named "Cmd" was found. Worth saying
+        // so: it would mean this screen's handler is shaped differently, and
+        // every key on it would silently do nothing.
+        logf_("[%ld] Input        %s  no Cmd parameter found\n", n, screen);
+        return;
+    }
+
+    int cmd = *cmd_slot;
+    const char* from_name = input_cmd_name(cmd);
+
+    // The key that reads out what this screen says its buttons do.
+    //
+    // Speaking happens on the press alone.  A single keystroke arrives here
+    // several times -- press, hold, release -- and the native this hook runs
+    // on exists precisely to filter those, which it does *after* us, so the
+    // announcement has to filter them itself or it stutters.
+    //
+    // The command is left alone rather than swallowed: no shell screen has a
+    // case for 621.  The tactical HUD does -- UITacticalHUD_AbilityContainer
+    // spends 619, 620 and 621 on DirectPickAbility -- so this key needs
+    // either a swallow or a different code before tactical work begins.
+    if (cmd == FXS_KEY_0) {
+        if (!have_mask || (mask & FXS_ACTION_PRESS)) {
+            char say[512];
+            int count = help_announce(screen, say, sizeof say);
+            logf_("[%ld] Input        %s  HELP MENU (%d) \"%s\"\n",
+                  n, screen, count, say);
+            speech_cancel_pending();
+            if (g_speak) speech_say(say);
+            // The screen is about to redraw on the way out of its own
+            // handler, with nothing new in it. See muted().
+            g_quiet_until = GetTickCount64() + QUIET_MS;
+        } else {
+            logf_("[%ld] Input        %s  cmd %d\n", n, screen, cmd);
+        }
+        return;
+    }
+
+    // Anything else means the player has moved on, and what it redraws is
+    // worth hearing again -- so the quiet window ends here rather than only
+    // when it times out.
+    g_quiet_until = 0;
+
+    int to = input_remap(screen, cmd);
+    if (to) {
+        *cmd_slot = to;
+        const char* to_name = input_cmd_name(to);
+        logf_("[%ld] Input        %s  %s(%d) -> %s(%d)\n", n, screen,
+              from_name ? from_name : "?", cmd,
+              to_name ? to_name : "?", to);
+    } else {
+        // Every command is logged, not only the remapped ones. With only the
+        // remaps visible there was no way to tell a key that never arrived
+        // from one arriving under a code we did not expect -- which is
+        // exactly the question Q raised.
+        logf_("[%ld] Input        %s  cmd %d%s%s\n", n, screen, cmd,
+              from_name ? " = " : "", from_name ? from_name : "");
+    }
 }
 
 #define THUNK(id, tag)                                                        \

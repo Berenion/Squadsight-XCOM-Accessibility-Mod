@@ -15,7 +15,7 @@ pushd "%OUT%"
 
 cl /nologo /W3 /O2 /MT /LD ^
    /I"%MH%\include" /I"%MH%\src" ^
-   "%HERE%main.c" "%HERE%natives.c" "%HERE%names.c" "%HERE%speech.c" "%HERE%focus.c" "%HERE%dialog.c" "%HERE%props.c" "%HERE%input.c" ^
+   "%HERE%main.c" "%HERE%natives.c" "%HERE%names.c" "%HERE%speech.c" "%HERE%focus.c" "%HERE%dialog.c" "%HERE%help.c" "%HERE%props.c" "%HERE%input.c" ^
    "%MH%\src\hook.c" "%MH%\src\buffer.c" "%MH%\src\trampoline.c" "%MH%\src\hde\hde32.c" ^
    /Fe:xcom_uihook.dll ^
    /link /OUT:xcom_uihook.dll ole32.lib oleaut32.lib sapi.lib
@@ -41,7 +41,7 @@ if errorlevel 1 (popd & echo TEST BUILD FAILED & exit /b 1)
 cl /nologo /W3 /O2 /MT "%HERE%test_speech.c" "%HERE%speech.c" /Fe:test_speech.exe /link ole32.lib oleaut32.lib sapi.lib
 if errorlevel 1 (popd & echo SPEECH TEST BUILD FAILED & exit /b 1)
 
-cl /nologo /W3 /O2 /MT "%HERE%test_focus.c" "%HERE%focus.c" "%HERE%dialog.c" "%HERE%speech.c" "%HERE%input.c" /Fe:test_focus.exe /link ole32.lib oleaut32.lib sapi.lib
+cl /nologo /W3 /O2 /MT "%HERE%test_focus.c" "%HERE%focus.c" "%HERE%dialog.c" "%HERE%help.c" "%HERE%speech.c" "%HERE%input.c" /Fe:test_focus.exe /link ole32.lib oleaut32.lib sapi.lib
 if errorlevel 1 (popd & echo FOCUS TEST BUILD FAILED & exit /b 1)
 
 cl /nologo /W3 /O2 /MT "%HERE%test_paths.c" "%HERE%gamepaths.c" /Fe:test_paths.exe ^

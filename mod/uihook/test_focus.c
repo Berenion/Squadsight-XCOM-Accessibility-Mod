@@ -14,6 +14,7 @@
 #include <windows.h>
 #include "focus.h"
 #include "dialog.h"
+#include "help.h"
 #include "props.h"
 #include "input.h"
 #include "speech.h"
@@ -437,6 +438,114 @@ int main(void)
             check(strcmp(say, "Enter: ACCEPT. Escape: CANCEL") == 0,
                   "an uncuttable body is dropped, not spliced");
         }
+    }
+
+    // The help bar, read back on request. The difficulty screen is the case
+    // that prompted it: two bars, and the one thing the keyboard could not
+    // reach sitting in the second entry of the first.
+    printf("\nhelp bar\n");
+    {
+        void* bar1 = (void*)0xB000;   // UINavigationHelp_0
+        void* bar2 = (void*)0xB100;   // UINavigationHelp_1
+        char say[512];
+
+        help_reset();
+        check(help_icon_cmd("Icon_START") == 321, "Start glyph resolves");
+        check(help_icon_cmd("Icon_Y_TRIANGLE") == 303, "Y glyph resolves");
+        check(help_icon_cmd("Icon_B_CIRCLE") == 301, "B glyph resolves");
+        check(help_icon_cmd("Icon_DPAD") == 0, "movement glyphs are not commands");
+        check(help_icon_cmd("img:///UILibrary.Thing") == 0, "an image is not a glyph");
+        check(help_icon_cmd("") == 0, "empty glyph rejected");
+
+        // A screen that has published nothing yet still has whatever keys the
+        // mod adds to it -- those do not depend on the bar.
+        check(help_announce("UIShellDifficulty_0", say, sizeof say) == 3,
+              "with no bar, the added keys still stand");
+        check(help_announce("UINothingHere_0", say, sizeof say) == 0,
+              "a screen with neither claims nothing");
+        check(strstr(say, "lists no commands") != NULL, "and says so out loud");
+
+        // Exactly what UpdateButtonHelp and UpdateButtonHelp2 send.
+        help_set(bar1, 0, "SECOND WAVE", "Icon_Y_TRIANGLE", 0);
+        help_set(bar1, 1, "START GAME", "Icon_START", 0);
+        help_set(bar2, 0, "BACK", "Icon_B_CIRCLE", 0);
+
+        // Three advertised, plus the one the mod adds that the screen says
+        // nothing about: UpdateButtonHelp never mentions the advanced options
+        // behind X, so without that last entry the list is confidently
+        // incomplete.
+        check(help_announce("UIShellDifficulty_0", say, sizeof say) == 4,
+              "three advertised commands and one added");
+        check(strcmp(say, "SECOND WAVE: 2. START GAME: 3. BACK: Escape. "
+                          "Advanced options: 1") == 0,
+              "each command with the key that reaches it");
+        check(strstr(say, "Second Wave: 2") == NULL,
+              "an added key the bar already named is not repeated");
+
+        // The same screen with no remap in the table: the gap has to be
+        // audible, because that is the whole purpose of the list.
+        check(help_announce("UISomethingNew_0", say, sizeof say) == 3,
+              "an unmapped screen still lists its commands");
+        check(strstr(say, "START GAME: no key") != NULL,
+              "an unreachable command says so");
+        check(strstr(say, "BACK: Escape") != NULL,
+              "B is Escape on any screen");
+
+        // A bar rebuilding itself replaces its entries rather than adding to
+        // them -- UpdateButtonHelp opens with ClearButtonHelp.
+        help_clear(bar1);
+        help_set(bar1, 0, "BACK", "Icon_B_CIRCLE", 0);
+        check(help_announce("UIShellDifficulty_0", say, sizeof say) == 5,
+              "a cleared bar drops its old entries");
+        check(strstr(say, "START GAME") == NULL, "the old entry is gone");
+        // With Start no longer advertised, the key that reaches it has to be
+        // offered on its own account.
+        check(strstr(say, "Start the game: 3") != NULL,
+              "an added key appears once the bar stops naming it");
+
+        // An empty label is how a screen empties one slot without clearing
+        // the bar: UIOptionsPCScreen sends AS_SetHelp(1, "", "") when the
+        // credits link does not apply.
+        help_reset();
+        void* opts = (void*)0xB200;
+        help_set(opts, 0, "BACK", "Icon_B_CIRCLE", 0);
+        help_set(opts, 1, "CREDITS", "Icon_RT_R2", 0);
+        help_set(opts, 2, "RESET ALL SETTINGS", "Icon_Y_TRIANGLE", 0);
+        help_set(opts, 3, "SAVE CHANGES AND EXIT", "Icon_X_SQUARE", 0);
+        // Four advertised, plus the two tabs -- which the screen publishes
+        // through AS_SetTabHelp, carrying no glyph, so they never reach the
+        // bar at all.
+        check(help_announce("UIOptionsPCScreen_0", say, sizeof say) == 6,
+              "the options screen lists four and both tabs");
+        check(strstr(say, "SAVE CHANGES AND EXIT: 2") != NULL,
+              "the key we added is reported");
+        check(strstr(say, "RESET ALL SETTINGS: no key") != NULL,
+              "the gap we have not filled is reported");
+        check(strstr(say, "Next tab: Tab") && strstr(say, "Previous tab: 1"),
+              "the tabs are listed although the bar never mentions them");
+
+        help_set(opts, 1, "", "", 0);
+        check(help_announce("UIOptionsPCScreen_0", say, sizeof say) == 5,
+              "an emptied slot drops out");
+        check(strstr(say, "CREDITS") == NULL, "and takes its label with it");
+
+        // A disabled action is still listed -- knowing it is there and greyed
+        // out is different from not knowing it exists.
+        help_set(opts, 1, "CREDITS", "Icon_RT_R2", 1);
+        help_announce("UIOptionsPCScreen_0", say, sizeof say);
+        check(strstr(say, "CREDITS: no key, unavailable") != NULL,
+              "a disabled action says so");
+
+        // Bounds: a screen cannot talk the buffer off its end.
+        help_reset();
+        void* many = (void*)0xB300;
+        for (int k = 0; k < HELP_MAX_ENTRIES; k++)
+            help_set(many, k, "A COMMAND WITH A FAIRLY LONG LABEL ON IT",
+                     "Icon_START", 0);
+        // NB: not `small` -- the Windows RPC headers define that as char.
+        char narrow[64];
+        help_announce("UIShellDifficulty_0", narrow, sizeof narrow);
+        check(strlen(narrow) < sizeof narrow, "the announcement stays in bounds");
     }
 
     printf("\nspeech debounce\n");
