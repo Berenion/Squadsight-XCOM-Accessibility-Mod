@@ -328,6 +328,34 @@ static int is_checkbox_state_fn(const char* fn)
     return strstr(fn, "CheckboxValue") != NULL;
 }
 
+// A slider states where it sits as a bare number, on a call of its own:
+//
+//     SetSliderValue(int Index, int iValue)            (UIWidgetHelper.uc)
+//
+// and the number is a percentage every time.  OnUnrealCommand_Slider clamps
+// iValue to 0..100 in both builds, and every slider is filled from a
+// percentage: the three volumes are stored 0..100, edge-scroll speed is
+// m_fScrollSpeed * 100, and gamma is GetGammaPercentage(), which normalises
+// 1.7..2.7 onto the same scale.  "Every" is exact rather than hopeful --
+// UIOptionsPCScreen is the only caller of NewSlider() in either build -- so
+// "50 percent" describes the slider and not merely the number on it.
+//
+// Its neighbour must not be mistaken for it -- it arrives one call later,
+// carrying the same slot and a number that is not the value:
+//
+//     SetSliderMouseWheelStep(int Index, int iValue)   the step, 10
+//
+// A value is not necessarily a multiple of that step, and reading one like
+// "29 percent" is not a fault to be rounded away.  OnUnrealCommand_Slider
+// adds or subtracts the step and clamps, never snapping, while
+// ProcessMouseEvent_Slider's default case assigns the dragged position
+// straight in -- so one click on the bar leaves an offset that every later
+// keypress carries: 29, 39, 49.  Only the clamps at 0 and 100 clear it.
+static int is_slider_value_fn(const char* fn)
+{
+    return strstr(fn, "SliderValue") != NULL;
+}
+
 // Does a text-free call carrying a number mean "the cursor moved"?
 //
 // Most of them do not.  The widget setters take the *widget's* index, not the
@@ -599,6 +627,36 @@ static void capture(const char* tag, LONG n, void* stack)
             logf_("[%ld] %s %s.%s  SLOT %d value = \"%s\"%s\n",
                   n, tag, obj_name, fn_name, idx, state,
                   changed ? "  (changed)" : "");
+            if (changed) speak_slot(object, idx);
+        }
+        tls_busy = 0;
+        return;
+    }
+
+    // Where a slider sits. Two plain integers and no text at all, so it used
+    // to log as "NUMS 3, 49" and go no further: moving a slider was silent,
+    // and landing on one read "Music volume:" with no position -- while the
+    // spinner beside it, whose value happens to be a string, read
+    // "Shadows: Medium". The value is filed as this control's, beside the
+    // name SetSliderLabel stored, exactly as a checkbox's state is.
+    //
+    // The frame carries the pair twice, once as the parameters and once as
+    // the ASValue array built from them, so the parameters are taken: they
+    // are first, and they are what the function was called with.
+    if (is_slider_value_fn(fn_name) && p->nnumbers >= 2 && !p->nstrings) {
+        int idx = (int)p->numbers[0];
+        if (idx >= 0 && idx < FOCUS_MAX_LABELS) {
+            char value[32];
+            _snprintf_s(value, sizeof value, _TRUNCATE, "%d percent",
+                        (int)p->numbers[1]);
+            int changed = focus_set_part(object, idx, FOCUS_PART_VALUE, value);
+            logf_("[%ld] %s %s.%s  SLOT %d value = \"%s\"%s\n",
+                  n, tag, obj_name, fn_name, idx, value,
+                  changed ? "  (changed)" : "");
+            // Only a change speaks. A slider is republished whole every time
+            // its screen redraws, and RefreshSlider sends the label, the
+            // value and the step together, so an arrival that says nothing
+            // new must stay quiet or every redraw would read the tab aloud.
             if (changed) speak_slot(object, idx);
         }
         tls_busy = 0;

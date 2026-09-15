@@ -116,6 +116,19 @@ int main(void)
     check(focus_label_at(opts, 0, buf, sizeof buf) &&
           strcmp(buf, "Mode: Windowed") == 0, "new value keeps the label");
 
+    // A slider names itself and states its position the same way, so it must
+    // read as one control rather than as a label with a number after it:
+    // SetSliderLabel(3, "Music volume:") then SetSliderValue(3, 49).
+    focus_set_part(opts, 4, FOCUS_PART_LABEL, "Music volume:");
+    check(focus_set_part(opts, 4, FOCUS_PART_VALUE, "39 percent") == 0,
+          "a slider's first position is not a change");
+    check(focus_label_at(opts, 4, buf, sizeof buf) &&
+          strcmp(buf, "Music volume: 39 percent") == 0, "slider reads with its name");
+    check(focus_set_part(opts, 4, FOCUS_PART_VALUE, "49 percent") == 1,
+          "moving the slider is a change");
+    check(focus_label_at(opts, 4, buf, sizeof buf) &&
+          strcmp(buf, "Music volume: 49 percent") == 0, "the new position reads");
+
     // A control with only one half still reads (buttons, sliders).
     focus_set_part(opts, 2, FOCUS_PART_LABEL, "Gamma:");
     check(focus_label_at(opts, 2, buf, sizeof buf) &&
