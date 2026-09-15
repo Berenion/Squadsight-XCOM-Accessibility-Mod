@@ -400,6 +400,15 @@ static void capture(const char* tag, LONG n, void* stack)
         joined[0] = 0;
         for (int i = 0; i < p->nstrings; i++) {
             if (looks_like_asset(p->strings[i])) continue;
+            // The frame walk sees every property, so a setter's parameter and
+            // the local it was copied into both arrive -- one call, the same
+            // text twice, joined into "Mode:, Mode:". Repeats within a single
+            // call are always that artefact, never two real labels, because
+            // this path is building one label out of one call.
+            int dup = 0;
+            for (int j = 0; j < i; j++)
+                if (strcmp(p->strings[i], p->strings[j]) == 0) { dup = 1; break; }
+            if (dup) continue;
             size_t want = strlen(p->strings[i]);
             size_t sep = used ? 2 : 0;
             if (used + sep + want >= sizeof joined) break;
