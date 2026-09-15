@@ -169,7 +169,15 @@ static BOOL read_banner(const char* log, char* out, size_t out_sz, DWORD timeout
             free(text);
         }
         if (GetTickCount() - start >= timeout_ms) {
-            strcpy_s(out, out_sz, "The mod wrote no log, so it may not have loaded.");
+            // Which of the two it is matters: a missing log means the DLL
+            // never ran, while a log without a banner means it ran and gave
+            // up part way.  Reporting both as "no log" sent the last search
+            // in the wrong direction entirely.
+            if (GetFileAttributesA(log) != INVALID_FILE_ATTRIBUTES)
+                strcpy_s(out, out_sz, "The mod wrote a log but never reported "
+                                      "arming, so it stopped part way.");
+            else
+                strcpy_s(out, out_sz, "The mod wrote no log, so it may not have loaded.");
             return FALSE;
         }
         Sleep(250);

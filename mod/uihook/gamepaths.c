@@ -1,6 +1,7 @@
 #include "gamepaths.h"
 
 #include <shlwapi.h>
+#include <share.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,10 +11,17 @@
 #define EU_EXE       "XComGame.exe"
 #define EW_EXE       "XComEW.exe"
 
+// NB: _fsopen, not fopen_s.  fopen_s opens *exclusively*, and every file this
+// reads is one somebody else may be holding: the launcher reads the mod's log
+// back to see whether the hooks armed, and the mod keeps that log open for
+// the whole session (_SH_DENYWR, so that it stays readable).  Opened
+// exclusively the read always failed, and the launcher reported "the mod
+// wrote no log" over a log that was sitting right there, on every launch.
+// Steam's own .vdf files are open at times for the same reason.
 char* gamepaths_slurp(const char* path)
 {
-    FILE* f = NULL;
-    if (fopen_s(&f, path, "rb") != 0 || !f) return NULL;
+    FILE* f = _fsopen(path, "rb", _SH_DENYNO);
+    if (!f) return NULL;
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);

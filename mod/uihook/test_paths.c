@@ -10,7 +10,9 @@
 #include "gamepaths.h"
 
 #include <shlwapi.h>
+#include <share.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int g_failures = 0;
@@ -161,6 +163,35 @@ static void test_library_walk(const char* sandbox)
 
 // ------------------------------------------------------------ this machine --
 
+// The file the launcher cares most about is the one the mod is still writing.
+// The mod holds its log open for the whole session -- _fsopen with
+// _SH_DENYWR, so that it stays readable while the game runs -- and the
+// launcher reads that log back to tell a working hook from a loaded-but-dead
+// one.  fopen_s opens exclusively, so that read failed every time, and the
+// launcher raised "the mod attached but did not arm" over a log that already
+// said it had.
+static void test_slurp_while_held(const char* sandbox)
+{
+    printf("\nreading a file somebody else has open\n");
+
+    make_tree(sandbox);
+    char path[MAX_PATH];
+    sprintf_s(path, sizeof path, "%s\\held.log", sandbox);
+
+    FILE* held = _fsopen(path, "w", _SH_DENYWR);   // exactly how the mod opens it
+    check(held != NULL, "the writer holds the file open");
+    if (!held) return;
+    fputs("3/3 text hooks armed, key remap on\n", held);
+    fflush(held);
+
+    char* text = gamepaths_slurp(path);
+    check(text != NULL, "a file held open elsewhere can still be read");
+    check(text && strstr(text, "hooks armed") != NULL, "the banner comes back");
+    free(text);
+
+    fclose(held);
+}
+
 static void report_this_machine(void)
 {
     GamePaths game;
@@ -192,6 +223,7 @@ int main(void)
 
     test_vdf_pair();
     test_library_walk(sandbox);
+    test_slurp_while_held(sandbox);
     report_this_machine();
 
     remove_tree(sandbox);
