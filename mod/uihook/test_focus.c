@@ -11,6 +11,7 @@
 #include <windows.h>
 #include "focus.h"
 #include "props.h"
+#include "input.h"
 #include "speech.h"
 
 static int failures;
@@ -213,6 +214,47 @@ int main(void)
     check(focus_label_at(cb, 0, buf, sizeof buf) &&
           strcmp(buf, "Enable Ironman? checked") == 0,
           "changed value reads with its name");
+
+    // Giving the keyboard the gamepad-only actions. The table is pure policy,
+    // so what it does and -- more importantly -- what it leaves alone can be
+    // pinned down without the game.
+    printf("\nkey remap\n");
+    check(input_remap("UIShellDifficulty_0", 612) == 302,
+          "1 opens advanced options");
+    check(input_remap("UIShellDifficulty_0", 613) == 303,
+          "2 opens Second Wave");
+    check(input_remap("UIOptionsPCScreen_0", 571) == 331, "Tab is next tab");
+    check(input_remap("UIOptionsPCScreen_0", 612) == 330, "1 is previous tab");
+
+    // The screen name arrives with the game's instance suffix, and matching
+    // has to survive it.
+    check(input_remap("UIShellDifficulty_12", 612) == 302, "suffix ignored");
+
+    // Letter keys are bound in [XComGame.XComTacticalInput], which is only
+    // live during a mission, so in a menu they never become UI commands at
+    // all. Mapping one is dead code -- twice already: Q/E, then X/Y. Only
+    // keys bound in [Engine.PlayerInput] can appear on the left below.
+    check(input_remap("UIShellDifficulty_0", 531) == 0, "Q cannot arrive in a menu");
+    check(input_remap("UIShellDifficulty_0", 519) == 0, "E cannot arrive in a menu");
+    check(input_remap("UIShellDifficulty_0", 538) == 0, "X cannot arrive in a menu");
+    check(input_remap("UIShellDifficulty_0", 539) == 0, "Y cannot arrive in a menu");
+
+    // Nothing outside the listed screens may be touched.
+    check(input_remap("UITacticalHUD_0", 612) == 0, "tactical 1 untouched");
+    check(input_remap("UIFinalShell_0", 571) == 0, "main menu Tab untouched");
+    check(input_remap("UILoadGame_0", 571) == 0, "load game Tab untouched");
+
+    // Keys the listed screens already use must keep their meaning.
+    check(input_remap("UIShellDifficulty_0", 511) == 0, "Enter untouched");
+    check(input_remap("UIShellDifficulty_0", 510) == 0, "Escape untouched");
+    check(input_remap("UIShellDifficulty_0", 500) == 0, "arrow up untouched");
+    check(input_remap("UIShellDifficulty_0", 502) == 0, "arrow down untouched");
+    check(input_remap("UIShellDifficulty_0", 537) == 0, "W untouched, it is up");
+    check(input_remap("UIOptionsPCScreen_0", 513) == 0, "space untouched");
+
+    // A name that merely starts the same way must not match a longer one.
+    check(input_remap("UIShell", 612) == 0, "partial name rejected");
+    check(input_remap(NULL, 612) == 0, "null screen rejected");
 
     printf("\nproperty probe predicates\n");
     {

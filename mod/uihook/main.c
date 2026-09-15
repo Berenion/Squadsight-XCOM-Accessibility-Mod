@@ -48,6 +48,7 @@
 #include "speech.h"
 #include "focus.h"
 #include "props.h"
+#include "input.h"
 #include "../../tools/vendor/MinHook/include/MinHook.h"
 
 #define MAX_NATIVES 8192
@@ -139,6 +140,29 @@ int readable(const void* p, size_t n)
         if (prot == PAGE_NOACCESS || (mbi.Protect & PAGE_GUARD)) return 0;
         if (!(prot == PAGE_READONLY || prot == PAGE_READWRITE ||
               prot == PAGE_WRITECOPY || prot == PAGE_EXECUTE_READ ||
+              prot == PAGE_EXECUTE_READWRITE || prot == PAGE_EXECUTE_WRITECOPY))
+            return 0;
+        cur = (const uint8_t*)mbi.BaseAddress + mbi.RegionSize;
+    }
+    return 1;
+}
+
+// Same guard as readable(), but for the one place this DLL writes into the
+// game: rewriting an input command in the caller's frame.  A local that is not
+// in writable memory means the frame is not what it appears to be, and the
+// write is abandoned rather than forced.
+static int writable(const void* p, size_t n)
+{
+    if (!p) return 0;
+    MEMORY_BASIC_INFORMATION mbi;
+    const uint8_t* cur = (const uint8_t*)p;
+    const uint8_t* end = cur + n;
+    while (cur < end) {
+        if (!VirtualQuery(cur, &mbi, sizeof mbi)) return 0;
+        if (mbi.State != MEM_COMMIT) return 0;
+        if (mbi.Protect & PAGE_GUARD) return 0;
+        DWORD prot = mbi.Protect & 0xFF;
+        if (!(prot == PAGE_READWRITE || prot == PAGE_WRITECOPY ||
               prot == PAGE_EXECUTE_READWRITE || prot == PAGE_EXECUTE_WRITECOPY))
             return 0;
         cur = (const uint8_t*)mbi.BaseAddress + mbi.RegionSize;
@@ -710,6 +734,75 @@ static void capture(const char* tag, LONG n, void* stack)
 
 // MinHook needs a distinct trampoline per target, so each native gets its own
 // thunk; they all funnel into capture().
+// Relabels a keypress as the gamepad button a screen is waiting for.
+//
+// Runs on CheckInputIsReleaseOrDirectionRepeat, which every shell screen calls
+// as the first line of its OnUnrealCommand, so the rewrite lands before the
+// switch below reads Cmd. The parameter is found the same way text is: by
+// walking the caller's UProperty chain and matching the declared name, rather
+// than assuming it is first in the frame.
+static void rewrite_cmd(LONG n, void* stack)
+{
+    if (!readable(stack, 0x20)) return;
+
+    void* node      = *(void**)((uint8_t*)stack + FFRAME_NODE);
+    void* object    = *(void**)((uint8_t*)stack + FFRAME_OBJECT);
+    uint8_t* locals = *(uint8_t**)((uint8_t*)stack + FFRAME_LOCALS);
+    if (!locals || !props_ready()) return;
+
+    char screen[128] = "?";
+    object_name(object, screen, sizeof screen);
+
+    void* prop = NULL;
+    if (readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
+        prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
+
+    for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
+        if (!readable(prop, 0x68)) return;
+
+        uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
+        uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
+        void* next     = *(void**)((uint8_t*)prop + UFIELD_NEXT);
+
+        char pname[64] = "";
+        object_name(prop, pname, sizeof pname);
+
+        if ((flags & CPF_PARM) && props_kind(prop) == PROP_INT &&
+            strcmp(pname, "Cmd") == 0 && off < 0x1000) {
+            int32_t* slot = (int32_t*)(locals + off);
+            // Writing into the caller's frame, so the page must be writable as
+            // well as readable; a local that lives in read-only memory would
+            // mean this is not the frame we think it is.
+            if (!writable(slot, sizeof *slot)) return;
+
+            int cmd = *slot;
+            int to = input_remap(screen, cmd);
+            const char* from_name = input_cmd_name(cmd);
+            if (to) {
+                *slot = to;
+                const char* to_name = input_cmd_name(to);
+                logf_("[%ld] Input        %s  %s(%d) -> %s(%d)\n", n, screen,
+                      from_name ? from_name : "?", cmd,
+                      to_name ? to_name : "?", to);
+            } else {
+                // Every command is logged, not only the remapped ones. With
+                // only the remaps visible there was no way to tell a key that
+                // never arrived from one arriving under a code we did not
+                // expect -- which is exactly the question Q raised.
+                logf_("[%ld] Input        %s  cmd %d%s%s\n", n, screen, cmd,
+                      from_name ? " = " : "", from_name ? from_name : "");
+            }
+            return;
+        }
+        prop = next;
+    }
+
+    // Reached only if no int parameter named "Cmd" was found. Worth saying so:
+    // it would mean this screen's handler is shaped differently, and every key
+    // on it would silently do nothing.
+    logf_("[%ld] Input        %s  no Cmd parameter found\n", n, screen);
+}
+
 #define THUNK(id, tag)                                                        \
     static ExecFn g_orig_##id;                                                \
     static void __fastcall hook_##id(void* self, void* edx,                   \
@@ -723,6 +816,21 @@ static void capture(const char* tag, LONG n, void* stack)
         }                                                                     \
         g_orig_##id(self, edx, stack, result);                                \
     }
+
+// This one rewrites rather than captures, so it gets its own thunk: the work
+// has to happen before the native reads its arguments, not alongside it.
+static ExecFn g_orig_checkinput;
+static void __fastcall hook_checkinput(void* self, void* edx,
+                                       void* stack, void* result)
+{
+    LONG n = InterlockedIncrement(&g_calls);
+    __try { rewrite_cmd(n, stack); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        logf_("[%ld] Input        rewrite faulted (0x%08lx)\n",
+              n, GetExceptionCode());
+    }
+    g_orig_checkinput(self, edx, stack, result);
+}
 
 THUNK(movie_asvoid, "ASVoid/Movie ")
 THUNK(object_asvoid, "ASVoid/Object")
@@ -815,10 +923,20 @@ static DWORD WINAPI init(LPVOID param)
     armed += arm(tbl, n, mod, "AUI_FxsPanelexecInvoke",
                  (LPVOID)hook_panel_invoke, (LPVOID*)&g_orig_panel_invoke);
 
+    // Not a text source: this one gives the keyboard the actions the game
+    // bound only to a gamepad. Counted separately so that its failure cannot
+    // be mistaken for a text hook failing, and so that losing it leaves the
+    // rest of the mod working.
+    int input_armed = arm(tbl, n, mod,
+                          "AUI_FxsPanelexecCheckInputIsReleaseOrDirectionRepeat",
+                          (LPVOID)hook_checkinput, (LPVOID*)&g_orig_checkinput);
+
     free(tbl);
     if (!armed) { logf_("FATAL: nothing armed\n"); return 1; }
 
-    logf_("%d/3 hooks armed -- navigate the UI to produce traffic\n---\n", armed);
+    logf_("%d/3 text hooks armed, key remap %s"
+          " -- navigate the UI to produce traffic\n---\n",
+          armed, input_armed ? "on" : "OFF");
     return 0;
 }
 
