@@ -47,6 +47,7 @@
 #include "names.h"
 #include "speech.h"
 #include "focus.h"
+#include "props.h"
 #include "../../tools/vendor/MinHook/include/MinHook.h"
 
 #define MAX_NATIVES 8192
@@ -230,12 +231,76 @@ static int is_value_fn(const char* fn)
            strstr(fn, "ComboboxText") != NULL;
 }
 
-// SetDropdownOptions(int Index, array<string> arrLabels) ships every choice a
-// combobox offers, not the one in force, so it must not be filed as the
-// control's text -- it would read the whole resolution list on every move.
+// A container widget publishes every choice it offers in one call:
+//
+//     SetDropdownOptions(int Index, array<string> arrLabels)
+//     SetListOptions(int Index, array<string> arrLabels)
+//
+// That is the contents of one widget, not the widget's own text, so filing it
+// as a label joins the lot into a single slot. EU's difficulty screen is a
+// list where EW's is a row of checkboxes, and it read as one run-on string:
+// "Easy, Normal, Classic, Impossible, Easy,0 ; Normal,1 ; ..." -- the trailing
+// part being the raw data string Flash is handed.
 static int is_option_list_fn(const char* fn)
 {
-    return strstr(fn, "DropdownOptions") != NULL;
+    return strstr(fn, "DropdownOptions") != NULL ||
+           strstr(fn, "ListOptions")     != NULL;
+}
+
+#define LIST_WINDOW_MS 400   // repeats closer than this are one list
+#define SETTLE_MS      250   // how long a lone line waits to see if more follow
+
+// Says a slot's full text -- "Enable Ironman?: checked" -- after a short wait.
+//
+// A control that changes while the cursor sits on it has to announce itself,
+// because nothing else will: flipping a checkbox does not move the selection,
+// so RealizeSelected never fires and the change was silent. The wait matters
+// because a screen redrawing itself can pass through intermediate states, and
+// each new value cancels the last, so only the settled one is spoken.
+static void speak_slot(void* obj, int idx)
+{
+    char text[FOCUS_MAX_LABEL];
+    if (g_speak && focus_label_at(obj, idx, text, sizeof text) && text[0])
+        speech_say_after(text, SETTLE_MS);
+}
+
+// Which item of a container widget is chosen:
+//
+//     SetListSelection(int Index, int iSelection)        (both)
+//     SetComboboxValue(int Index, int iSelectionIndex)   (both)
+//
+// Two integers, so the first picks the widget and the second the item inside
+// it -- unlike every other setter here, where the leading int is the slot and
+// nothing follows.
+static int is_inner_selection_fn(const char* fn)
+{
+    return strstr(fn, "ListSelection")   != NULL ||
+           strstr(fn, "ComboboxValue")   != NULL ||
+           strstr(fn, "DropdownSelection") != NULL;
+}
+
+// A screen announcing which item of a list is current, where the list was
+// published by a different object:
+//
+//     AS_SetCurrentDifficultyMarker(int Index)    on UIShellDifficulty
+//
+// while the items came from UIWidgetHelper.SetListOptions. One integer, no
+// text, and the index is into the list rather than into any slot table.
+static int is_marker_fn(const char* fn)
+{
+    return strstr(fn, "Marker") != NULL;
+}
+
+// A checkbox's state arrives without any text of its own:
+//
+//     SetCheckboxValue(int Index, bool bChecked)      (EU)
+//     AS_SetCheckboxValue(int Index, bool bChecked)   (EW)
+//
+// Matched on a substring because both builds route the same logical setter
+// through a different native, one AS_-prefixed and one not.
+static int is_checkbox_state_fn(const char* fn)
+{
+    return strstr(fn, "CheckboxValue") != NULL;
 }
 
 // Does a text-free call carrying a number mean "the cursor moved"?
@@ -292,6 +357,8 @@ typedef struct {
     int   nstrings;
     float numbers[8];
     int   nnumbers;
+    int   bools[8];
+    int   nbools;
 } Payload;
 
 static void payload_add_string(Payload* p, const char* s)
@@ -305,6 +372,12 @@ static void payload_add_number(Payload* p, float v)
 {
     if (p->nnumbers >= 8) return;
     p->numbers[p->nnumbers++] = v;
+}
+
+static void payload_add_bool(Payload* p, int v)
+{
+    if (p->nbools >= 8) return;
+    p->bools[p->nbools++] = v != 0;
 }
 
 // Reads a TArray as ASValues when it looks like one, falling back to a sweep
@@ -363,8 +436,6 @@ static void*     g_last_obj;
 static char      g_last_fn[128];
 static ULONGLONG g_last_at;
 
-#define LIST_WINDOW_MS 400   // repeats closer than this are one list
-#define SETTLE_MS      250   // how long a lone line waits to see if more follow
 
 static void capture(const char* tag, LONG n, void* stack)
 {
@@ -381,6 +452,14 @@ static void capture(const char* tag, LONG n, void* stack)
     object_name(node, fn_name, sizeof fn_name);
     object_name(object, obj_name, sizeof obj_name);
 
+    // Deferred until a real frame is in hand: the probe needs a UStruct whose
+    // children are known to be properties, and a called function is exactly
+    // that. Reported once so the log says whether scalars are being read.
+    if (!props_ready()) {
+        char why[160];
+        if (props_init(node, why, sizeof why)) logf_("props: %s\n", why);
+    }
+
     // Payload is ~64KB. Putting that on the game's own thread stack, inside
     // a script VM that is already deep, is asking for trouble; it lives in
     // thread-local storage instead. The re-entrancy guard covers the case of
@@ -393,6 +472,7 @@ static void capture(const char* tag, LONG n, void* stack)
     Payload* p = &tls_payload;
     p->nstrings = 0;
     p->nnumbers = 0;
+    p->nbools   = 0;
 
     void* prop = NULL;
     if (readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
@@ -409,15 +489,83 @@ static void capture(const char* tag, LONG n, void* stack)
         // arguments and builds the whole main menu out of locals.
         if (locals && (flags & CPF_RETURNPARM) == 0 && off < 0x1000) {
             const void* slot = locals + off;
-            char val[MAX_STR];
-            if (read_fstring((const FString*)slot, val, sizeof val)) {
-                strip_markup(val);
-                if (*val) payload_add_string(p, val);
+            PropKind kind = props_kind(prop);
+
+            // A plain scalar is taken only from a *parameter*. Locals would
+            // otherwise hand over loop counters: UIFinalShell.SetText builds
+            // the main menu from locals, and its counter would be read as a
+            // slot number, joining all five entries into one. Every setter
+            // that matters declares its index as an argument, so the
+            // restriction costs nothing.
+            if ((flags & CPF_PARM) && (kind == PROP_INT || kind == PROP_BYTE)) {
+                if (readable(slot, sizeof(int32_t)))
+                    payload_add_number(p, (float)*(const int32_t*)slot);
+            } else if ((flags & CPF_PARM) && kind == PROP_BOOL) {
+                int b;
+                if (props_read_bool(prop, locals, &b)) payload_add_bool(p, b);
             } else {
-                read_array((const FArray*)slot, p);
+                char val[MAX_STR];
+                if (read_fstring((const FString*)slot, val, sizeof val)) {
+                    strip_markup(val);
+                    if (*val) payload_add_string(p, val);
+                } else {
+                    read_array((const FArray*)slot, p);
+                }
             }
         }
         prop = next;
+    }
+
+    // A checkbox reports its state separately from its name:
+    //
+    //     SetCheckboxLabel(int Index, string strText)   "Enable Ironman?"
+    //     SetCheckboxValue(int Index, bool bChecked)
+    //
+    // The second carries no text, so it logged as "(no text)" and the state
+    // was never spoken -- the box flipped and nothing said so. It is filed as
+    // the control's value, beside the name the label call stored.
+    if (is_checkbox_state_fn(fn_name) && p->nnumbers && p->nbools) {
+        int idx = (int)p->numbers[0];
+        if (idx >= 0 && idx < FOCUS_MAX_LABELS) {
+            const char* state = p->bools[0] ? "checked" : "unchecked";
+            int changed = focus_set_part(object, idx, FOCUS_PART_VALUE, state);
+            logf_("[%ld] %s %s.%s  SLOT %d value = \"%s\"%s\n",
+                  n, tag, obj_name, fn_name, idx, state,
+                  changed ? "  (changed)" : "");
+            if (changed) speak_slot(object, idx);
+        }
+        tls_busy = 0;
+        return;
+    }
+
+    // Which item of a container widget is current. The items were published
+    // separately, so the index resolves against them rather than the slots.
+    if (p->nnumbers && !p->nstrings &&
+        (is_inner_selection_fn(fn_name) || is_marker_fn(fn_name))) {
+        char item[FOCUS_MAX_LABEL];
+        int got;
+        int idx;
+        if (is_inner_selection_fn(fn_name) && p->nnumbers >= 2) {
+            idx = (int)p->numbers[1];
+            got = focus_option_at(object, (int)p->numbers[0], idx,
+                                  item, sizeof item);
+        } else {
+            // A marker names the choice without naming the list, so it is the
+            // list currently being navigated.
+            idx = (int)p->numbers[0];
+            got = focus_recent_option_at(idx, item, sizeof item);
+        }
+        if (got) {
+            logf_("[%ld] %s %s.%s  ITEM %d -> \"%s\"\n",
+                  n, tag, obj_name, fn_name, idx, item);
+            speech_cancel_pending();
+            if (g_speak) speech_say(item);
+        } else {
+            logf_("[%ld] %s %s.%s  ITEM %d unresolved\n",
+                  n, tag, obj_name, fn_name, idx);
+        }
+        tls_busy = 0;
+        return;
     }
 
     if (!p->nstrings && !p->nnumbers) {
@@ -476,13 +624,33 @@ static void capture(const char* tag, LONG n, void* stack)
             used += want;
             joined[used] = 0;
         }
-        if (joined[0] && !is_option_list_fn(fn_name)) {
-            int part = is_value_fn(fn_name) ? FOCUS_PART_VALUE : FOCUS_PART_LABEL;
-            focus_set_part(object, idx, part, joined);
-            logf_("[%ld] %s %s.%s  SLOT %d %s \"%s\"\n", n, tag, obj_name, fn_name,
-                  idx, part == FOCUS_PART_VALUE ? "value =" : "label =", joined);
-        }
+        // Drop any lone line still waiting to be spoken before deciding what
+        // this call should say; otherwise the cancel below would swallow the
+        // announcement this very call schedules.
         speech_cancel_pending();
+
+        if (is_option_list_fn(fn_name)) {
+            // The items belong to the widget at `idx`, not to the screen's
+            // slot list. The trailing entry is the raw string Flash is handed
+            // ("Easy,0 ; Normal,1 ; ...") and is not one of the choices.
+            focus_options_begin(object, idx);
+            int kept = 0;
+            for (int i = 0; i < p->nstrings; i++) {
+                if (looks_like_asset(p->strings[i])) continue;
+                if (strchr(p->strings[i], ';') && strchr(p->strings[i], ',')) continue;
+                focus_options_add(object, idx, p->strings[i]);
+                kept++;
+            }
+            logf_("[%ld] %s %s.%s  OPTIONS slot %d, %d items\n",
+                  n, tag, obj_name, fn_name, idx, kept);
+        } else if (joined[0]) {
+            int part = is_value_fn(fn_name) ? FOCUS_PART_VALUE : FOCUS_PART_LABEL;
+            int changed = focus_set_part(object, idx, part, joined);
+            logf_("[%ld] %s %s.%s  SLOT %d %s \"%s\"%s\n", n, tag, obj_name, fn_name,
+                  idx, part == FOCUS_PART_VALUE ? "value =" : "label =", joined,
+                  changed ? "  (changed)" : "");
+            if (changed) speak_slot(object, idx);
+        }
     } else if (p->nstrings) {
         // No index given. Several strings at once is a screen publishing its
         // contents; repeated single-string calls are the same thing spread
@@ -514,7 +682,22 @@ static void capture(const char* tag, LONG n, void* stack)
                   n, tag, obj_name, fn_name, idx, label);
             speech_cancel_pending();
             if (g_speak) speech_say(label);
+        } else {
+            logf_("[%ld] %s %s.%s  FOCUS %d unresolved\n",
+                  n, tag, obj_name, fn_name, idx);
         }
+    } else if (p->nnumbers) {
+        // Numbers nobody claimed. Now that plain ints are readable these are
+        // no longer invisible, and dropping them silently hid the very call
+        // that names EU's difficulty -- so they are logged even when they say
+        // nothing, because that is the evidence the next screen is read from.
+        char nums[64];
+        size_t used = 0;
+        nums[0] = 0;
+        for (int i = 0; i < p->nnumbers && used + 12 < sizeof nums; i++)
+            used += (size_t)_snprintf_s(nums + used, sizeof nums - used, _TRUNCATE,
+                                        i ? ", %d" : "%d", (int)p->numbers[i]);
+        logf_("[%ld] %s %s.%s  NUMS %s\n", n, tag, obj_name, fn_name, nums);
     }
 
     if (p->nstrings) {

@@ -10,6 +10,7 @@
 #include <string.h>
 #include <windows.h>
 #include "focus.h"
+#include "props.h"
 #include "speech.h"
 
 static int failures;
@@ -153,6 +154,83 @@ int main(void)
         check(used < sizeof joined, "join stays inside the buffer");
         check(joined[used] == 0, "join stays terminated");
         check(strlen(joined) == used, "join length matches");
+    }
+
+    // props.c decides a candidate BitMask offset is real only when the value
+    // is a single bit, and decides a candidate UObject::Class offset is real
+    // only when every field resolves to a name ending "Property". Both tests
+    // run against live memory, but the predicates themselves are pure and are
+    // what a wrong offset has to get past, so they are checked here.
+    // A container widget's items are its own, not the screen's. Flattening
+    // them into the slot is what made EU's difficulty read as one run-on
+    // string, so they are kept per (object, slot).
+    printf("\ncontainer widget items\n");
+    void* diff = (void*)0xF000;
+    focus_options_begin(diff, 0);
+    focus_options_add(diff, 0, "Easy");
+    focus_options_add(diff, 0, "Normal");
+    focus_options_add(diff, 0, "Classic");
+    focus_options_add(diff, 0, "Impossible");
+    check(focus_option_at(diff, 0, 0, buf, sizeof buf) &&
+          strcmp(buf, "Easy") == 0, "item 0 resolves");
+    check(focus_option_at(diff, 0, 3, buf, sizeof buf) &&
+          strcmp(buf, "Impossible") == 0, "item 3 resolves");
+    check(!focus_option_at(diff, 0, 4, buf, sizeof buf), "item past end rejected");
+    check(!focus_option_at(diff, 1, 0, buf, sizeof buf), "other slot has no items");
+
+    // The slot table must be untouched by all of that: the list is one widget,
+    // and its label belongs to the widget, not to its contents.
+    focus_set_part(diff, 1, FOCUS_PART_LABEL, "Enable Ironman?");
+    check(focus_label_at(diff, 1, buf, sizeof buf) &&
+          strcmp(buf, "Enable Ironman?") == 0, "slots unaffected by items");
+
+    // The screen announcing the choice is not always the object holding the
+    // list, so the most recent list resolves a bare index.
+    check(focus_recent_option_at(1, buf, sizeof buf) &&
+          strcmp(buf, "Normal") == 0, "recent list resolves a marker");
+
+    // Republishing a list replaces it rather than appending.
+    focus_options_begin(diff, 0);
+    focus_options_add(diff, 0, "Rookie");
+    check(focus_option_at(diff, 0, 0, buf, sizeof buf) &&
+          strcmp(buf, "Rookie") == 0, "republished list replaced");
+    check(!focus_option_at(diff, 0, 1, buf, sizeof buf), "old items gone");
+
+    // Telling a real change from a screen redrawing itself: only the former
+    // should ever be spoken, or every refresh would talk.
+    printf("\nvalue change detection\n");
+    void* cb = (void*)0xF100;
+    focus_set_part(cb, 0, FOCUS_PART_LABEL, "Enable Ironman?");
+    check(focus_set_part(cb, 0, FOCUS_PART_VALUE, "unchecked") == 0,
+          "first value is not a change");
+    check(focus_set_part(cb, 0, FOCUS_PART_VALUE, "unchecked") == 0,
+          "same value again is not a change");
+    check(focus_set_part(cb, 0, FOCUS_PART_VALUE, "checked") == 1,
+          "different value is a change");
+    // The join adds a space and nothing else -- the game's own labels carry
+    // their punctuation ("Show action cam:" does, "Enable Ironman?" does not),
+    // so inventing a separator would double it on half the screens.
+    check(focus_label_at(cb, 0, buf, sizeof buf) &&
+          strcmp(buf, "Enable Ironman? checked") == 0,
+          "changed value reads with its name");
+
+    printf("\nproperty probe predicates\n");
+    {
+        // A mask selects one bit. Zero means "no mask found", and several bits
+        // means the offset is pointing at something that is not a mask.
+        check(is_single_bit(0x00000001), "mask 1 accepted");
+        check(is_single_bit(0x00000080), "mask 0x80 accepted");
+        check(is_single_bit(0x80000000), "mask 0x80000000 accepted");
+        check(!is_single_bit(0), "zero rejected");
+        check(!is_single_bit(3), "two bits rejected");
+        check(!is_single_bit(0xFFFFFFFF), "all bits rejected");
+
+        check(ends_with_property("IntProperty"), "IntProperty accepted");
+        check(ends_with_property("BoolProperty"), "BoolProperty accepted");
+        check(!ends_with_property("Property"), "bare Property rejected");
+        check(!ends_with_property("UIWidgetHelper"), "class name rejected");
+        check(!ends_with_property(""), "empty rejected");
+        check(!ends_with_property("Propert"), "near miss rejected");
     }
 
     printf("\nspeech debounce\n");

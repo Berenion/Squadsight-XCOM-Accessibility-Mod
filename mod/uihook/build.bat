@@ -15,7 +15,7 @@ pushd "%OUT%"
 
 cl /nologo /W3 /O2 /MT /LD ^
    /I"%MH%\include" /I"%MH%\src" ^
-   "%HERE%main.c" "%HERE%natives.c" "%HERE%names.c" "%HERE%speech.c" "%HERE%focus.c" ^
+   "%HERE%main.c" "%HERE%natives.c" "%HERE%names.c" "%HERE%speech.c" "%HERE%focus.c" "%HERE%props.c" ^
    "%MH%\src\hook.c" "%MH%\src\buffer.c" "%MH%\src\trampoline.c" "%MH%\src\hde\hde32.c" ^
    /Fe:xcom_uihook.dll ^
    /link /OUT:xcom_uihook.dll ole32.lib oleaut32.lib sapi.lib

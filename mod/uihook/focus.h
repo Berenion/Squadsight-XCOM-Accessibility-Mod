@@ -45,7 +45,33 @@ void focus_set(void* obj, int index, const char* text);
 // kept apart and joined only when the slot is read.
 #define FOCUS_PART_LABEL 0
 #define FOCUS_PART_VALUE 1
-void focus_set_part(void* obj, int index, int part, const char* text);
+
+// Returns 1 when this overwrote a *different* value that was already there,
+// which is how a genuine change is told from a screen populating itself. A
+// checkbox being flipped has to be spoken; the same checkbox being redrawn
+// with the state it already had must not be.
+int focus_set_part(void* obj, int index, int part, const char* text);
+
+// A container widget holds its own items, so an index can mean "which widget"
+// or "which item inside one widget", and both appear:
+//
+//     SetListOptions(int Index, array<string> arrLabels)   the items
+//     SetListSelection(int Index, int iSelection)          which item
+//
+// The items are kept per (object, slot) rather than flattened into the slot,
+// which is what made EU's difficulty screen read as one run-on string.
+#define FOCUS_MAX_OPTIONS 64
+
+void focus_options_begin(void* obj, int slot);
+void focus_options_add(void* obj, int slot, const char* text);
+int  focus_option_at(void* obj, int slot, int index, char* out, size_t out_sz);
+
+// The screen that publishes a list and the screen that announces the choice
+// are not always the same object -- EU's difficulty list belongs to the widget
+// helper while AS_SetCurrentDifficultyMarker(int Index) fires on the shell.
+// Only one option list is ever being navigated at a time, so the most recent
+// one resolves those.
+int  focus_recent_option_at(int index, char* out, size_t out_sz);
 
 // Resolves an index against `obj`'s list.  Returns 0 if unknown.
 int  focus_label_at(void* obj, int index, char* out, size_t out_sz);
