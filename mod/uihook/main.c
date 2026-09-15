@@ -214,6 +214,41 @@ static int looks_like_asset(const char* s)
     return dot;
 }
 
+// Does a text-free call carrying a number mean "the cursor moved"?
+//
+// Most of them do not.  The widget setters take the *widget's* index, not the
+// selection -- UIWidgetHelper.uc:
+//
+//     simulated function SetReadOnly(int Index, bool bReadOnly)
+//     private final simulated function SetSliderValue(int Index, int iValue)
+//     private final simulated function SetSpinnerArrows(int Index, bool bCanSpin)
+//
+// and each runs once per widget as a screen is built, so reading them as
+// cursor moves narrates the whole screen on arrival -- the exact behaviour
+// focus tracking exists to prevent.  Measured on the options screens: 274 such
+// calls against 52 real moves.
+//
+// The genuine signal is the ActionScript method `SetSelected`, but that name
+// lives in the native's own argument, which is still unevaluated bytecode at
+// hook entry -- reading it would mean stepping Stack.Code and re-running the
+// argument expressions.  The callers are used instead: every UnrealScript
+// function that sends SetSelected was enumerated from the decompiled source of
+// both builds, and they are named consistently.
+//
+// Arity is not the test.  RealizeSelected() takes nothing and reads
+// m_iCurrentWidget, but UILoadGame.SetSelected(int iTarget) and
+// UIProtoWidget_Menu.SetSelected(int iItem) are equally genuine and do take
+// the index as a parameter.
+static int is_selection_fn(const char* fn)
+{
+    return strncmp(fn, "RealizeSelected", 15) == 0 ||   // + _Inventory, _Locker, Tab
+           strncmp(fn, "AS_SetSelected",  14) == 0 ||   // + MainMenu, SubMenu, Tab, Category, Icon
+           strncmp(fn, "SetSelected",     11) == 0 ||   // + BoundsCheck, MenuOption, Item
+           strcmp (fn, "Deselect")        == 0 ||
+           strcmp (fn, "SelectNextMenu")  == 0 ||
+           strcmp (fn, "SelectPrevMenu")  == 0;
+}
+
 
 // UnrealScript's ASValue is a 24-byte { int Type; int B; float N; FString S },
 // which the observed array offsets confirm: the main menu's labels landed at
@@ -443,9 +478,10 @@ static void capture(const char* tag, LONG n, void* stack)
             if (!looks_like_asset(p->strings[0]))
                 speech_say_after(p->strings[0], SETTLE_MS);
         }
-    } else if (p->nnumbers && focus_count(object) > 0) {
-        // No text, just an index: this is the cursor moving. XCOM never
-        // re-sends the label, so resolve it from what the screen published.
+    } else if (p->nnumbers && is_selection_fn(fn_name) && focus_count(object) > 0) {
+        // No text, just an index, from a function that actually moves the
+        // selection: XCOM never re-sends the label, so resolve it from what
+        // the screen published.
         int idx = (int)p->numbers[0];
         char label[FOCUS_MAX_LABEL];
         if (focus_label_at(object, idx, label, sizeof label)) {
