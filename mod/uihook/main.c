@@ -214,6 +214,30 @@ static int looks_like_asset(const char* s)
     return dot;
 }
 
+// A settings widget states its name and its value through two calls carrying
+// the same index, so they must be filed as different parts of one control
+// (UIWidgetHelper.uc):
+//
+//     SetSpinnerLabel(int Index, string strText)     "Mode:"
+//     SetSpinnerValue(int Index, string StrValue)    "Fullscreen"
+//     SetComboboxLabel(int Index, string strText)    "Resolution:"
+//     SetComboboxText(int Index, string strText)     "1920 x 1080"
+//
+// Matched on a substring because the same setters also arrive AS_-prefixed.
+static int is_value_fn(const char* fn)
+{
+    return strstr(fn, "SpinnerValue") != NULL ||
+           strstr(fn, "ComboboxText") != NULL;
+}
+
+// SetDropdownOptions(int Index, array<string> arrLabels) ships every choice a
+// combobox offers, not the one in force, so it must not be filed as the
+// control's text -- it would read the whole resolution list on every move.
+static int is_option_list_fn(const char* fn)
+{
+    return strstr(fn, "DropdownOptions") != NULL;
+}
+
 // Does a text-free call carrying a number mean "the cursor moved"?
 //
 // Most of them do not.  The widget setters take the *widget's* index, not the
@@ -452,10 +476,11 @@ static void capture(const char* tag, LONG n, void* stack)
             used += want;
             joined[used] = 0;
         }
-        if (joined[0]) {
-            focus_set(object, idx, joined);
-            logf_("[%ld] %s %s.%s  SLOT %d = \"%s\"\n",
-                  n, tag, obj_name, fn_name, idx, joined);
+        if (joined[0] && !is_option_list_fn(fn_name)) {
+            int part = is_value_fn(fn_name) ? FOCUS_PART_VALUE : FOCUS_PART_LABEL;
+            focus_set_part(object, idx, part, joined);
+            logf_("[%ld] %s %s.%s  SLOT %d %s \"%s\"\n", n, tag, obj_name, fn_name,
+                  idx, part == FOCUS_PART_VALUE ? "value =" : "label =", joined);
         }
         speech_cancel_pending();
     } else if (p->nstrings) {

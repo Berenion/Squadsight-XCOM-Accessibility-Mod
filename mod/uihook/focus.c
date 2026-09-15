@@ -7,6 +7,7 @@
 
 #include "focus.h"
 #include <string.h>
+#include <stdio.h>
 
 #define FOCUS_SLOTS 12
 
@@ -15,6 +16,7 @@ typedef struct {
     ULONGLONG touched;
     int       count;
     char      labels[FOCUS_MAX_LABELS][FOCUS_MAX_LABEL];
+    char      values[FOCUS_MAX_LABELS][FOCUS_MAX_LABEL];
 } Slot;
 
 static Slot g_slots[FOCUS_SLOTS];
@@ -30,6 +32,18 @@ static void ensure_init(void)
     // the hook is only ever driven from the game's UI thread.
 }
 
+// Clears both parts of every entry, not just the ones below `count`.  A
+// reclaimed slot would otherwise let the previous occupant's value survive
+// under a new object's label -- "Shadows: 1920 x 1080".
+static void slot_clear(Slot* s)
+{
+    for (int i = 0; i < FOCUS_MAX_LABELS; i++) {
+        s->labels[i][0] = 0;
+        s->values[i][0] = 0;
+    }
+    s->count = 0;
+}
+
 static Slot* slot_for(void* obj, int create)
 {
     Slot* oldest = &g_slots[0];
@@ -40,7 +54,7 @@ static Slot* slot_for(void* obj, int create)
     if (!create) return NULL;
 
     oldest->obj = obj;
-    oldest->count = 0;
+    slot_clear(oldest);
     return oldest;
 }
 
@@ -50,7 +64,7 @@ void focus_begin(void* obj)
     ensure_init();
     EnterCriticalSection(&g_lock);
     Slot* s = slot_for(obj, 1);
-    s->count = 0;
+    slot_clear(s);
     s->touched = GetTickCount64();
     LeaveCriticalSection(&g_lock);
 }
@@ -63,6 +77,7 @@ void focus_add(void* obj, const char* text)
     Slot* s = slot_for(obj, 1);
     if (s->count < FOCUS_MAX_LABELS) {
         strncpy_s(s->labels[s->count], FOCUS_MAX_LABEL, text, _TRUNCATE);
+        s->values[s->count][0] = 0;
         s->count++;
     }
     s->touched = GetTickCount64();
@@ -71,6 +86,11 @@ void focus_add(void* obj, const char* text)
 
 void focus_set(void* obj, int index, const char* text)
 {
+    focus_set_part(obj, index, FOCUS_PART_LABEL, text);
+}
+
+void focus_set_part(void* obj, int index, int part, const char* text)
+{
     if (!obj || !text || !*text) return;
     if (index < 0 || index >= FOCUS_MAX_LABELS) return;
     ensure_init();
@@ -78,8 +98,9 @@ void focus_set(void* obj, int index, const char* text)
     Slot* s = slot_for(obj, 1);
     // Slots skipped over stay empty rather than shifting anything: the index
     // is the screen's own, so it must map straight through.
-    for (int i = s->count; i < index; i++) s->labels[i][0] = 0;
-    strncpy_s(s->labels[index], FOCUS_MAX_LABEL, text, _TRUNCATE);
+    for (int i = s->count; i < index; i++) { s->labels[i][0] = 0; s->values[i][0] = 0; }
+    char* dst = (part == FOCUS_PART_VALUE) ? s->values[index] : s->labels[index];
+    strncpy_s(dst, FOCUS_MAX_LABEL, text, _TRUNCATE);
     if (index >= s->count) s->count = index + 1;
     s->touched = GetTickCount64();
     LeaveCriticalSection(&g_lock);
@@ -94,8 +115,16 @@ int focus_label_at(void* obj, int index, char* out, size_t out_sz)
     int ok = 0;
     EnterCriticalSection(&g_lock);
     Slot* s = slot_for(obj, 0);
-    if (s && index < s->count && s->labels[index][0]) {
-        strncpy_s(out, out_sz, s->labels[index], _TRUNCATE);
+    if (s && index < s->count && (s->labels[index][0] || s->values[index][0])) {
+        // "Mode:" + "Fullscreen" -> "Mode: Fullscreen".  A control with only
+        // one of the two (a button, a slider whose value never arrives as
+        // text) still reads correctly, so no special case is needed.
+        const char* lab = s->labels[index];
+        const char* val = s->values[index];
+        if (lab[0] && val[0])
+            _snprintf_s(out, out_sz, _TRUNCATE, "%s %s", lab, val);
+        else
+            strncpy_s(out, out_sz, lab[0] ? lab : val, _TRUNCATE);
         s->touched = GetTickCount64();
         ok = 1;
     }

@@ -34,6 +34,19 @@ void focus_add(void* obj, const char* text);
 // interleaved with other traffic and can be refreshed one at a time.
 void focus_set(void* obj, int index, const char* text);
 
+// A settings widget names itself and states its value through two separate
+// calls that carry the *same* index, because both describe one control:
+//
+//     SetSpinnerLabel(int Index, string strText)    -> "Mode:"
+//     SetSpinnerValue(int Index, string StrValue)   -> "Fullscreen"
+//
+// Filing both as plain labels let the second overwrite the first, leaving
+// "Fullscreen" with nothing to say which setting it belonged to.  They are
+// kept apart and joined only when the slot is read.
+#define FOCUS_PART_LABEL 0
+#define FOCUS_PART_VALUE 1
+void focus_set_part(void* obj, int index, int part, const char* text);
+
 // Resolves an index against `obj`'s list.  Returns 0 if unknown.
 int  focus_label_at(void* obj, int index, char* out, size_t out_sz);
 

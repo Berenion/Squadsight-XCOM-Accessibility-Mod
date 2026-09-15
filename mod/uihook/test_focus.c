@@ -88,6 +88,43 @@ int main(void)
           strcmp(buf, "third") == 0, "out-of-order slot 2");
     check(!focus_label_at(screenD, 1, buf, sizeof buf), "gap stays empty");
 
+    // A settings widget names itself and states its value in two calls that
+    // carry the same index. Filing both as labels let the value overwrite the
+    // name, so the options screen said "Fullscreen" without saying of what.
+    printf("\nlabel and value share a slot\n");
+    void* opts = (void*)0xE000;
+    focus_begin(opts);
+    focus_set_part(opts, 0, FOCUS_PART_LABEL, "Mode:");
+    focus_set_part(opts, 0, FOCUS_PART_VALUE, "Fullscreen");
+    check(focus_label_at(opts, 0, buf, sizeof buf) &&
+          strcmp(buf, "Mode: Fullscreen") == 0, "label and value joined");
+
+    // Order must not matter: the value can arrive first on a refresh.
+    focus_set_part(opts, 1, FOCUS_PART_VALUE, "1920 x 1080");
+    focus_set_part(opts, 1, FOCUS_PART_LABEL, "Resolution:");
+    check(focus_label_at(opts, 1, buf, sizeof buf) &&
+          strcmp(buf, "Resolution: 1920 x 1080") == 0, "value may arrive first");
+
+    // Changing the value leaves the name alone -- the whole point of parts.
+    focus_set_part(opts, 0, FOCUS_PART_VALUE, "Windowed");
+    check(focus_label_at(opts, 0, buf, sizeof buf) &&
+          strcmp(buf, "Mode: Windowed") == 0, "new value keeps the label");
+
+    // A control with only one half still reads (buttons, sliders).
+    focus_set_part(opts, 2, FOCUS_PART_LABEL, "Gamma:");
+    check(focus_label_at(opts, 2, buf, sizeof buf) &&
+          strcmp(buf, "Gamma:") == 0, "label alone, no trailing space");
+    focus_set_part(opts, 3, FOCUS_PART_VALUE, "On");
+    check(focus_label_at(opts, 3, buf, sizeof buf) &&
+          strcmp(buf, "On") == 0, "value alone");
+
+    // A reclaimed slot must not leak the previous occupant's value under a
+    // new object's label -- "Shadows: 1920 x 1080".
+    focus_begin(opts);
+    focus_set_part(opts, 0, FOCUS_PART_LABEL, "Shadows:");
+    check(focus_label_at(opts, 0, buf, sizeof buf) &&
+          strcmp(buf, "Shadows:") == 0, "republish drops the old value");
+
     // Regression: SetDropdownOptions crashed the game by overrunning the
     // join buffer. strcat_s does not truncate -- on a full destination it
     // calls the CRT invalid-parameter handler, which __fastfail()s past SEH,
