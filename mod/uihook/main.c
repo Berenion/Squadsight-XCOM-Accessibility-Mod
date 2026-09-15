@@ -363,7 +363,8 @@ static void capture(const char* tag, LONG n, void* stack)
 
     if (!p->nstrings && !p->nnumbers) {
         logf_("[%ld] %s %s.%s (no text)\n", n, tag, obj_name, fn_name);
-        return;
+        tls_busy = 0;   // every exit must clear the guard, or the first
+        return;         // text-free call silences the hook for good
     }
 
     for (int i = 0; i < p->nstrings; i++)
