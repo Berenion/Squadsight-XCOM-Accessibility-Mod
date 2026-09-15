@@ -308,11 +308,9 @@ static int g_fired_cmd;
 // does not own, so both are applied and the log says which took.
 #define CMD_INERT 900
 
-// What rewrite_cmd did, so the thunk knows whether to force the native's
-// answer and what is worth logging about it.
-#define UNTOUCHED 0
-#define SWALLOW   1
-#define ACTED     2
+// rewrite_cmd answers one question: should this command reach the screen?
+#define DELIVER   0
+#define SUPPRESS  1
 
 static int muted(void)
 {
@@ -940,12 +938,12 @@ static void capture(const char* tag, LONG n, void* stack)
 // would still run the rest of the handler.
 static int rewrite_cmd(LONG n, void* stack)
 {
-    if (!readable(stack, 0x20)) return UNTOUCHED;
+    if (!readable(stack, 0x20)) return DELIVER;
 
     void* node      = *(void**)((uint8_t*)stack + FFRAME_NODE);
     void* object    = *(void**)((uint8_t*)stack + FFRAME_OBJECT);
     uint8_t* locals = *(uint8_t**)((uint8_t*)stack + FFRAME_LOCALS);
-    if (!locals || !props_ready()) return UNTOUCHED;
+    if (!locals || !props_ready()) return DELIVER;
 
     char screen[128] = "?";
     object_name(object, screen, sizeof screen);
@@ -964,7 +962,7 @@ static int rewrite_cmd(LONG n, void* stack)
     int have_mask = 0;
 
     for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
-        if (!readable(prop, 0x68)) return UNTOUCHED;
+        if (!readable(prop, 0x68)) return DELIVER;
 
         uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
         uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
@@ -980,7 +978,7 @@ static int rewrite_cmd(LONG n, void* stack)
                 // writable as well as readable; a local that lives in
                 // read-only memory would mean this is not the frame we think
                 // it is.
-                if (!writable(slot, sizeof *slot)) return UNTOUCHED;
+                if (!writable(slot, sizeof *slot)) return DELIVER;
                 cmd_slot = slot;
             } else if (cmd_slot && !have_mask && readable(slot, sizeof *slot)) {
                 mask = *slot;
@@ -996,7 +994,7 @@ static int rewrite_cmd(LONG n, void* stack)
         // so: it would mean this screen's handler is shaped differently, and
         // every key on it would silently do nothing.
         logf_("[%ld] Input        %s  no Cmd parameter found\n", n, screen);
-        return UNTOUCHED;
+        return DELIVER;
     }
 
     int cmd = *cmd_slot;
@@ -1033,7 +1031,7 @@ static int rewrite_cmd(LONG n, void* stack)
             // The keystroke ends at the release; anything else pending would
             // hijack the next press of the same key.
             if (have_mask && (mask & FXS_ACTION_RELEASE)) g_fired_key = 0;
-            return ACTED;
+            return DELIVER;
         }
         g_fired_key = 0;               // a different key: the moment has passed
     }
@@ -1046,19 +1044,18 @@ static int rewrite_cmd(LONG n, void* stack)
                          : HELP_MENU_QUIET;
         switch (what) {
             case HELP_MENU_SPEAK:
-                logf_("[%ld] Input        %s  MENU \"%s\" (mask %d)\n",
-                      n, screen, say, mask);
+                logf_("[%ld] Input        %s  MENU \"%s\"\n", n, screen, say);
                 if (g_speak) speech_say_now(say);
                 *cmd_slot = CMD_INERT;
                 // The screen still runs its handler to the end on an inert
                 // command, and UIShellDifficulty refreshes its description
                 // there, so keep the quiet window alive while the menu is up.
                 g_quiet_until = GetTickCount64() + QUIET_MS;
-                return SWALLOW;
+                return SUPPRESS;
             case HELP_MENU_QUIET:
                 *cmd_slot = CMD_INERT;
                 g_quiet_until = GetTickCount64() + QUIET_MS;
-                return SWALLOW;
+                return SUPPRESS;
             case HELP_MENU_FIRE:
                 // The player's own keypress carries the command in. Nothing
                 // is synthesised: this is the rewrite the table does, with
@@ -1066,12 +1063,12 @@ static int rewrite_cmd(LONG n, void* stack)
                 *cmd_slot = fire;
                 g_fired_key = cmd;
                 g_fired_cmd = fire;
-                logf_("[%ld] Input        %s  MENU fires %s(%d) in place of %d"
-                      " (mask %d)\n", n, screen,
-                      input_cmd_name(fire) ? input_cmd_name(fire) : "?", fire,
-                      cmd, mask);
+                logf_("[%ld] Input        %s  MENU fires %s(%d) in place of %d\n",
+                      n, screen,
+                      input_cmd_name(fire) ? input_cmd_name(fire) : "?",
+                      fire, cmd);
                 g_quiet_until = 0;
-                return ACTED;
+                return DELIVER;
             default:
                 // Stale -- the screen changed under it. Fall through and treat
                 // the key as the screen's own.
@@ -1091,15 +1088,15 @@ static int rewrite_cmd(LONG n, void* stack)
         if (press) {
             char say[512];
             int count = help_menu_open(screen, say, sizeof say);
-            logf_("[%ld] Input        %s  MENU open (%d) \"%s\" (mask %d)\n",
-                  n, screen, count, say, mask);
+            logf_("[%ld] Input        %s  MENU open (%d) \"%s\"\n",
+                  n, screen, count, say);
             if (g_speak) speech_say_now(say);
         }
         *cmd_slot = CMD_INERT;
         // An inert command still runs the handler to its end, and
         // UIShellDifficulty refreshes its description there. See muted().
         g_quiet_until = GetTickCount64() + QUIET_MS;
-        return SWALLOW;
+        return SUPPRESS;
     }
 
     // Anything else means the player has moved on, and what it redraws is
@@ -1122,7 +1119,7 @@ static int rewrite_cmd(LONG n, void* stack)
         logf_("[%ld] Input        %s  cmd %d%s%s\n", n, screen, cmd,
               from_name ? " = " : "", from_name ? from_name : "");
     }
-    return UNTOUCHED;
+    return DELIVER;
 }
 
 #define THUNK(id, tag)                                                        \
@@ -1146,8 +1143,8 @@ static void __fastcall hook_checkinput(void* self, void* edx,
                                        void* stack, void* result)
 {
     LONG n = InterlockedIncrement(&g_calls);
-    int swallow = 0;
-    __try { swallow = rewrite_cmd(n, stack); }
+    int suppress = 0;
+    __try { suppress = rewrite_cmd(n, stack); }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         logf_("[%ld] Input        rewrite faulted (0x%08lx)\n",
               n, GetExceptionCode());
@@ -1156,22 +1153,15 @@ static void __fastcall hook_checkinput(void* self, void* edx,
 
     // The native's own answer, overwritten after it has given it: a UBOOL is
     // a 32-bit int, and every screen returns immediately when it is false.
-    // The command has also been made inert by now, because this write reaches
-    // a result pointer this code does not own.
-    //
-    // The answer is read back as well as written, because it is the only way
-    // to tell a screen that ignored a command from one that never got as far
-    // as looking at it -- a menu choice that fired correctly and produced
-    // nothing turned out to be the second.
-    int ret = readable(result, sizeof(int32_t)) ? *(const int32_t*)result : -1;
-    if (swallow == SWALLOW) {
-        int ok = writable(result, sizeof(int32_t));
-        if (ok) *(int32_t*)result = 0;
-        logf_("[%ld] Input        swallow: native said %d, result %p %s\n",
-              n, ret, result, ok ? "forced false" : "NOT WRITABLE");
-    } else if (swallow == ACTED) {
-        logf_("[%ld] Input        after rewrite: native said %d%s\n", n, ret,
-              ret == 0 ? "  -- the screen will ignore this key" : "");
+    // The command has been made inert as well, so a refusal here costs the
+    // tidiness of the swallow rather than the swallow itself -- but it means
+    // this frame is not what it appears to be, which is worth saying.
+    if (suppress) {
+        if (writable(result, sizeof(int32_t)))
+            *(int32_t*)result = 0;
+        else
+            logf_("[%ld] Input        result %p not writable; the command was "
+                  "made inert instead\n", n, result);
     }
 }
 
