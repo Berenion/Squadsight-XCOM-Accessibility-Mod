@@ -43,7 +43,15 @@ static NvdaCancelFn g_nvda_cancel;
 
 static ISpVoice*     g_voice;
 
-static wchar_t       g_queue[QUEUE_SIZE][MAX_UTTER];
+// Each entry carries whether it interrupts, because a menu moving its
+// highlight must cut off whatever is still being read -- a queue that only
+// appends makes navigation wait for the previous item to finish.
+typedef struct {
+    wchar_t text[MAX_UTTER];
+    int     interrupt;
+} Utterance;
+
+static Utterance     g_queue[QUEUE_SIZE];
 static int           g_head, g_tail;
 static CRITICAL_SECTION g_qlock;
 static HANDLE        g_wake;
@@ -101,20 +109,21 @@ static DWORD WINAPI worker(LPVOID param)
                 g_tail = (g_tail + 1) % QUEUE_SIZE;
                 InterlockedIncrement(&g_dropped);
             }
-            wcscpy_s(g_queue[g_head], MAX_UTTER, g_pending);
+            wcscpy_s(g_queue[g_head].text, MAX_UTTER, g_pending);
+            g_queue[g_head].interrupt = 0;
             g_head = next;
             g_pending_due = 0;
         }
         LeaveCriticalSection(&g_qlock);
 
         for (;;) {
-            wchar_t line[MAX_UTTER];
+            Utterance line;
             EnterCriticalSection(&g_qlock);
             if (g_head == g_tail) { LeaveCriticalSection(&g_qlock); break; }
-            wcscpy_s(line, MAX_UTTER, g_queue[g_tail]);
+            line = g_queue[g_tail];
             g_tail = (g_tail + 1) % QUEUE_SIZE;
             LeaveCriticalSection(&g_qlock);
-            speak_now(line, 0);
+            speak_now(line.text, line.interrupt);
         }
     }
 
@@ -241,7 +250,7 @@ int speech_init(const char* dll_dir, char* why, size_t why_sz)
     return g_thread != NULL;
 }
 
-void speech_say(const char* utf8)
+static void enqueue(const char* utf8, int interrupt)
 {
     if (!g_thread || !utf8 || !*utf8) return;
 
@@ -250,16 +259,34 @@ void speech_say(const char* utf8)
     if (n <= 0) return;
 
     EnterCriticalSection(&g_qlock);
+    if (interrupt) {
+        // Everything queued was about to be read out over the top of what the
+        // player just asked for.  It described the screen they were on a
+        // moment ago, so it is dropped rather than delivered late.
+        g_tail = g_head;
+        g_pending_due = 0;
+    }
     int next = (g_head + 1) % QUEUE_SIZE;
     if (next == g_tail) {
         // Full: drop the oldest so the newest still gets through.
         g_tail = (g_tail + 1) % QUEUE_SIZE;
         InterlockedIncrement(&g_dropped);
     }
-    wcscpy_s(g_queue[g_head], MAX_UTTER, wide);
+    wcscpy_s(g_queue[g_head].text, MAX_UTTER, wide);
+    g_queue[g_head].interrupt = interrupt;
     g_head = next;
     LeaveCriticalSection(&g_qlock);
     SetEvent(g_wake);
+}
+
+void speech_say(const char* utf8)
+{
+    enqueue(utf8, 0);
+}
+
+void speech_say_now(const char* utf8)
+{
+    enqueue(utf8, 1);
 }
 
 void speech_say_after(const char* utf8, unsigned delay_ms)

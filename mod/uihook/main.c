@@ -295,6 +295,25 @@ static int is_option_list_fn(const char* fn)
 static ULONGLONG g_quiet_until;
 #define QUIET_MS 1000
 
+// The key whose events carry a menu choice already made, and the command it
+// was told to mean.  See rewrite_cmd.
+static int g_fired_key;
+static int g_fired_cmd;
+
+// What a swallowed command is turned into.  Every FXS range ends well below
+// this -- controller 379, mouse 424, keyboard 700 -- so no switch anywhere has
+// a case for it and no range test claims it.  Rewriting the command is the
+// mechanism already proven by the key remaps; forcing the native's answer to
+// false is cleaner in principle but has to reach a result pointer this code
+// does not own, so both are applied and the log says which took.
+#define CMD_INERT 900
+
+// What rewrite_cmd did, so the thunk knows whether to force the native's
+// answer and what is worth logging about it.
+#define UNTOUCHED 0
+#define SWALLOW   1
+#define ACTED     2
+
 static int muted(void)
 {
     return g_quiet_until && GetTickCount64() < g_quiet_until;
@@ -909,14 +928,24 @@ static void capture(const char* tag, LONG n, void* stack)
 // switch below reads Cmd. The parameter is found the same way text is: by
 // walking the caller's UProperty chain and matching the declared name, rather
 // than assuming it is first in the frame.
-static void rewrite_cmd(LONG n, void* stack)
+// Returns 1 when the command must not reach the screen at all.  The caller
+// delivers that by forcing this native's own answer to false: every screen
+// opens its handler with
+//
+//     if(CheckInputIsReleaseOrDirectionRepeat(Cmd, Arg)!) return true;
+//
+// so a false answer makes the screen report the key as handled and do nothing
+// with it -- before the switch, and before the refresh at the end. That is a
+// cleaner swallow than rewriting the command to a code nothing matches, which
+// would still run the rest of the handler.
+static int rewrite_cmd(LONG n, void* stack)
 {
-    if (!readable(stack, 0x20)) return;
+    if (!readable(stack, 0x20)) return UNTOUCHED;
 
     void* node      = *(void**)((uint8_t*)stack + FFRAME_NODE);
     void* object    = *(void**)((uint8_t*)stack + FFRAME_OBJECT);
     uint8_t* locals = *(uint8_t**)((uint8_t*)stack + FFRAME_LOCALS);
-    if (!locals || !props_ready()) return;
+    if (!locals || !props_ready()) return UNTOUCHED;
 
     char screen[128] = "?";
     object_name(object, screen, sizeof screen);
@@ -935,7 +964,7 @@ static void rewrite_cmd(LONG n, void* stack)
     int have_mask = 0;
 
     for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
-        if (!readable(prop, 0x68)) return;
+        if (!readable(prop, 0x68)) return UNTOUCHED;
 
         uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
         uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
@@ -951,7 +980,7 @@ static void rewrite_cmd(LONG n, void* stack)
                 // writable as well as readable; a local that lives in
                 // read-only memory would mean this is not the frame we think
                 // it is.
-                if (!writable(slot, sizeof *slot)) return;
+                if (!writable(slot, sizeof *slot)) return UNTOUCHED;
                 cmd_slot = slot;
             } else if (cmd_slot && !have_mask && readable(slot, sizeof *slot)) {
                 mask = *slot;
@@ -967,38 +996,110 @@ static void rewrite_cmd(LONG n, void* stack)
         // so: it would mean this screen's handler is shaped differently, and
         // every key on it would silently do nothing.
         logf_("[%ld] Input        %s  no Cmd parameter found\n", n, screen);
-        return;
+        return UNTOUCHED;
     }
 
     int cmd = *cmd_slot;
     const char* from_name = input_cmd_name(cmd);
 
-    // The key that reads out what this screen says its buttons do.
+    // A single keystroke arrives here several times -- press, hold, release --
+    // and the native this hook runs on exists precisely to filter those, which
+    // it does *after* us.  Anything that speaks or moves has to filter them
+    // itself, or one press acts three times.
+    int press = (!have_mask || (mask & FXS_ACTION_PRESS));
+
+    // The rest of the keystroke that fired something from the menu.
     //
-    // Speaking happens on the press alone.  A single keystroke arrives here
-    // several times -- press, hold, release -- and the native this hook runs
-    // on exists precisely to filter those, which it does *after* us, so the
-    // announcement has to filter them itself or it stutters.
+    // One keystroke reaches this native several times and the screen acts on
+    // only one of them -- not the first, and not the one carrying the press
+    // bit. The log says so plainly: of the four calls behind a single Enter,
+    // the native answered false to three and true to the last.
     //
-    // The command is left alone rather than swallowed: no shell screen has a
-    // case for 621.  The tactical HUD does -- UITacticalHUD_AbilityContainer
-    // spends 619, 620 and 621 on DirectPickAbility -- so this key needs
-    // either a swallow or a different code before tactical work begins.
-    if (cmd == FXS_KEY_0) {
-        if (!have_mask || (mask & FXS_ACTION_PRESS)) {
-            char say[512];
-            int count = help_announce(screen, say, sizeof say);
-            logf_("[%ld] Input        %s  HELP MENU (%d) \"%s\"\n",
-                  n, screen, count, say);
-            speech_cancel_pending();
-            if (g_speak) speech_say(say);
-            // The screen is about to redraw on the way out of its own
-            // handler, with nothing new in it. See muted().
-            g_quiet_until = GetTickCount64() + QUIET_MS;
-        } else {
-            logf_("[%ld] Input        %s  cmd %d\n", n, screen, cmd);
+    //     [100] MENU fires X(302) in place of 511 (mask 1)
+    //     [100] after rewrite: native said 0  -- the screen will ignore this
+    //     [101] swallow: native said 0
+    //     [102] swallow: native said 0
+    //     [103] swallow: native said 1        <- the one that would have acted
+    //
+    // So a choice is carried by the *whole* keystroke rather than by the
+    // event the menu happened to act on. That is what the key remaps have
+    // always done -- they rewrite every call, which is precisely why they
+    // work -- and firing now does the same. It also keeps the trailing
+    // events from arriving as a bare Enter, which is how firing "advanced
+    // options" used to tick the difficulty checkbox underneath.
+    if (g_fired_key) {
+        if (cmd == g_fired_key) {
+            *cmd_slot = g_fired_cmd;
+            // The keystroke ends at the release; anything else pending would
+            // hijack the next press of the same key.
+            if (have_mask && (mask & FXS_ACTION_RELEASE)) g_fired_key = 0;
+            return ACTED;
         }
-        return;
+        g_fired_key = 0;               // a different key: the moment has passed
+    }
+
+    // While the menu is up the player is talking to it, not to the screen.
+    if (help_menu_is_open()) {
+        char say[512];
+        int fire = 0;
+        int what = press ? help_menu_key(screen, cmd, &fire, say, sizeof say)
+                         : HELP_MENU_QUIET;
+        switch (what) {
+            case HELP_MENU_SPEAK:
+                logf_("[%ld] Input        %s  MENU \"%s\" (mask %d)\n",
+                      n, screen, say, mask);
+                if (g_speak) speech_say_now(say);
+                *cmd_slot = CMD_INERT;
+                // The screen still runs its handler to the end on an inert
+                // command, and UIShellDifficulty refreshes its description
+                // there, so keep the quiet window alive while the menu is up.
+                g_quiet_until = GetTickCount64() + QUIET_MS;
+                return SWALLOW;
+            case HELP_MENU_QUIET:
+                *cmd_slot = CMD_INERT;
+                g_quiet_until = GetTickCount64() + QUIET_MS;
+                return SWALLOW;
+            case HELP_MENU_FIRE:
+                // The player's own keypress carries the command in. Nothing
+                // is synthesised: this is the rewrite the table does, with
+                // the target chosen a moment ago instead of years ago.
+                *cmd_slot = fire;
+                g_fired_key = cmd;
+                g_fired_cmd = fire;
+                logf_("[%ld] Input        %s  MENU fires %s(%d) in place of %d"
+                      " (mask %d)\n", n, screen,
+                      input_cmd_name(fire) ? input_cmd_name(fire) : "?", fire,
+                      cmd, mask);
+                g_quiet_until = 0;
+                return ACTED;
+            default:
+                // Stale -- the screen changed under it. Fall through and treat
+                // the key as the screen's own.
+                logf_("[%ld] Input        %s  MENU closed, screen changed\n",
+                      n, screen);
+                break;
+        }
+    }
+
+    // The key that opens the menu, and reads the whole list on the way in so
+    // that one press still answers "what can I do here".
+    //
+    // It is swallowed, so the screen never sees 621: the shell has no case for
+    // it, but UITacticalHUD_AbilityContainer spends 619, 620 and 621 on
+    // DirectPickAbility, and this key has to mean the same thing everywhere.
+    if (cmd == FXS_KEY_0) {
+        if (press) {
+            char say[512];
+            int count = help_menu_open(screen, say, sizeof say);
+            logf_("[%ld] Input        %s  MENU open (%d) \"%s\" (mask %d)\n",
+                  n, screen, count, say, mask);
+            if (g_speak) speech_say_now(say);
+        }
+        *cmd_slot = CMD_INERT;
+        // An inert command still runs the handler to its end, and
+        // UIShellDifficulty refreshes its description there. See muted().
+        g_quiet_until = GetTickCount64() + QUIET_MS;
+        return SWALLOW;
     }
 
     // Anything else means the player has moved on, and what it redraws is
@@ -1021,6 +1122,7 @@ static void rewrite_cmd(LONG n, void* stack)
         logf_("[%ld] Input        %s  cmd %d%s%s\n", n, screen, cmd,
               from_name ? " = " : "", from_name ? from_name : "");
     }
+    return UNTOUCHED;
 }
 
 #define THUNK(id, tag)                                                        \
@@ -1044,12 +1146,33 @@ static void __fastcall hook_checkinput(void* self, void* edx,
                                        void* stack, void* result)
 {
     LONG n = InterlockedIncrement(&g_calls);
-    __try { rewrite_cmd(n, stack); }
+    int swallow = 0;
+    __try { swallow = rewrite_cmd(n, stack); }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         logf_("[%ld] Input        rewrite faulted (0x%08lx)\n",
               n, GetExceptionCode());
     }
     g_orig_checkinput(self, edx, stack, result);
+
+    // The native's own answer, overwritten after it has given it: a UBOOL is
+    // a 32-bit int, and every screen returns immediately when it is false.
+    // The command has also been made inert by now, because this write reaches
+    // a result pointer this code does not own.
+    //
+    // The answer is read back as well as written, because it is the only way
+    // to tell a screen that ignored a command from one that never got as far
+    // as looking at it -- a menu choice that fired correctly and produced
+    // nothing turned out to be the second.
+    int ret = readable(result, sizeof(int32_t)) ? *(const int32_t*)result : -1;
+    if (swallow == SWALLOW) {
+        int ok = writable(result, sizeof(int32_t));
+        if (ok) *(int32_t*)result = 0;
+        logf_("[%ld] Input        swallow: native said %d, result %p %s\n",
+              n, ret, result, ok ? "forced false" : "NOT WRITABLE");
+    } else if (swallow == ACTED) {
+        logf_("[%ld] Input        after rewrite: native said %d%s\n", n, ret,
+              ret == 0 ? "  -- the screen will ignore this key" : "");
+    }
 }
 
 THUNK(movie_asvoid, "ASVoid/Movie ")

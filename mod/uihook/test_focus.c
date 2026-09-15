@@ -548,6 +548,118 @@ int main(void)
         check(strlen(narrow) < sizeof narrow, "the announcement stays in bounds");
     }
 
+    // The menu over that list. Its whole trick is that firing is the same
+    // rewrite the table does, with the target chosen at runtime -- so what
+    // these check is that the right command comes back out, and that keys
+    // meant for the menu never reach the screen.
+    printf("\nhelp menu\n");
+    {
+        void* bar = (void*)0xC000;
+        char say[512];
+        int fire;
+
+        help_reset();
+        help_menu_close();
+        help_set(bar, 0, "SECOND WAVE", "Icon_Y_TRIANGLE", 0);
+        help_set(bar, 1, "START GAME", "Icon_START", 0);
+        help_set(bar, 2, "BACK", "Icon_B_CIRCLE", 0);
+
+        check(!help_menu_is_open(), "starts closed");
+        check(help_menu_key("UIShellDifficulty_0", 511, &fire, say, sizeof say)
+              == HELP_MENU_PASS, "a closed menu takes nothing");
+
+        check(help_menu_open("UIShellDifficulty_0", say, sizeof say) == 4,
+              "opening reads the whole list");
+        check(help_menu_is_open(), "and stays open");
+
+        // Down moves on and says where it is.
+        check(help_menu_key("UIShellDifficulty_0", 502, &fire, say, sizeof say)
+              == HELP_MENU_SPEAK, "down is the menu's, not the screen's");
+        check(strcmp(say, "START GAME: 3. 2 of 4") == 0, "it says which and where");
+
+        // Any axis moves: the screen never sees these, so which one it would
+        // have used does not matter.
+        check(help_menu_key("UIShellDifficulty_0", 501, &fire, say, sizeof say)
+              == HELP_MENU_SPEAK, "right moves too");
+        check(strstr(say, "3 of 4") != NULL, "onwards");
+        check(help_menu_key("UIShellDifficulty_0", 500, &fire, say, sizeof say)
+              == HELP_MENU_SPEAK, "up goes back");
+        check(strstr(say, "2 of 4") != NULL, "backwards");
+
+        // Firing hands the screen the command the entry names.
+        fire = 0;
+        check(help_menu_key("UIShellDifficulty_0", 511, &fire, say, sizeof say)
+              == HELP_MENU_FIRE, "Enter fires");
+        check(fire == 321, "and fires Start, which no key reaches");
+        check(!help_menu_is_open(), "firing closes the menu");
+
+        // Wrapping, both ways.
+        help_menu_open("UIShellDifficulty_0", say, sizeof say);
+        help_menu_key("UIShellDifficulty_0", 500, &fire, say, sizeof say);
+        check(strstr(say, "4 of 4") != NULL, "up from the first wraps to the last");
+        help_menu_key("UIShellDifficulty_0", 502, &fire, say, sizeof say);
+        check(strstr(say, "1 of 4") != NULL, "and down wraps back");
+
+        // An entry the mod added, with no glyph of its own, fires the command
+        // the game put behind a gamepad button.
+        help_menu_key("UIShellDifficulty_0", 500, &fire, say, sizeof say);
+        check(strstr(say, "Advanced options: 1") != NULL, "the added key is in the list");
+        fire = 0;
+        check(help_menu_key("UIShellDifficulty_0", 300, &fire, say, sizeof say)
+              == HELP_MENU_FIRE && fire == 302, "and fires X");
+
+        // Escape closes, and says so: silence would leave the player unsure
+        // whether they were still in a mode.
+        help_menu_open("UIShellDifficulty_0", say, sizeof say);
+        check(help_menu_key("UIShellDifficulty_0", 510, &fire, say, sizeof say)
+              == HELP_MENU_SPEAK, "Escape closes");
+        check(strcmp(say, "Menu closed") == 0, "out loud");
+        check(!help_menu_is_open(), "and it really is closed");
+
+        // The key that opened it closes it again.
+        help_menu_open("UIShellDifficulty_0", say, sizeof say);
+        help_menu_key("UIShellDifficulty_0", 621, &fire, say, sizeof say);
+        check(!help_menu_is_open(), "the same key toggles it shut");
+
+        // Everything else is swallowed while it is open. A key reaching the
+        // screen underneath would act unseen.
+        help_menu_open("UIShellDifficulty_0", say, sizeof say);
+        check(help_menu_key("UIShellDifficulty_0", 571, &fire, say, sizeof say)
+              == HELP_MENU_QUIET, "Tab does not reach the screen");
+        check(help_menu_is_open(), "and the menu is still up");
+
+        // A menu left open on a screen the player has left is stale: it must
+        // not swallow the new screen's keys.
+        check(help_menu_key("UIFinalShell_0", 502, &fire, say, sizeof say)
+              == HELP_MENU_PASS, "another screen's key passes through");
+        check(!help_menu_is_open(), "and the stale menu closes itself");
+
+        // A disabled entry is named, not fired.
+        help_reset();
+        void* bar2 = (void*)0xC100;
+        help_set(bar2, 0, "CREDITS", "Icon_RT_R2", 1);
+        help_menu_open("UINowhere_0", say, sizeof say);
+        fire = 99;
+        check(help_menu_key("UINowhere_0", 511, &fire, say, sizeof say)
+              == HELP_MENU_SPEAK, "a disabled entry does not fire");
+        check(fire == 99 && strstr(say, "unavailable") != NULL, "it says why");
+
+        // Nor does one whose glyph names no command at all.
+        help_reset();
+        help_set(bar2, 0, "MOVE", "Icon_DPAD", 0);
+        help_menu_open("UINowhere_0", say, sizeof say);
+        fire = 99;
+        check(help_menu_key("UINowhere_0", 511, &fire, say, sizeof say)
+              == HELP_MENU_SPEAK, "an entry with no command does not fire");
+        check(fire == 99 && strstr(say, "cannot be pressed") != NULL, "it says so");
+
+        // A screen offering nothing must not leave a mode behind.
+        help_reset();
+        check(help_menu_open("UINothingAtAll_0", say, sizeof say) == 0,
+              "nothing to show");
+        check(!help_menu_is_open(), "so nothing is opened");
+    }
+
     printf("\nspeech debounce\n");
     char dir[MAX_PATH];
     GetModuleFileNameA(NULL, dir, MAX_PATH);

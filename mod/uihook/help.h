@@ -25,10 +25,8 @@
 // command it stands for, and input.c says which key -- if any -- reaches that
 // command on this screen.  "No key" is the interesting answer.
 //
-// This is deliberately read-only.  Firing the chosen command is the same
-// rewrite input.c already does, with the target picked at runtime rather than
-// from a table, but the list has to prove itself correct on real screens
-// before anything acts on it.
+// Reading the list is half of it; the menu below is the other half, because
+// most of what the list names has no key to press.
 
 #define HELP_MAX_LABEL   128
 #define HELP_MAX_ENTRIES 16
@@ -60,3 +58,40 @@ int help_announce(const char* screen, char* out, size_t out_sz);
 
 // Drops every bar.  Used by the offline checks.
 void help_reset(void);
+
+// ------------------------------------------------------------- the menu --
+//
+// Reading the list out is half the job; the other half is that most of what
+// it names cannot be pressed.  So the same key opens a menu over the list:
+// arrows move a highlight, Enter runs the highlighted command, Escape closes.
+//
+// Nothing here synthesises input.  Firing is the rewrite input.c already
+// does, with the target chosen at runtime instead of from a table -- the
+// player's own Enter keypress is what carries the command into the screen.
+// That is why the menu can only act while a screen is dispatching a key, and
+// why it needs no gamepad and no new native.
+
+// What the caller should do with a command offered to the open menu.
+#define HELP_MENU_PASS    0   // not the menu's: let it reach the screen
+#define HELP_MENU_SPEAK   1   // swallow it, and say `out`
+#define HELP_MENU_QUIET   2   // swallow it, say nothing
+#define HELP_MENU_FIRE    3   // let it through as `fire` instead
+
+// Opens the menu on `screen` and fills `out` with the whole list, as before:
+// one press still answers "what can I do here".  Returns 0 (and does not
+// open) when the screen offers nothing.
+int  help_menu_open(const char* screen, char* out, size_t out_sz);
+
+int  help_menu_is_open(void);
+
+// Closes the menu.  Silent: the caller decides whether that needs saying.
+void help_menu_close(void);
+
+// Offers one command to the open menu.  `fire` receives the command to
+// substitute when the answer is HELP_MENU_FIRE.
+//
+// `screen` is checked against the one the menu opened on: a menu left open
+// when the screen changed answers PASS and closes itself, because its list
+// describes somewhere the player is no longer standing.
+int  help_menu_key(const char* screen, int cmd, int* fire,
+                   char* out, size_t out_sz);

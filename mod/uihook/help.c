@@ -144,10 +144,26 @@ static void append(char* out, size_t out_sz, const char* piece)
     out[used + want] = 0;
 }
 
-int help_announce(const char* screen, char* out, size_t out_sz)
+// One thing the player could choose, whether or not a key reaches it.  The
+// list is snapshotted when the menu opens: a screen that republishes its bar
+// while the menu is up must not move the highlight out from under the hand on
+// the arrow key.
+typedef struct {
+    char text[HELP_MAX_LABEL + 64];   // "START GAME: 3"
+    int  cmd;
+    int  disabled;
+} Choice;
+
+#define HELP_MAX_CHOICES (HELP_BARS * HELP_MAX_ENTRIES)
+
+static Choice g_choices[HELP_MAX_CHOICES];
+static int    g_nchoices;
+
+// Gathers what `screen` offers: what its bars advertise, then the keys this
+// mod adds that the bars never mentioned.
+static int collect(const char* screen)
 {
-    if (!out || out_sz == 0) return 0;
-    out[0] = 0;
+    g_nchoices = 0;
 
     ULONGLONG newest = 0;
     for (int i = 0; i < HELP_BARS; i++)
@@ -172,23 +188,18 @@ int help_announce(const char* screen, char* out, size_t out_sz)
         current[at] = b;
     }
 
-    int found = 0;
-    int listed[HELP_BARS * HELP_MAX_ENTRIES];
-    int nlisted = 0;
-
     for (int i = 0; i < n; i++) {
         for (int s = 0; s < current[i]->count; s++) {
             const Entry* e = &current[i]->entries[s];
             if (!e->label[0]) continue;
+            if (g_nchoices >= HELP_MAX_CHOICES) break;
             const char* key = key_for(screen, e->cmd);
-            char line[HELP_MAX_LABEL + 64];
-            _snprintf_s(line, sizeof line, _TRUNCATE, "%s: %s%s",
+            Choice* c = &g_choices[g_nchoices++];
+            _snprintf_s(c->text, sizeof c->text, _TRUNCATE, "%s: %s%s",
                         e->label, key ? key : "no key",
                         e->disabled ? ", unavailable" : "");
-            append(out, out_sz, line);
-            if (e->cmd && nlisted < (int)(sizeof listed / sizeof *listed))
-                listed[nlisted++] = e->cmd;
-            found++;
+            c->cmd = e->cmd;
+            c->disabled = e->disabled;
         }
     }
 
@@ -205,21 +216,139 @@ int help_announce(const char* screen, char* out, size_t out_sz)
         int key = 0, cmd = 0;
         const char* what = NULL;
         if (!input_added_key(screen, i, &key, &cmd, &what)) break;
+        if (g_nchoices >= HELP_MAX_CHOICES) break;
 
         int already = 0;
-        for (int j = 0; j < nlisted; j++)
-            if (listed[j] == cmd) { already = 1; break; }
+        for (int j = 0; j < g_nchoices; j++)
+            if (g_choices[j].cmd == cmd) { already = 1; break; }
         if (already) continue;
 
         const char* name = input_cmd_name(key);
         if (!name || !what) continue;
-        char line[HELP_MAX_LABEL + 64];
-        _snprintf_s(line, sizeof line, _TRUNCATE, "%s: %s", what, name);
-        append(out, out_sz, line);
-        found++;
+        Choice* c = &g_choices[g_nchoices++];
+        _snprintf_s(c->text, sizeof c->text, _TRUNCATE, "%s: %s", what, name);
+        c->cmd = cmd;
+        c->disabled = 0;
     }
+
+    return g_nchoices;
+}
+
+int help_announce(const char* screen, char* out, size_t out_sz)
+{
+    if (!out || out_sz == 0) return 0;
+    out[0] = 0;
+
+    int found = collect(screen);
+    for (int i = 0; i < found; i++)
+        append(out, out_sz, g_choices[i].text);
 
     if (!found)
         strncpy_s(out, out_sz, "This screen lists no commands.", _TRUNCATE);
     return found;
+}
+
+// ------------------------------------------------------------- the menu --
+
+static int  g_open;
+static int  g_cursor;
+static char g_screen[128];
+
+int help_menu_is_open(void) { return g_open; }
+
+void help_menu_close(void)
+{
+    g_open = 0;
+    g_cursor = 0;
+    g_screen[0] = 0;
+}
+
+int help_menu_open(const char* screen, char* out, size_t out_sz)
+{
+    int found = help_announce(screen, out, out_sz);
+    if (!found) {
+        help_menu_close();
+        return 0;
+    }
+    g_open = 1;
+    g_cursor = 0;
+    strncpy_s(g_screen, sizeof g_screen, screen ? screen : "", _TRUNCATE);
+    return found;
+}
+
+// Says where the highlight is.  The position is worth stating: without the
+// row of glyphs on screen there is nothing else to say how far through the
+// list this is.
+static void say_cursor(char* out, size_t out_sz)
+{
+    _snprintf_s(out, out_sz, _TRUNCATE, "%s. %d of %d",
+                g_choices[g_cursor].text, g_cursor + 1, g_nchoices);
+}
+
+int help_menu_key(const char* screen, int cmd, int* fire,
+                  char* out, size_t out_sz)
+{
+    if (!g_open || !out || out_sz == 0) return HELP_MENU_PASS;
+    out[0] = 0;
+
+    // The list belongs to one screen. If the player has left it -- by firing
+    // something that moved them, or by any route the hook did not see -- the
+    // menu is stale and must not swallow that screen's keys.
+    if (!screen || strcmp(screen, g_screen) != 0) {
+        help_menu_close();
+        return HELP_MENU_PASS;
+    }
+
+    switch (cmd) {
+        // Any axis moves: up and left go back, down and right go on. Which
+        // one a screen would have used does not matter, because none of this
+        // reaches the screen.
+        case FXS_DPAD_UP:    case FXS_ARROW_UP:    case FXS_LSTICK_UP:
+        case FXS_DPAD_LEFT:  case FXS_ARROW_LEFT:  case FXS_LSTICK_LEFT:
+            g_cursor = (g_cursor + g_nchoices - 1) % g_nchoices;
+            say_cursor(out, out_sz);
+            return HELP_MENU_SPEAK;
+
+        case FXS_DPAD_DOWN:  case FXS_ARROW_DOWN:  case FXS_LSTICK_DOWN:
+        case FXS_DPAD_RIGHT: case FXS_ARROW_RIGHT: case FXS_LSTICK_RIGHT:
+            g_cursor = (g_cursor + 1) % g_nchoices;
+            say_cursor(out, out_sz);
+            return HELP_MENU_SPEAK;
+
+        case FXS_BUTTON_A: case FXS_KEY_ENTER: case FXS_KEY_SPACEBAR: {
+            const Choice* c = &g_choices[g_cursor];
+            if (c->disabled) {
+                _snprintf_s(out, out_sz, _TRUNCATE, "%s is unavailable", c->text);
+                return HELP_MENU_SPEAK;
+            }
+            if (!c->cmd) {
+                // A glyph with no command behind it -- movement, or one this
+                // table does not know. Saying so beats a keypress that
+                // silently does nothing.
+                _snprintf_s(out, out_sz, _TRUNCATE,
+                            "%s cannot be pressed from here", c->text);
+                return HELP_MENU_SPEAK;
+            }
+            if (fire) *fire = c->cmd;
+            help_menu_close();
+            return HELP_MENU_FIRE;
+        }
+
+        case FXS_BUTTON_B: case FXS_KEY_ESCAPE:
+            help_menu_close();
+            strncpy_s(out, out_sz, "Menu closed", _TRUNCATE);
+            return HELP_MENU_SPEAK;
+
+        case FXS_KEY_0:
+            help_menu_close();
+            strncpy_s(out, out_sz, "Menu closed", _TRUNCATE);
+            return HELP_MENU_SPEAK;
+
+        default:
+            // Everything else is swallowed rather than passed on. While the
+            // menu is up the player is talking to it, and a key that reached
+            // the screen underneath would act unseen. Escape is always the
+            // way out.
+            return HELP_MENU_QUIET;
+    }
 }

@@ -14,6 +14,12 @@ int  speech_init(const char* dll_dir, char* why, size_t why_sz);
 // copies into a ring buffer and signals the worker.
 void speech_say(const char* utf8);
 
+// Says it at once, dropping whatever is queued and cutting off whatever is
+// being read.  For an answer the player asked for by pressing a key: moving
+// through a menu has to keep up with the keypresses, and everything already
+// queued described the state they have just left.
+void speech_say_now(const char* utf8);
+
 // Queues an utterance only if nothing cancels it within delay_ms.  Used for
 // text that might turn out to be the first row of a list rather than an
 // announcement in its own right.

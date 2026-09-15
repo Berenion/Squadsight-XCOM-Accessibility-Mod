@@ -45,6 +45,21 @@
 #define FXS_BUTTON_LTRIGGER 332
 #define FXS_BUTTON_RTRIGGER 333
 
+#define FXS_DPAD_UP         350
+#define FXS_DPAD_RIGHT      352
+#define FXS_DPAD_DOWN       354
+#define FXS_DPAD_LEFT       356
+
+#define FXS_LSTICK_UP       370
+#define FXS_LSTICK_DOWN     371
+#define FXS_LSTICK_LEFT     372
+#define FXS_LSTICK_RIGHT    373
+
+#define FXS_ARROW_UP        500
+#define FXS_ARROW_RIGHT     501
+#define FXS_ARROW_DOWN      502
+#define FXS_ARROW_LEFT      503
+
 #define FXS_KEY_ESCAPE      510
 #define FXS_KEY_ENTER       511
 #define FXS_KEY_SPACEBAR    513
@@ -55,6 +70,7 @@
 #define FXS_KEY_0           621
 
 #define FXS_ACTION_PRESS    1
+#define FXS_ACTION_RELEASE  32
 
 // Returns the command to substitute for `cmd` on `screen`, or 0 to leave it
 // alone.  `screen` is the object name the frame reports, e.g.
