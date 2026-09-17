@@ -20,6 +20,7 @@
 #include "input.h"
 #include "speech.h"
 #include "cursor.h"
+#include "nav.h"
 
 static int failures;
 
@@ -793,6 +794,135 @@ int main(void)
         check(cursor_tile_axis(min + 95.9f, min, CURSOR_TILE) == 0 &&
               cursor_tile_axis(min + 96.0f, min, CURSOR_TILE) == 1,
               "a tile boundary is measured from Min");
+    }
+
+    printf("\nnumpad navigation\n");
+    {
+        int dx, dy;
+        check(nav_step_for_digit(8, &dx, &dy) && dx == 0 && dy == 1, "8 is north, +Y");
+        check(nav_step_for_digit(2, &dx, &dy) && dx == 0 && dy == -1, "2 is south");
+        check(nav_step_for_digit(6, &dx, &dy) && dx == 1 && dy == 0, "6 is east, +X");
+        check(nav_step_for_digit(4, &dx, &dy) && dx == -1 && dy == 0, "4 is west");
+        check(nav_step_for_digit(9, &dx, &dy) && dx == 1 && dy == 1, "9 is north-east");
+        check(nav_step_for_digit(1, &dx, &dy) && dx == -1 && dy == -1, "1 is south-west");
+        check(!nav_step_for_digit(5, &dx, &dy) && !nav_step_for_digit(0, &dx, &dy),
+              "5 and 0 are not directions");
+        check(!nav_step_for_digit(10, &dx, &dy) && !nav_step_for_digit(-1, &dx, &dy),
+              "out-of-range digits are refused");
+
+        NavGrid g = { 74, 61 };
+        char say[NAV_MAX_TEXT];
+        int tx, ty;
+
+        nav_end();
+        check(!nav_active() && !nav_move(&g, 1, 0, say, sizeof say),
+              "nothing moves before navigation begins");
+
+        nav_begin(45, 16);
+        check(nav_move(&g, 0, 1, say, sizeof say) == 1 && strcmp(say, "45, 17") == 0,
+              "a step north says the new tile");
+        check(nav_target(&tx, &ty) && tx == 45 && ty == 17, "and holds it as the target");
+
+        nav_begin(73, 30);
+        check(nav_move(&g, 1, 0, say, sizeof say) == 0 && strcmp(say, "Edge") == 0,
+              "the east edge stops a step and says so");
+        check(nav_target(&tx, &ty) && tx == 73 && ty == 30, "without moving the target");
+        check(nav_move(&g, 1, 1, say, sizeof say) == 1 && strcmp(say, "73, 31") == 0,
+              "a diagonal into the edge slides along it");
+
+        nav_begin(0, 0);
+        check(nav_move(&g, -1, -1, say, sizeof say) == 0, "the corner stops a diagonal");
+
+        nav_end();
+        check(!nav_target(&tx, &ty), "no target once navigation ends");
+    }
+
+    printf("\nfinding the floor under a tile\n");
+    {
+        // Level ground: the first search start finds the floor, and a path
+        // built there decides the tile at once.
+        navh_set_ground(-37.9f);
+        navh_begin_tile();
+        float z = navh_query_z();
+        check(z > -37.9f, "the first search starts above the ground");
+        navh_floor_result(z, -37.9f);
+        check(navh_phase() == NAVH_SETTLED && navh_query_z() == -37.9f,
+              "a found floor settles the height");
+        check(navh_path_result(-37.9f + NAVH_LIFT, 1, 1000) == NAVH_REACHABLE,
+              "a path built on it is reachable");
+        check(navh_path_result(-37.9f + NAVH_LIFT, 0, 1010) == NAVH_WAIT,
+              "and one verdict per tile");
+
+        // The ground carries over to the next tile.
+        navh_begin_tile();
+        check(navh_query_z() > -37.9f && navh_ground() == -37.9f,
+              "the next tile searches from the ground just found");
+
+        // The bottom layer: no start ever finds a floor, so the probe takes
+        // over and the pathfinder decides the height.
+        navh_set_ground(-146.8f);
+        navh_begin_tile();
+        int quiet = 1;
+        for (int i = 0; i < 64 && navh_phase() == NAVH_SEARCH; i++) {
+            z = navh_query_z();
+            if (navh_path_result(z + NAVH_LIFT, 0, 2000 + i) != NAVH_WAIT) quiet = 0;
+            navh_floor_result(z, z);        // nothing found: our own height back
+        }
+        check(quiet, "failed paths during the search are not verdicts");
+        check(navh_phase() == NAVH_PROBE, "a search that never finds a floor turns to probing");
+        z = navh_query_z();
+        check(z == -146.8f, "the first probe is the estimate itself");
+        check(navh_path_result(z + NAVH_LIFT, 0, 3000) == NAVH_WAIT,
+              "a failed probe moves on");
+        float z2 = navh_query_z();
+        check(z2 != z, "to another height");
+        check(navh_path_result(z + NAVH_LIFT, 0, 3010) == NAVH_WAIT && navh_query_z() == z2,
+              "a late answer for the previous height does not skip one");
+        check(navh_path_result(z2 + NAVH_LIFT, 1, 3020) == NAVH_REACHABLE,
+              "a probe the game builds a path to is reachable");
+        check(navh_phase() == NAVH_SETTLED && navh_ground() == z2,
+              "and becomes the ground");
+
+        // Every probe fails: say so, once.
+        navh_set_ground(500.0f);
+        navh_begin_tile();
+        for (int i = 0; i < 64 && navh_phase() == NAVH_SEARCH; i++) {
+            z = navh_query_z();
+            navh_floor_result(z, z);
+        }
+        NavVerdict v = NAVH_WAIT;
+        for (int i = 0; i < 64 && v == NAVH_WAIT; i++)
+            v = navh_path_result(navh_query_z() + NAVH_LIFT, 0, 4000 + i);
+        check(v == NAVH_NO_PATH && navh_phase() == NAVH_NONE,
+              "every probe failing is No path");
+
+        // A floor that is found but cannot be reached: No path after the
+        // settle time, and not before; a success in between cancels it.
+        navh_set_ground(0.0f);
+        navh_begin_tile();
+        z = navh_query_z();
+        navh_floor_result(z, 0.0f);
+        check(navh_path_result(0.0f + NAVH_LIFT, 0, 5000) == NAVH_WAIT,
+              "a failure on a found floor waits");
+        check(navh_poll(5000 + NAVH_SETTLE_MS - 1) == NAVH_WAIT, "until the settle time");
+        check(navh_poll(5000 + NAVH_SETTLE_MS + 1) == NAVH_NO_PATH, "then is No path");
+        check(navh_poll(6000) == NAVH_WAIT, "once");
+
+        navh_begin_tile();
+        z = navh_query_z();
+        navh_floor_result(z, 0.0f);
+        navh_path_result(0.0f + NAVH_LIFT, 0, 7000);
+        check(navh_path_result(0.0f + NAVH_LIFT, 1, 7100) == NAVH_REACHABLE &&
+              navh_poll(8000) == NAVH_WAIT,
+              "a success before the settle time cancels the failure");
+
+        // While still searching, a failure at an unsettled height is not a verdict.
+        navh_set_ground(0.0f);
+        navh_begin_tile();
+        z = navh_query_z();
+        check(navh_path_result(z + NAVH_LIFT, 0, 9000) == NAVH_WAIT &&
+              navh_poll(9000 + 10 * NAVH_SETTLE_MS) == NAVH_WAIT,
+              "failures during the search say nothing");
     }
 
     printf("\nspeech debounce\n");

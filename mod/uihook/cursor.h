@@ -48,9 +48,23 @@ void* cursor_object(void);
 // read.
 int cursor_fields(char* why, size_t why_sz);
 
+// Whether cursor_fields has succeeded for the current cursor.  A plain check,
+// for code that runs every frame and must not consume the call that reports.
+int cursor_resolved(void);
+
 // Reads the cursor's position.  Returns 0 when the fields are not resolved or
 // the memory will not read.
 int cursor_position(float* x, float* y, float* z);
+
+// The offset of a property called `name` on any object's class, searched up
+// the class chain.  Returns 0 when the object is unreadable or has no such
+// property -- which also makes it a test of what kind of object this is.
+int object_field_offset(const void* obj, const char* name, uint32_t* out);
+
+// The soldier the cursor is leashed to (XCom3DCursor.ChainedPawn), which
+// changes when the player switches soldier.  Returns 0 when it could not be
+// resolved or read; *out may be NULL on success.
+int cursor_chained_pawn(void** out);
 
 // One tile, in world units: XComWorldData.WORLD_StepSize.
 #define CURSOR_TILE 96.0f

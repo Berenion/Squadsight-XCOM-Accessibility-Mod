@@ -44,6 +44,12 @@
 #define FFRAME_OBJECT  0x14   // UObject*  -- the calling object
 #define FFRAME_CODE    0x18   // BYTE*     -- bytecode cursor (never touched)
 #define FFRAME_LOCALS  0x1C   // BYTE*     -- caller's evaluated parameters
+// FFrame* -- the frame that called this one.  Follows Locals in UE3's FFrame
+// (Node, Object, Code, Locals, PreviousFrame, OutParms) but, unlike the four
+// above, was not read out of a disassembly: the walk that uses it checks every
+// frame it reaches resolves to a named function, and logs the chain it found
+// once, so a wrong offset shows itself as a chain that makes no sense.
+#define FFRAME_PREVIOUS 0x20
 
 // UObject
 #define UOBJECT_NAME   0x2C   // FName { int Index; int Number; }

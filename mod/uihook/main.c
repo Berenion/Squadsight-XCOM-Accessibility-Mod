@@ -51,6 +51,7 @@
 #include "help.h"
 #include "shot.h"
 #include "cursor.h"
+#include "nav.h"
 #include "props.h"
 #include "input.h"
 #include "../../tools/vendor/MinHook/include/MinHook.h"
@@ -1278,9 +1279,234 @@ static ULONGLONG g_cursor_at;
 static float g_cursor_last[3];
 static CursorGrid g_grid_last;
 
+// ---- numpad navigation -----------------------------------------------------
+//
+// The keys are read here rather than through the game's input, because the
+// numpad is unbound in [XComGame.XComTacticalInput]: an unbound key never
+// becomes an InputEvent, so no hook on the input path would ever see it. That
+// also means the game does nothing with them, so nothing has to be swallowed.
+// They are polled on the cursor's per-frame native, so they are live exactly
+// while a battle cursor exists, and only while the game has the foreground.
+//
+// Num Lock must be on. With it off, Windows reports numpad 8 as the Up arrow
+// -- which pans the camera -- and NVDA's desktop layout takes the numpad for
+// its own review commands.
+//
+// A move is not written into the cursor. In mouse mode Mouse_CheckForPathing
+// puts the cursor under the mouse on every frame, so a written Location would
+// last one frame. Instead the target is handed to hook_validpos below, which
+// substitutes it where the game turns that frame's pick into a cursor position
+// -- so the game's own validation, floor snap and path preview run on it.
+
+static int       g_numpad_down[10];
+static void*     g_nav_cursor;          // the cursor navigation began on
+static void*     g_nav_pawn;            // ChainedPawn when navigation began
+static POINT     g_nav_mouse;           // where the mouse was, to notice it moving
+static float     g_nav_world[3];        // the target, in world units, for the hook
+static int       g_nav_live;            // the hook substitutes while this is set
+static ULONGLONG g_nav_key_at;          // last direction key
+static ULONGLONG g_nav_placed_at;       // last frame the hook substituted
+static int       g_nav_parked;          // mouse already moved to the centre once
+
+// Heights and reachability. The cursor must be put at the floor's height or
+// the game builds no path to it, and whether a tile can be reached at all is
+// known only from the path the game builds. Both are settled per tile by the
+// phases in nav.h -- floor search, then probing heights against the
+// pathfinder -- which main.c drives from three hooks: the pick asks
+// navh_query_z, hook_floorz reports the search, and hook_computepath reports
+// the path.
+//
+// The evidence behind the phases, from the logs:
+//   - getValidLocation adds exactly 64 to every placement (NAVH_LIFT).
+//   - GetFloorZForPosition returns the height it was given when it finds no
+//     floor (XGUnit.IsAttemptingToHover tests `FloorZ != PathDestination.Z`),
+//     so a search must never start from its own last answer: that climbed 64
+//     a step.
+//   - It looks down a limited way, and never found a floor below -129 from
+//     any start -- which left two soldiers unable to move by numpad at all.
+//   - The ground estimate at the start is the cursor less 64. The soldier
+//     pawn's Location.Z less CollisionHeight read 215.8 for two soldiers on
+//     different ground, so it is not used.
+#define NAV_CURSOR_LIFT NAVH_LIFT
+static int       g_nav_path_tile[2] = { -1, -1 };     // the tile being decided
+static NavHeightPhase g_nav_phase_logged = (NavHeightPhase)-1;
+static int       g_nav_tile_logged[2] = { -1, -1 };
+
+static int game_has_focus(void)
+{
+    HWND w = GetForegroundWindow();
+    if (!w) return 0;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(w, &pid);
+    return pid == GetCurrentProcessId();
+}
+
+// The tile the cursor stands on, by the native's own arithmetic.
+static int cursor_tile(const CursorGrid* g, int* tx, int* ty, float* z)
+{
+    float x, y, cz;
+    if (!cursor_position(&x, &y, &cz)) return 0;
+    *tx = cursor_tile_axis(x, g->min_x, CURSOR_TILE);
+    *ty = cursor_tile_axis(y, g->min_y, CURSOR_TILE);
+    if (z) *z = cz;
+    return 1;
+}
+
+static void nav_stop(const char* why)
+{
+    if (!nav_active()) return;
+    nav_end();
+    g_nav_live = 0;
+    g_nav_parked = 0;
+    logf_("nav: released (%s)\n", why);
+}
+
+// The mouse picks nothing while it rests on the HUD or off the map, and then
+// Mouse_CheckForPathing never reaches the placement at all -- a key would move
+// the target and nothing would follow. Moving the mouse to the middle of the
+// game window puts it over the battlefield. Done once per navigation, and only
+// after a key has gone unanswered, so a mouse already over the map is left
+// where it is.
+static void nav_park_mouse(void)
+{
+    HWND w = GetForegroundWindow();
+    RECT r;
+    if (!w || !GetClientRect(w, &r)) return;
+    POINT c = { (r.right - r.left) / 2, (r.bottom - r.top) / 2 };
+    if (!ClientToScreen(w, &c)) return;
+    SetCursorPos(c.x, c.y);
+    GetCursorPos(&g_nav_mouse);
+    g_nav_parked = 1;
+    logf_("nav: no placement since the key; mouse moved to the window centre "
+          "(%ld, %ld)\n", c.x, c.y);
+}
+
+// Numpad 0. The game moves a soldier from the path it has already built out
+// to the cursor, and a right click is the mouse-mode way to ask for that:
+// RMouse's release runs ClickToPath -> PerformPath. Sent as a click rather
+// than called, because nothing in this DLL calls into script.
+static ULONGLONG g_nav_confirm_at;      // opens nav_watch_input's window
+
+static void nav_confirm(void)
+{
+    g_nav_confirm_at = GetTickCount64();
+    INPUT in[2];
+    ZeroMemory(in, sizeof in);
+    in[0].type = INPUT_MOUSE;
+    in[0].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
+    in[1].type = INPUT_MOUSE;
+    in[1].mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+    UINT sent = SendInput(2, in, sizeof(INPUT));
+    int tx = -1, ty = -1;
+    nav_target(&tx, &ty);
+    logf_("nav: confirm -- right click sent (%u of 2), target %d, %d\n",
+          sent, tx, ty);
+}
+
+static void nav_press(int digit)
+{
+    CursorGrid g;
+    int tx, ty;
+    float z;
+    if (!cursor_grid(&g) || !cursor_tile(&g, &tx, &ty, &z)) {
+        logf_("nav: numpad %d with no grid or cursor yet\n", digit);
+        speech_say_now("No map yet.");
+        return;
+    }
+
+    if (digit == 5) {
+        // Where the cursor actually is, which is what the game accepted --
+        // not necessarily the target, if that was somewhere it cannot stand.
+        char say[NAV_MAX_TEXT];
+        nav_describe(tx, ty, say, sizeof say);
+        logf_("nav: numpad 5 -> cursor on %s\n", say);
+        speech_say_now(say);
+        return;
+    }
+    if (digit == 0) {
+        nav_confirm();
+        return;
+    }
+
+    int dx, dy;
+    if (!nav_step_for_digit(digit, &dx, &dy)) return;
+
+    if (!nav_active()) {
+        nav_begin(tx, ty);
+        g_nav_cursor = cursor_object();
+        g_nav_pawn = NULL;
+        cursor_chained_pawn(&g_nav_pawn);
+        GetCursorPos(&g_nav_mouse);
+        g_nav_parked = 0;
+        navh_set_ground(z - NAV_CURSOR_LIFT);
+        navh_begin_tile();
+        logf_("nav: begins on %d, %d, ground estimate %.1f\n", tx, ty, navh_ground());
+    }
+
+    char say[NAV_MAX_TEXT];
+    NavGrid ng = { g.num_x, g.num_y };
+    int moved = nav_move(&ng, dx, dy, say, sizeof say);
+    nav_target(&tx, &ty);
+    if (moved) {
+        navh_begin_tile();
+        g_nav_path_tile[0] = tx;
+        g_nav_path_tile[1] = ty;
+        g_nav_phase_logged = (NavHeightPhase)-1;
+    }
+
+    // The middle of the tile; the height comes from navh_query_z each frame.
+    g_nav_world[0] = g.min_x + ((float)tx + 0.5f) * CURSOR_TILE;
+    g_nav_world[1] = g.min_y + ((float)ty + 0.5f) * CURSOR_TILE;
+    g_nav_world[2] = navh_query_z();
+    g_nav_live = 1;
+    g_nav_key_at = GetTickCount64();
+
+    logf_("nav: numpad %d -> target %d, %d  \"%s\"\n", digit, tx, ty, say);
+    speech_say_now(say);
+}
+
+static void nav_poll(void)
+{
+    if (nav_active()) {
+        void* pawn = NULL;
+        POINT m;
+        if (cursor_object() != g_nav_cursor) {
+            nav_stop("the cursor was replaced");
+        } else if (cursor_chained_pawn(&pawn) && pawn != g_nav_pawn) {
+            nav_stop("the soldier changed");
+        } else if (GetCursorPos(&m) &&
+                   (labs(m.x - g_nav_mouse.x) > 2 || labs(m.y - g_nav_mouse.y) > 2)) {
+            nav_stop("the mouse moved");
+        } else if (navh_poll(GetTickCount64()) == NAVH_NO_PATH) {
+            logf_("nav: %d, %d has no path on its floor %.1f -- said\n",
+                  g_nav_path_tile[0], g_nav_path_tile[1], navh_ground());
+            speech_say("No path.");
+        } else if (!g_nav_parked && g_nav_placed_at < g_nav_key_at &&
+                   GetTickCount64() - g_nav_key_at > 300) {
+            nav_park_mouse();
+        }
+    }
+
+    if (!game_has_focus()) {
+        // Forget what was held, so a key released while the game was in the
+        // background does not read as a fresh press on return.
+        memset(g_numpad_down, 0, sizeof g_numpad_down);
+        return;
+    }
+    for (int d = 0; d <= 9; d++) {
+        int down = (GetAsyncKeyState(VK_NUMPAD0 + d) & 0x8000) != 0;
+        if (down && !g_numpad_down[d]) nav_press(d);
+        g_numpad_down[d] = down;
+    }
+}
+
 static void cursor_watch(void* self)
 {
     cursor_seen(self);
+
+    // Every frame, not at the watch's four times a second: a key press lasts
+    // a few frames, and a quarter-second poll would drop quick ones.
+    if (cursor_resolved()) nav_poll();
 
     ULONGLONG now = GetTickCount64();
     if (now - g_cursor_at < CURSOR_WATCH_MS) return;
@@ -1371,6 +1597,443 @@ static void __fastcall hook_cursormode(void* self, void* edx,
         fault_log("cursor: watch", &f, NULL);
     }
     g_orig_cursormode(self, edx, stack, result);
+}
+
+// Where navigation takes over the cursor.
+//
+// Every placement of the cursor ends in GetClosestValidCursorPosition, called
+// with the position the script wants: from getValidLocation(Vector NewLoc) in
+// EW, straight from CursorSetLocation(Vector NewLoc, ...) in EU. Either way the
+// position is the *caller's first parameter*, and the native reads it out of
+// the caller's frame when it runs -- so writing the target there just before
+// the original is called is the whole substitution. What comes back is the
+// game's own answer: the nearest position a cursor may occupy.
+//
+// Only the placement that follows the mouse is taken over. The script frames
+// above are walked for Mouse_CheckForPathing, which is declared once per build,
+// on XComTacticalInput, and exists only while the soldier is choosing where to
+// move. The other callers -- MoveToUnit when the soldier changes, the aiming
+// camera -- are left alone.
+#define NAV_CHAIN_DEPTH 6
+
+static int g_nav_chain_logged;
+
+static int nav_substitute(void* stack)
+{
+    char chain[512] = "";
+    size_t used = 0;
+    int from_mouse = 0;
+    void* frame = stack;
+
+    for (int depth = 0; frame && depth < NAV_CHAIN_DEPTH; depth++) {
+        if (!readable(frame, FFRAME_PREVIOUS + sizeof(void*))) break;
+        void* node = *(void**)((uint8_t*)frame + FFRAME_NODE);
+        char name[128];
+        if (!object_name(node, name, sizeof name) || !name[0]) break;
+        used += (size_t)_snprintf_s(chain + used, sizeof chain - used, _TRUNCATE,
+                                    depth ? " <- %s" : "%s", name);
+        if (used >= sizeof chain) used = sizeof chain - 1;
+        if (strcmp(name, "Mouse_CheckForPathing") == 0) { from_mouse = 1; break; }
+        frame = *(void**)((uint8_t*)frame + FFRAME_PREVIOUS);
+    }
+
+    // The chain is the evidence that FFRAME_PREVIOUS is right, so it is put on
+    // record the first time navigation meets this native.
+    if (!g_nav_chain_logged && from_mouse) {
+        g_nav_chain_logged = 1;
+        logf_("nav: placement call chain %s\n", chain);
+    }
+    if (!from_mouse) {
+        // And if the mouse's placement is never recognised, the chains that
+        // were seen instead are what says why -- a few, not one per frame.
+        static int misses;
+        if (!g_nav_chain_logged && misses < 3) {
+            misses++;
+            logf_("nav: not a mouse placement: %s\n", chain);
+        }
+        return 0;
+    }
+
+    void* node = *(void**)((uint8_t*)stack + FFRAME_NODE);
+    uint8_t* locals = *(uint8_t**)((uint8_t*)stack + FFRAME_LOCALS);
+    if (!locals || !readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
+        return 0;
+
+    // The first parameter, by position: NewLoc in both builds.
+    void* prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
+    for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
+        if (!readable(prop, 0x68)) return 0;
+        uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
+        uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
+        if ((flags & CPF_PARM) && !(flags & CPF_RETURNPARM)) {
+            float* v = (float*)(locals + off);
+            if (off >= 0x1000 || !writable(v, 3 * sizeof(float))) return 0;
+            // A vector the mouse picked is a world position. Anything else in
+            // this slot means the frame is not the one described above.
+            for (int i = 0; i < 3; i++)
+                if (!(v[i] > -1.0e6f && v[i] < 1.0e6f)) return 0;
+            // X and Y only. The height is the ground under the target, which
+            // hook_floorz has already had the game work out for this frame.
+            // Writing the cursor's own height here instead raised it by its
+            // collision height on every step -- getValidLocation adds that to
+            // whatever comes back -- until it hung hundreds of units in the
+            // air and ClickToPath read the move as a hover it could not make.
+            v[0] = g_nav_world[0];
+            v[1] = g_nav_world[1];
+            return 1;
+        }
+        prop = *(void**)((uint8_t*)prop + UFIELD_NEXT);
+    }
+    return 0;
+}
+
+// What the game made of the target. Logged when the tile changes, so the log
+// shows each step landing -- or being moved somewhere else by the validation.
+static void nav_placed(const float* v)
+{
+    g_nav_placed_at = GetTickCount64();
+    CursorGrid g;
+    int tx, ty;
+    if (!cursor_grid(&g) || !readable(v, 3 * sizeof(float))) return;
+    int px = cursor_tile_axis(v[0], g.min_x, CURSOR_TILE);
+    int py = cursor_tile_axis(v[1], g.min_y, CURSOR_TILE);
+    if (px == g_nav_tile_logged[0] && py == g_nav_tile_logged[1]) return;
+    g_nav_tile_logged[0] = px;
+    g_nav_tile_logged[1] = py;
+    nav_target(&tx, &ty);
+    logf_("nav: placed on %d, %d (%.1f, %.1f, %.1f)%s\n", px, py, v[0], v[1], v[2],
+          (px == tx && py == ty) ? "" : "  -- NOT the target");
+}
+
+// The ground under the target.
+//
+// GetAdjustedMousePickPoint -- declared once per build, on XComTacticalInput --
+// opens with
+//
+//     fGroundLocation = kWorldData.GetFloorZForPosition(kHUD.CachedHitLocation);
+//
+// and then takes the tile and the cursor's height from that same
+// CachedHitLocation. The HUD fills it from a mouse trace every frame. Writing
+// the target into it just before this native reads it makes the whole pick --
+// ground height, tile, snap -- come out for the target instead of the mouse,
+// for this frame only; the next trace overwrites it again.
+//
+// The HUD is found by shape: the local in that frame whose object has a
+// property called CachedHitLocation. Found once, then recognised by pointer.
+static void*    g_pick_node;
+static uint32_t g_pick_hud_local;       // offset of the HUD local in the frame
+static void*    g_pick_hud;
+static uint32_t g_pick_hit_off;         // CachedHitLocation, on the HUD
+static int      g_pick_logged;
+
+static int nav_aim_pick(void* stack)
+{
+    void* node = *(void**)((uint8_t*)stack + FFRAME_NODE);
+    uint8_t* locals = *(uint8_t**)((uint8_t*)stack + FFRAME_LOCALS);
+    if (!locals) return 0;
+
+    if (node != g_pick_node) {
+        char name[128];
+        if (!object_name(node, name, sizeof name) ||
+            strcmp(name, "GetAdjustedMousePickPoint") != 0)
+            return 0;
+
+        // Walk the frame's properties for a local holding a HUD.
+        void* prop = NULL;
+        if (readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
+            prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
+        for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
+            if (!readable(prop, 0x68)) return 0;
+            uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
+            uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
+            if (!(flags & CPF_PARM) && off < 0x1000 &&
+                readable(locals + off, sizeof(void*))) {
+                void* obj = *(void**)(locals + off);
+                uint32_t hit;
+                if (obj && readable(obj, 0x60) &&
+                    object_field_offset(obj, "CachedHitLocation", &hit)) {
+                    g_pick_node = node;
+                    g_pick_hud_local = off;
+                    g_pick_hud = obj;
+                    g_pick_hit_off = hit;
+                    break;
+                }
+            }
+            prop = *(void**)((uint8_t*)prop + UFIELD_NEXT);
+        }
+        if (node != g_pick_node) {
+            if (!g_pick_logged) {
+                g_pick_logged = 1;
+                logf_("nav: GetAdjustedMousePickPoint has no HUD local -- "
+                      "the ground height will come from the mouse\n");
+            }
+            return 0;
+        }
+        logf_("nav: pick HUD local +0x%X, CachedHitLocation +0x%X\n",
+              g_pick_hud_local, g_pick_hit_off);
+    }
+
+    if (!readable(locals + g_pick_hud_local, sizeof(void*))) return 0;
+    void* hud = *(void**)(locals + g_pick_hud_local);
+    if (hud != g_pick_hud) {
+        uint32_t hit;
+        if (!hud || !object_field_offset(hud, "CachedHitLocation", &hit)) return 0;
+        g_pick_hud = hud;
+        g_pick_hit_off = hit;
+    }
+    float* v = (float*)((uint8_t*)hud + g_pick_hit_off);
+    if (!writable(v, 3 * sizeof(float))) return 0;
+    v[0] = g_nav_world[0];
+    v[1] = g_nav_world[1];
+    v[2] = navh_query_z();
+    g_nav_world[2] = v[2];
+    return 1;
+}
+
+// Says in the log when a tile's height changes phase, once per change.
+static void nav_log_phase(void)
+{
+    NavHeightPhase p = navh_phase();
+    if (p == g_nav_phase_logged) return;
+    g_nav_phase_logged = p;
+    static const char* names[] = { "searching", "probing heights", "settled", "no height works" };
+    logf_("nav: %d, %d height %s, ground %.1f\n", g_nav_path_tile[0], g_nav_path_tile[1],
+          names[p], navh_ground());
+}
+
+// The frames above a native, named: "IsAttemptingToHover <- ClickToPath <-
+// RMouse". What the confirm diagnostics print.
+static void frame_chain(void* stack, int depth, char* out, size_t out_sz)
+{
+    size_t used = 0;
+    out[0] = 0;
+    void* frame = stack;
+    for (int d = 0; frame && d < depth; d++) {
+        if (!readable(frame, FFRAME_PREVIOUS + sizeof(void*))) break;
+        char name[128];
+        if (!object_name(*(void**)((uint8_t*)frame + FFRAME_NODE), name, sizeof name) ||
+            !name[0])
+            break;
+        used += (size_t)_snprintf_s(out + used, out_sz - used, _TRUNCATE,
+                                    d ? " <- %s" : "%s", name);
+        if (used >= out_sz) break;
+        frame = *(void**)((uint8_t*)frame + FFRAME_PREVIOUS);
+    }
+}
+
+// Whether a confirm is recent enough for its consequences to be logged.
+static int nav_confirm_window(void)
+{
+    return g_nav_confirm_at && GetTickCount64() - g_nav_confirm_at <= 2000;
+}
+
+static ExecFn g_orig_floorz;
+static void __fastcall hook_floorz(void* self, void* edx, void* stack, void* result)
+{
+    Fault f;
+    int aimed = 0;
+    if (g_nav_live) {
+        __try { aimed = nav_aim_pick(stack); }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("nav: aim pick", &f, NULL);
+        }
+    }
+    g_orig_floorz(self, edx, stack, result);
+
+    __try {
+        float z = *(float*)result;
+        if (aimed) {
+            navh_floor_result(g_nav_world[2], z);
+            nav_log_phase();
+        }
+
+        // ClickToPath calls IsAttemptingToHover only once it has a path, and
+        // that is the only reason this native is called from there: seeing
+        // it after a confirm proves the click got through to the move.
+        if (nav_confirm_window()) {
+            char chain[256];
+            frame_chain(stack, 4, chain, sizeof chain);
+            if (strncmp(chain, "IsAttemptingToHover", 19) == 0)
+                logf_("nav: after confirm, %s -- floor %.1f\n", chain, z);
+        }
+    }
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        fault_log("nav: floor result", &f, NULL);
+    }
+}
+
+// Whether the game could build a path to where navigation put the cursor.
+// XGAction_Path.Perform_ComputePath(Vector vLoc, ...) asks the pathing pawn's
+// native ComputePath2(vLoc, ...) with the cursor's location, and ClickToPath
+// moves only along what that produced -- an empty path makes a confirm do
+// nothing, silently. The destination is the caller's first parameter, as for
+// the placement. Logged when the answer or the tile changes, while navigating.
+static int   g_path_logged_ok = -1;
+static int   g_path_logged_tile[2] = { -1, -1 };
+static float g_path_logged_z;
+
+static void nav_path_result(void* stack, void* result)
+{
+    if (!nav_active() || !readable(stack, 0x20)) return;
+    void* node = *(void**)((uint8_t*)stack + FFRAME_NODE);
+    uint8_t* locals = *(uint8_t**)((uint8_t*)stack + FFRAME_LOCALS);
+    if (!locals || !readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*))) return;
+
+    float* dest = NULL;
+    void* prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
+    for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
+        if (!readable(prop, 0x68)) return;
+        uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
+        uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
+        if ((flags & CPF_PARM) && !(flags & CPF_RETURNPARM)) {
+            if (off < 0x1000 && readable(locals + off, 3 * sizeof(float)))
+                dest = (float*)(locals + off);
+            break;
+        }
+        prop = *(void**)((uint8_t*)prop + UFIELD_NEXT);
+    }
+
+    int ok = *(int32_t*)result != 0;
+    CursorGrid g;
+    int tx = -1, ty = -1;
+    if (dest && cursor_grid(&g)) {
+        tx = cursor_tile_axis(dest[0], g.min_x, CURSOR_TILE);
+        ty = cursor_tile_axis(dest[1], g.min_y, CURSOR_TILE);
+    }
+    if (dest && tx == g_nav_path_tile[0] && ty == g_nav_path_tile[1]) {
+        NavVerdict v = navh_path_result(dest[2], ok, GetTickCount64());
+        nav_log_phase();
+        if (v == NAVH_NO_PATH) {
+            logf_("nav: %d, %d has no path at any height -- said\n", tx, ty);
+            speech_say("No path.");
+        } else if (v == NAVH_REACHABLE) {
+            logf_("nav: %d, %d reachable, floor %.1f\n", tx, ty, navh_ground());
+        }
+    }
+
+    // Only the tile being navigated is logged. Every other caller -- the
+    // aliens' turn runs ComputePathForAIUnit for each move it considers --
+    // filled the log once navigation had been left on.
+    if (!dest || tx != g_nav_path_tile[0] || ty != g_nav_path_tile[1]) return;
+
+    // Logged when the answer, the tile or the height changes: probing moves
+    // the height with the tile unchanged, and each try is worth a line.
+    float dz = dest[2];
+    if (ok == g_path_logged_ok && tx == g_path_logged_tile[0] &&
+        ty == g_path_logged_tile[1] && dz == g_path_logged_z)
+        return;
+    g_path_logged_ok = ok;
+    g_path_logged_tile[0] = tx;
+    g_path_logged_tile[1] = ty;
+    g_path_logged_z = dz;
+
+    char name[128] = "?";
+    object_name(node, name, sizeof name);
+    if (dest)
+        logf_("nav: path to %d, %d (%.1f, %.1f, %.1f) %s  [from %s]\n", tx, ty,
+              dest[0], dest[1], dest[2], ok ? "built" : "NONE", name);
+    else
+        logf_("nav: path %s  [from %s, destination unreadable]\n",
+              ok ? "built" : "NONE", name);
+}
+
+static ExecFn g_orig_computepath;
+static void __fastcall hook_computepath(void* self, void* edx, void* stack, void* result)
+{
+    g_orig_computepath(self, edx, stack, result);
+    Fault f;
+    __try { nav_path_result(stack, result); }
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        fault_log("nav: path result", &f, NULL);
+    }
+}
+
+// Whether Flash took a click. InputEvent asks this, through
+// TestMouseConsumedByFlash, before a mouse button may reach RMouse.
+static ExecFn g_orig_flashhit;
+static void __fastcall hook_flashhit(void* self, void* edx, void* stack, void* result)
+{
+    g_orig_flashhit(self, edx, stack, result);
+    Fault f;
+    __try {
+        if (nav_confirm_window()) {
+            char chain[256];
+            frame_chain(stack, 5, chain, sizeof chain);
+            logf_("nav: after confirm, Flash hit test %s: %s\n",
+                  *(int32_t*)result ? "HIT -- the click goes to the HUD" : "miss",
+                  chain);
+        }
+    }
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        fault_log("nav: flash hit", &f, NULL);
+    }
+}
+
+// What the game did with a confirm. InputEvent calls the native
+// XComEngine.IsAnyMoviePlaying on every bound key and mouse button before it
+// acts on it, in both builds, so its caller's frame carries (Cmd, Actionmask)
+// -- taken by position, as rewrite_cmd does. Logged only for two seconds after
+// Numpad 0, so the log shows whether the right click arrived as 405 and in
+// what order, without a line per key for the rest of the mission.
+static void nav_watch_input(void* stack)
+{
+    if (!nav_confirm_window()) return;
+    if (!readable(stack, 0x20)) return;
+    void* node = *(void**)((uint8_t*)stack + FFRAME_NODE);
+    uint8_t* locals = *(uint8_t**)((uint8_t*)stack + FFRAME_LOCALS);
+    char name[128];
+    if (!locals || !object_name(node, name, sizeof name) ||
+        strcmp(name, "InputEvent") != 0)
+        return;
+
+    int vals[2], nvals = 0;
+    void* prop = NULL;
+    if (readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
+        prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
+    for (int guard = 0; prop && guard < MAX_FIELDS && nvals < 2; guard++) {
+        if (!readable(prop, 0x68)) return;
+        uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
+        uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
+        if ((flags & CPF_PARM) && !(flags & CPF_RETURNPARM) &&
+            props_kind(prop) == PROP_INT && off < 0x1000 &&
+            readable(locals + off, sizeof(int32_t)))
+            vals[nvals++] = *(int32_t*)(locals + off);
+        prop = *(void**)((uint8_t*)prop + UFIELD_NEXT);
+    }
+    if (nvals == 2)
+        logf_("nav: after confirm, InputEvent %d mask %d\n", vals[0], vals[1]);
+}
+
+static ExecFn g_orig_moviecheck;
+static void __fastcall hook_moviecheck(void* self, void* edx, void* stack, void* result)
+{
+    Fault f;
+    __try { nav_watch_input(stack); }
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        fault_log("nav: watch input", &f, NULL);
+    }
+    g_orig_moviecheck(self, edx, stack, result);
+}
+
+static ExecFn g_orig_validpos;
+static void __fastcall hook_validpos(void* self, void* edx,
+                                     void* stack, void* result)
+{
+    int placed = 0;
+    Fault f;
+    if (g_nav_live) {
+        __try { placed = nav_substitute(stack); }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("nav: substitute", &f, NULL);
+        }
+    }
+    g_orig_validpos(self, edx, stack, result);
+    if (placed) {
+        __try { nav_placed((const float*)result); }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("nav: placed", &f, NULL);
+        }
+    }
 }
 
 // This one rewrites rather than captures, so it gets its own thunk: the work
@@ -1514,13 +2177,26 @@ static DWORD WINAPI init(LPVOID param)
     int grid_armed = arm(tbl, n, mod, "UXComWorldDataexecGetWorldData",
                          (LPVOID)hook_worlddata, (LPVOID*)&g_orig_worlddata);
 
+    // Where numpad navigation puts its target in front of the game: the
+    // position, the ground under it, and a view of what a confirm did.
+    int nav_armed = arm(tbl, n, mod, "UXComWorldDataexecGetClosestValidCursorPosition",
+                        (LPVOID)hook_validpos, (LPVOID*)&g_orig_validpos);
+    nav_armed &= arm(tbl, n, mod, "UXComWorldDataexecGetFloorZForPosition",
+                     (LPVOID)hook_floorz, (LPVOID*)&g_orig_floorz);
+    nav_armed &= arm(tbl, n, mod, "UXComEngineexecIsAnyMoviePlaying",
+                     (LPVOID)hook_moviecheck, (LPVOID*)&g_orig_moviecheck);
+    nav_armed &= arm(tbl, n, mod, "UXComInputBaseexecTestHitPointToFlash",
+                     (LPVOID)hook_flashhit, (LPVOID*)&g_orig_flashhit);
+    nav_armed &= arm(tbl, n, mod, "AXComPathingPawnexecComputePath2",
+                     (LPVOID)hook_computepath, (LPVOID*)&g_orig_computepath);
+
     free(tbl);
     if (!armed) { logf_("FATAL: nothing armed\n"); return 1; }
 
-    logf_("%d/3 text hooks armed, key remap %s, cursor watch %s, grid %s"
+    logf_("%d/3 text hooks armed, key remap %s, cursor watch %s, grid %s, nav %s"
           " -- navigate the UI to produce traffic\n---\n",
           armed, input_armed ? "on" : "OFF", cursor_armed ? "on" : "OFF",
-          grid_armed ? "on" : "OFF");
+          grid_armed ? "on" : "OFF", nav_armed ? "on" : "OFF");
 
     // Said aloud, because the log is the one part of this mod its user cannot
     // read.  Now that the launcher attaches during startup rather than on

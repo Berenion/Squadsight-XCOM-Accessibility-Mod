@@ -9,6 +9,7 @@
 
 static void*    g_cursor;
 static uint32_t g_location_off;
+static uint32_t g_chained_off;
 static int      g_resolved;
 static int      g_tried;
 
@@ -21,6 +22,7 @@ void cursor_forget(void)
 {
     g_cursor = NULL;
     g_location_off = 0;
+    g_chained_off = 0;
     g_resolved = 0;
     g_tried = 0;
     g_world = NULL;
@@ -36,12 +38,15 @@ void cursor_seen(void* self)
     if (self && self != g_cursor) {
         g_cursor = self;
         g_location_off = 0;
+        g_chained_off = 0;
         g_resolved = 0;
         g_tried = 0;
     }
 }
 
 void* cursor_object(void) { return g_cursor; }
+
+int cursor_resolved(void) { return g_cursor && g_resolved; }
 
 // UStruct::SuperStruct, probed rather than assumed.
 //
@@ -142,11 +147,40 @@ int cursor_fields(char* why, size_t why_sz)
         return 0;
     }
 
+    // Optional: which soldier the cursor is leashed to. Navigation lets go of
+    // its target when this changes, since MoveToUnit has just put the cursor
+    // on somebody else. Missing it costs only that, so it is not a failure.
+    if (!field_offset(cls, "ChainedPawn", &g_chained_off)) g_chained_off = 0;
+
     g_resolved = 1;
+    char chained[32] = "not found";
+    if (g_chained_off)
+        _snprintf_s(chained, sizeof chained, _TRUNCATE, "+0x%X", g_chained_off);
     _snprintf_s(why, why_sz, _TRUNCATE,
-                "class %s, SuperStruct +0x%X, Location +0x%X",
-                cls_name, g_super_off, g_location_off);
+                "class %s, SuperStruct +0x%X, Location +0x%X, ChainedPawn %s",
+                cls_name, g_super_off, g_location_off, chained);
     return 2;
+}
+
+int object_field_offset(const void* obj, const char* name, uint32_t* out)
+{
+    uint32_t class_off = props_class_offset();
+    if (!obj || !class_off) return 0;
+    if (!readable((const uint8_t*)obj + class_off, sizeof(void*))) return 0;
+    const void* cls = *(const void* const*)((const uint8_t*)obj + class_off);
+    if (!cls || !readable(cls, 0x60)) return 0;
+    if (!find_super_offset(cls)) return 0;
+    return field_offset(cls, name, out);
+}
+
+int cursor_chained_pawn(void** out)
+{
+    if (!g_resolved || !g_cursor || !g_chained_off) return 0;
+    const void* const* slot =
+        (const void* const*)((const uint8_t*)g_cursor + g_chained_off);
+    if (!readable(slot, sizeof *slot)) return 0;
+    *out = (void*)*slot;
+    return 1;
 }
 
 // ---- the world's grid ------------------------------------------------------
