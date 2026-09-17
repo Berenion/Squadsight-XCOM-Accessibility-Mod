@@ -432,7 +432,15 @@ static int is_selection_fn(const char* fn)
            strncmp(fn, "SetSelected",     11) == 0 ||   // + BoundsCheck, MenuOption, Item
            strcmp (fn, "Deselect")        == 0 ||
            strcmp (fn, "SelectNextMenu")  == 0 ||
-           strcmp (fn, "SelectPrevMenu")  == 0;
+           strcmp (fn, "SelectPrevMenu")  == 0 ||
+           // The pause menu is the one screen that does not spell it as a
+           // variant of SetSelected. UIPauseMenu.SetSelected(int iTarget)
+           // stores the index and delegates to AS_Selected(int iTarget),
+           // which is the frame that reaches the native -- so the name the
+           // hook sees is AS_Selected, and the prefixes above all miss it.
+           // Exactly matched rather than prefixed: AS_Selected is declared
+           // once in each build, and only on UIPauseMenu.
+           strcmp (fn, "AS_Selected")     == 0;
 }
 
 
@@ -990,10 +998,16 @@ static int rewrite_cmd(LONG n, void* stack)
         prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
 
     // Both integers are wanted: the command, and the action mask beside it.
-    // The mask is the second int parameter and its name differs by screen --
-    // OnUnrealCommand(int Cmd, int Arg) on the difficulty screen,
-    // (int Cmd, int Actionmask) on the options screen -- so it is taken by
-    // position, while Cmd is still matched by name.
+    // Both are taken by position, because the shape is constant where the
+    // names are not: OnUnrealCommand(int Cmd, int Arg) on the difficulty
+    // screen, (int ucmd, int Actionmask) on the pause menu, and two more
+    // spellings besides. Every one of the 22 callers of this native --
+    // checked against both decompiles -- declares exactly two int parameters
+    // with the command first, so position says what a name cannot.
+    //
+    // Matching the name "Cmd" is what cost the pause menu: it declares `ucmd`,
+    // so the walk found nothing, logged "no Cmd parameter found", and dropped
+    // every key on the one full menu a mission can reach.
     int32_t* cmd_slot = NULL;
     int mask = 0;
     int have_mask = 0;
@@ -1005,19 +1019,21 @@ static int rewrite_cmd(LONG n, void* stack)
         uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
         void* next     = *(void**)((uint8_t*)prop + UFIELD_NEXT);
 
-        char pname[64] = "";
-        object_name(prop, pname, sizeof pname);
-
-        if ((flags & CPF_PARM) && props_kind(prop) == PROP_INT && off < 0x1000) {
+        // The return value carries CPF_Parm as well. OnUnrealCommand returns
+        // bool, which classifies as PROP_BOOL and would be passed over anyway,
+        // but a walk that takes the first int it meets should say which ints
+        // it means rather than lean on that.
+        if ((flags & CPF_PARM) && !(flags & CPF_RETURNPARM) &&
+            props_kind(prop) == PROP_INT && off < 0x1000) {
             int32_t* slot = (int32_t*)(locals + off);
-            if (strcmp(pname, "Cmd") == 0) {
+            if (!cmd_slot) {
                 // Writing into the caller's frame, so the page must be
                 // writable as well as readable; a local that lives in
                 // read-only memory would mean this is not the frame we think
                 // it is.
                 if (!writable(slot, sizeof *slot)) return DELIVER;
                 cmd_slot = slot;
-            } else if (cmd_slot && !have_mask && readable(slot, sizeof *slot)) {
+            } else if (readable(slot, sizeof *slot)) {
                 mask = *slot;
                 have_mask = 1;
                 break;
@@ -1027,10 +1043,11 @@ static int rewrite_cmd(LONG n, void* stack)
     }
 
     if (!cmd_slot) {
-        // Reached only if no int parameter named "Cmd" was found. Worth saying
-        // so: it would mean this screen's handler is shaped differently, and
-        // every key on it would silently do nothing.
-        logf_("[%ld] Input        %s  no Cmd parameter found\n", n, screen);
+        // Reached only if the caller declared no int parameter at all, which
+        // would mean this native was reached from something that is not an
+        // OnUnrealCommand. Worth saying so: every key on that screen would
+        // silently do nothing.
+        logf_("[%ld] Input        %s  no command parameter found\n", n, screen);
         return DELIVER;
     }
 
