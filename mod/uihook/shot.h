@@ -1,0 +1,51 @@
+#pragma once
+#include <windows.h>
+
+// The shot the player is about to take.
+//
+// UITacticalHUD_InfoPanel is the one place the game states what a shot is and
+// what it will do, and it states it in pieces.  Every change of ability or of
+// target runs UITacticalHUD_InfoPanel.Update, which sends a fixed burst and
+// always ends with UpdateLayout:
+//
+//     SetIsAvailable(bool)
+//     SetShotName("Standard Shot", "")
+//     SetShotChance("to hit", "73%")        omitted for shots with no percentage
+//     SetCriticalChance("critical", "20%")  omitted unless the shot shows one
+//     SetHelp("Take a standard shot ...")
+//     SetWeaponStats("Assault Rifle")
+//     UpdateLayout()                        the end, every time
+//
+// Not one of those says anything on its own, and the general text path would
+// treat each as a list of two strings and stay silent -- which is what it did:
+// aiming was completely quiet.  So the burst is accumulated and spoken once,
+// on UpdateLayout, in the order a person would say it: "Standard Shot. 73% to
+// hit. 20% critical."
+//
+// Update runs whenever the targeting state is touched, not only when it
+// changes, so an announcement identical to the last one is dropped. Without
+// that, holding a direction would repeat the same shot indefinitely.
+//
+// What is missing from this panel is *who* is being aimed at: the game shows
+// that with a reticule and puts the name only on the unit's flag
+// (UIUnitFlag.SetNames). Naming the target is the next piece, and a separate
+// one.
+
+#define SHOT_MAX_TEXT 512
+
+// True when `obj_name` is the tactical info panel.
+int shot_is_panel(const char* obj_name);
+
+// Feeds one call of the burst.  `a` and `b` are the call's first two strings
+// with duplicates removed (the frame carries each argument twice: once as the
+// parameter and once inside the ASValue array built from it), and `flag` is a
+// bool argument or -1 when the call had none.
+//
+// Returns 1 when `out` holds something to say -- only ever on the call that
+// ends the burst.
+int shot_note(const char* fn, const char* a, const char* b, int flag,
+              char* out, size_t out_sz);
+
+// Forgets the shot being accumulated.  Used by the offline checks, and when
+// the tactical HUD goes away.
+void shot_reset(void);

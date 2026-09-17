@@ -123,6 +123,8 @@ int props_init(const void* node, char* why, size_t why_sz)
     return 1;
 }
 
+uint32_t props_class_offset(void) { return g_class_off; }
+
 int props_ready(void) { return g_ready != 0; }
 
 // Resolving a name per property per UI call would mean several dereferences

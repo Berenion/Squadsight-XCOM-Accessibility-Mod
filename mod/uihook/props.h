@@ -65,6 +65,12 @@ static __inline int ends_with_property(const char* s)
     return n > 8 && strcmp(s + n - 8, "Property") == 0;
 }
 
+// Where UObject::Class was found, or 0 before the probe has run.  Exposed
+// because finding a field by name means starting at an object's class and
+// walking it, and that walk belongs to whoever needs the field rather than
+// here.
+uint32_t props_class_offset(void);
+
 // Implemented in main.c; shared so the probe can check a pointer before
 // following it.
 int readable(const void* p, size_t n);

@@ -15,6 +15,7 @@
 #include "focus.h"
 #include "dialog.h"
 #include "help.h"
+#include "shot.h"
 #include "props.h"
 #include "input.h"
 #include "speech.h"
@@ -658,6 +659,99 @@ int main(void)
         check(help_menu_open("UINothingAtAll_0", say, sizeof say) == 0,
               "nothing to show");
         check(!help_menu_is_open(), "so nothing is opened");
+    }
+
+    // The tactical shot readout. UITacticalHUD_InfoPanel.Update sends this
+    // burst on every change of ability or target and always ends it with
+    // UpdateLayout, so that is where it is spoken.
+    printf("\nshot readout\n");
+    {
+        char say[SHOT_MAX_TEXT];
+
+        shot_reset();
+        check(shot_is_panel("UITacticalHUD_InfoPanel_0"), "the info panel is known");
+        check(!shot_is_panel("UITacticalHUD_AbilityContainer_0"), "its neighbour is not");
+        check(!shot_is_panel(NULL), "null rejected");
+
+        check(shot_note("SetIsAvailable", "", "", 1, say, sizeof say) == 0,
+              "availability alone says nothing");
+        check(shot_note("SetShotName", "Standard Shot", "", -1, say, sizeof say) == 0,
+              "the name alone says nothing");
+        check(shot_note("SetShotChance", "to hit", "73%", -1, say, sizeof say) == 0,
+              "the chance alone says nothing");
+        check(shot_note("SetCriticalChance", "critical", "20%", -1, say, sizeof say) == 0,
+              "nor the critical chance");
+        check(shot_note("SetWeaponStats", "Assault Rifle", "", -1, say, sizeof say) == 0,
+              "nor the weapon");
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1,
+              "the end of the burst speaks");
+        // The number first: the panel puts "to hit" beside a big box because
+        // of how it is drawn, but spoken that way it reads backwards.
+        check(strcmp(say, "Standard Shot. 73% to hit. 20% critical. "
+                          "Assault Rifle") == 0,
+              "name, chance, critical, and the weapon the first time");
+
+        // Update runs whenever the targeting state is touched. The same shot
+        // again must not repeat itself.
+        shot_note("SetIsAvailable", "", "", 1, say, sizeof say);
+        shot_note("SetShotName", "Standard Shot", "", -1, say, sizeof say);
+        shot_note("SetShotChance", "to hit", "73%", -1, say, sizeof say);
+        shot_note("SetCriticalChance", "critical", "20%", -1, say, sizeof say);
+        shot_note("SetWeaponStats", "Assault Rifle", "", -1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 0,
+              "the same shot is not announced twice");
+
+        // Cycling to another target changes the odds and nothing else.
+        shot_note("SetShotChance", "to hit", "45%", -1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1,
+              "a new chance is news");
+        check(strcmp(say, "Standard Shot. 45% to hit. 20% critical") == 0,
+              "and the weapon, already said, is left out");
+
+        // Switching to an ability with a different weapon says so.
+        shot_note("SetShotName", "Rocket", "", -1, say, sizeof say);
+        shot_note("SetWeaponStats", "Rocket Launcher", "", -1, say, sizeof say);
+        shot_note("UpdateLayout", "", "", -1, say, sizeof say);
+        check(strstr(say, "Rocket Launcher") != NULL, "a new weapon is news again");
+
+        // A shot with no percentage sends SetShotChance("", ""), which
+        // reaches the hook as a call with no text at all.
+        shot_reset();
+        shot_note("SetIsAvailable", "", "", 1, say, sizeof say);
+        shot_note("SetShotName", "Hunker Down", "", -1, say, sizeof say);
+        shot_note("SetShotChance", "", "", -1, say, sizeof say);
+        shot_note("SetCriticalChance", "", "", -1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1,
+              "a shot with no odds still announces");
+        check(strcmp(say, "Hunker Down") == 0, "and says only its name");
+
+        // Unavailable is the one thing a player must not discover by
+        // pressing fire.
+        shot_reset();
+        shot_note("SetIsAvailable", "", "", 0, say, sizeof say);
+        shot_note("SetShotName", "", "", -1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1,
+              "an unavailable shot announces");
+        check(strcmp(say, "Unavailable") == 0, "plainly");
+
+        // Nothing at all to say: the panel is being cleared.
+        shot_reset();
+        shot_note("SetIsAvailable", "", "", 1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 0,
+              "an empty panel stays quiet");
+
+        // Bounds, with a name far longer than any the game has.
+        shot_reset();
+        {
+            char long_name[SHOT_MAX_TEXT * 2];
+            memset(long_name, 'x', sizeof long_name - 1);
+            long_name[sizeof long_name - 1] = 0;
+            shot_note("SetIsAvailable", "", "", 1, say, sizeof say);
+            shot_note("SetShotName", long_name, "", -1, say, sizeof say);
+            shot_note("SetShotChance", "to hit", "73%", -1, say, sizeof say);
+            shot_note("UpdateLayout", "", "", -1, say, sizeof say);
+            check(strlen(say) < SHOT_MAX_TEXT, "the announcement stays in bounds");
+        }
     }
 
     printf("\nspeech debounce\n");

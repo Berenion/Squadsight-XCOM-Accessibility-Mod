@@ -49,6 +49,8 @@
 #include "focus.h"
 #include "dialog.h"
 #include "help.h"
+#include "shot.h"
+#include "cursor.h"
 #include "props.h"
 #include "input.h"
 #include "../../tools/vendor/MinHook/include/MinHook.h"
@@ -611,6 +613,41 @@ static void capture(const char* tag, LONG n, void* stack)
         prop = next;
     }
 
+    // The shot about to be taken. Its panel states one thing per call and
+    // says nothing on any of them, so the burst is composed and spoken once.
+    // shot.c holds the order it depends on.
+    if (shot_is_panel(obj_name)) {
+        // Each argument arrives twice -- once as the parameter, once inside
+        // the ASValue array built from it -- so the first occurrences are
+        // taken and the repeats dropped. Empty arguments never arrive at all:
+        // read_fstring rejects a zero-length string, which is how
+        // SetShotChance("", "") reads as a call with no text.
+        const char* a = "";
+        const char* b = "";
+        for (int i = 0; i < p->nstrings; i++) {
+            if (looks_like_asset(p->strings[i])) continue;
+            if (!*a) { a = p->strings[i]; continue; }
+            if (strcmp(p->strings[i], a) == 0) continue;
+            b = p->strings[i];
+            break;
+        }
+        int flag = p->nbools ? p->bools[0] : -1;
+
+        char say[SHOT_MAX_TEXT];
+        if (shot_note(fn_name, a, b, flag, say, sizeof say)) {
+            logf_("[%ld] %s %s.%s  SHOT \"%s\"\n", n, tag, obj_name, fn_name, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+        } else if (*a) {
+            logf_("[%ld] %s %s.%s  SHOT held \"%s\"%s%s\n", n, tag, obj_name,
+                  fn_name, a, *b ? " / " : "", b);
+        } else {
+            logf_("[%ld] %s %s.%s  SHOT held (no text)\n", n, tag, obj_name, fn_name);
+        }
+        tls_busy = 0;
+        return;
+    }
+
     // The help bar: the screen's own list of what it can do, kept so that a
     // key can read it back.  It is not spoken as it passes -- a screen
     // publishes it on arrival and on every refresh, and narrating that would
@@ -1136,6 +1173,65 @@ static int rewrite_cmd(LONG n, void* stack)
         g_orig_##id(self, edx, stack, result);                                \
     }
 
+// The cursor, watched rather than driven -- for now.
+//
+// AXCom3DCursor::GetCursorMode is native and the cursor's own Tick calls it
+// every frame, so `self` hands the object over for nothing. Identifying it is
+// the whole point: the grid cannot be navigated by relabelling a command,
+// because the cursor is flown rather than stepped, so the next piece has to
+// write a position into this object -- and that is worth proving readable,
+// against a real mission, before anything writes.
+//
+// The position is read four times a second rather than every frame. The read
+// itself is twelve bytes at a fixed offset, but it is guarded by VirtualQuery
+// like every other read into the game, and that is a syscall on the game's
+// own thread.
+#define CURSOR_WATCH_MS 250
+
+static ULONGLONG g_cursor_at;
+static float g_cursor_last[3];
+
+static void cursor_watch(void* self)
+{
+    cursor_seen(self);
+
+    ULONGLONG now = GetTickCount64();
+    if (now - g_cursor_at < CURSOR_WATCH_MS) return;
+    g_cursor_at = now;
+
+    char why[256];
+    if (!cursor_fields(why, sizeof why)) {
+        // Said once per cursor, not once per frame: g_tried latches inside
+        // cursor.c, so a failure reports itself and then stays quiet.
+        if (strcmp(why, "already failed") != 0)
+            logf_("cursor: %s\n", why);
+        return;
+    }
+
+    float x, y, z;
+    if (!cursor_position(&x, &y, &z)) return;
+    if (x == g_cursor_last[0] && y == g_cursor_last[1] && z == g_cursor_last[2])
+        return;
+    g_cursor_last[0] = x; g_cursor_last[1] = y; g_cursor_last[2] = z;
+
+    // The tile is the position divided by WORLD_StepSize. Whether the origin
+    // lines up is exactly what a mission has to say: adjacent tiles should
+    // differ by one, and the step between them by 96.
+    logf_("cursor: at %.1f, %.1f, %.1f  tile %d, %d\n", x, y, z,
+          (int)(x / CURSOR_TILE), (int)(y / CURSOR_TILE));
+}
+
+static ExecFn g_orig_cursormode;
+static void __fastcall hook_cursormode(void* self, void* edx,
+                                       void* stack, void* result)
+{
+    __try { cursor_watch(self); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        logf_("cursor: watch faulted (0x%08lx)\n", GetExceptionCode());
+    }
+    g_orig_cursormode(self, edx, stack, result);
+}
+
 // This one rewrites rather than captures, so it gets its own thunk: the work
 // has to happen before the native reads its arguments, not alongside it.
 static ExecFn g_orig_checkinput;
@@ -1264,12 +1360,19 @@ static DWORD WINAPI init(LPVOID param)
                           "AUI_FxsPanelexecCheckInputIsReleaseOrDirectionRepeat",
                           (LPVOID)hook_checkinput, (LPVOID*)&g_orig_checkinput);
 
+    // Nor is this one: it exists to be handed the battle cursor, which a
+    // native's `self` gives for free. Counted separately again -- it only
+    // matters inside a mission, and its absence must not look like the text
+    // hooks failing.
+    int cursor_armed = arm(tbl, n, mod, "AXCom3DCursorexecGetCursorMode",
+                           (LPVOID)hook_cursormode, (LPVOID*)&g_orig_cursormode);
+
     free(tbl);
     if (!armed) { logf_("FATAL: nothing armed\n"); return 1; }
 
-    logf_("%d/3 text hooks armed, key remap %s"
+    logf_("%d/3 text hooks armed, key remap %s, cursor watch %s"
           " -- navigate the UI to produce traffic\n---\n",
-          armed, input_armed ? "on" : "OFF");
+          armed, input_armed ? "on" : "OFF", cursor_armed ? "on" : "OFF");
 
     // Said aloud, because the log is the one part of this mod its user cannot
     // read.  Now that the launcher attaches during startup rather than on
