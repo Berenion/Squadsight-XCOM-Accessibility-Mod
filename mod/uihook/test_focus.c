@@ -19,6 +19,7 @@
 #include "props.h"
 #include "input.h"
 #include "speech.h"
+#include "cursor.h"
 
 static int failures;
 
@@ -708,6 +709,23 @@ int main(void)
         check(strcmp(say, "Standard Shot. 45% to hit. 20% critical") == 0,
               "and the weapon, already said, is left out");
 
+        // A zero crit chance is noise; any chance at all is not.
+        shot_note("SetCriticalChance", "critical", "0%", -1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1 &&
+              strcmp(say, "Standard Shot. 45% to hit") == 0,
+              "0% critical is left out");
+        shot_note("SetCriticalChance", "critical", "0.0 %", -1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 0,
+              "any spelling of zero is still zero");
+        shot_note("SetCriticalChance", "critical", "10%", -1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1 &&
+              strcmp(say, "Standard Shot. 45% to hit. 10% critical") == 0,
+              "a chance ending in zero is not zero");
+        shot_note("SetShotChance", "to hit", "0%", -1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1 &&
+              strstr(say, "0% to hit") != NULL,
+              "0% to hit is still said -- it is the one warning that matters");
+
         // Switching to an ability with a different weapon says so.
         shot_note("SetShotName", "Rocket", "", -1, say, sizeof say);
         shot_note("SetWeaponStats", "Rocket Launcher", "", -1, say, sizeof say);
@@ -752,6 +770,29 @@ int main(void)
             shot_note("UpdateLayout", "", "", -1, say, sizeof say);
             check(strlen(say) < SHOT_MAX_TEXT, "the announcement stays in bounds");
         }
+    }
+
+    printf("\ncursor tile arithmetic\n");
+    {
+        // A C cast truncates toward zero; the native floors.  They part on
+        // every negative coordinate, which is what the first mission hit.
+        check(cursor_tile_axis(-913.0f, 0.0f, CURSOR_TILE) == -10,
+              "a negative position floors rather than truncates");
+        check(cursor_tile_axis(-1.0f, 0.0f, CURSOR_TILE) == -1,
+              "just below the origin is tile -1, not 0");
+        check(cursor_tile_axis(0.0f, 0.0f, CURSOR_TILE) == 0,
+              "the origin itself is tile 0");
+
+        // The origin moves the lattice.  Positions from the mission run, with
+        // a Min that puts them mid-tile: adjacent readings step by one.
+        float min = -4801.0f;
+        check(cursor_tile_axis(-1009.0f, min, CURSOR_TILE) == 39 &&
+              cursor_tile_axis(-913.0f, min, CURSOR_TILE) == 40 &&
+              cursor_tile_axis(-817.0f, min, CURSOR_TILE) == 41,
+              "adjacent positions are adjacent tiles");
+        check(cursor_tile_axis(min + 95.9f, min, CURSOR_TILE) == 0 &&
+              cursor_tile_axis(min + 96.0f, min, CURSOR_TILE) == 1,
+              "a tile boundary is measured from Min");
     }
 
     printf("\nspeech debounce\n");

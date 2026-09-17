@@ -131,9 +131,20 @@ static void logf_(const char* fmt, ...)
 // A pointer is only dereferenced after VirtualQuery says the whole range is
 // committed and readable -- this runs on the game's own UI thread and a stray
 // read would take the process down with it.  Non-static: names.c uses it too.
+//
+// The range is rejected outright if it wraps the address space. A garbage
+// pointer near the top -- 0xFFFFFFFB, as an ASValue array's Data -- made
+// `cur + n` overflow to a small number, the loop below never ran, and the
+// range was declared readable without one query. Both capture faults on the
+// second mission run were exactly this, in read_array and read_fstring.
+static int range_wraps(const void* p, size_t n)
+{
+    return n > (size_t)UINTPTR_MAX - (uintptr_t)p;
+}
+
 int readable(const void* p, size_t n)
 {
-    if (!p) return 0;
+    if (!p || range_wraps(p, n)) return 0;
     MEMORY_BASIC_INFORMATION mbi;
     const uint8_t* cur = (const uint8_t*)p;
     const uint8_t* end = cur + n;
@@ -157,7 +168,7 @@ int readable(const void* p, size_t n)
 // write is abandoned rather than forced.
 static int writable(const void* p, size_t n)
 {
-    if (!p) return 0;
+    if (!p || range_wraps(p, n)) return 0;
     MEMORY_BASIC_INFORMATION mbi;
     const uint8_t* cur = (const uint8_t*)p;
     const uint8_t* end = cur + n;
@@ -542,7 +553,12 @@ static char      g_last_fn[128];
 static ULONGLONG g_last_at;
 
 
-static void capture(const char* tag, LONG n, void* stack)
+// Which call the capture under way belongs to, for the fault report. Not
+// cleared on the way out: an exception filter runs before the unwind, but the
+// handler that logs runs after it, and it needs this still in place.
+static __declspec(thread) char tls_where[256];
+
+static void capture_body(const char* tag, LONG n, void* stack)
 {
     if (!readable(stack, 0x20)) {
         logf_("[%ld] %s unreadable frame %p\n", n, tag, stack);
@@ -556,6 +572,7 @@ static void capture(const char* tag, LONG n, void* stack)
     char fn_name[128] = "?", obj_name[128] = "?";
     object_name(node, fn_name, sizeof fn_name);
     object_name(object, obj_name, sizeof obj_name);
+    _snprintf_s(tls_where, sizeof tls_where, _TRUNCATE, "%s.%s", obj_name, fn_name);
 
     // Deferred until a real frame is in hand: the probe needs a UStruct whose
     // children are known to be properties, and a called function is exactly
@@ -567,12 +584,8 @@ static void capture(const char* tag, LONG n, void* stack)
 
     // Payload is ~64KB. Putting that on the game's own thread stack, inside
     // a script VM that is already deep, is asking for trouble; it lives in
-    // thread-local storage instead. The re-entrancy guard covers the case of
-    // a hooked native being reached from inside another one.
+    // thread-local storage instead.
     static __declspec(thread) Payload tls_payload;
-    static __declspec(thread) int tls_busy;
-    if (tls_busy) return;
-    tls_busy = 1;
 
     Payload* p = &tls_payload;
     p->nstrings = 0;
@@ -652,7 +665,6 @@ static void capture(const char* tag, LONG n, void* stack)
         } else {
             logf_("[%ld] %s %s.%s  SHOT held (no text)\n", n, tag, obj_name, fn_name);
         }
-        tls_busy = 0;
         return;
     }
 
@@ -670,7 +682,6 @@ static void capture(const char* tag, LONG n, void* stack)
         if (strstr(fn_name, "Clear")) {
             help_clear(object);
             logf_("[%ld] %s %s.%s  HELP cleared\n", n, tag, obj_name, fn_name);
-            tls_busy = 0;
             return;
         }
         if (p->nnumbers) {
@@ -693,7 +704,6 @@ static void capture(const char* tag, LONG n, void* stack)
             logf_("[%ld] %s %s.%s  HELP %d = \"%s\" on %s%s\n", n, tag, obj_name,
                   fn_name, slot, label, *icon ? icon : "(no icon)",
                   disabled ? " (disabled)" : "");
-            tls_busy = 0;
             return;
         }
     }
@@ -735,7 +745,6 @@ static void capture(const char* tag, LONG n, void* stack)
                 logf_("[%ld] %s %s.%s  DIALOG held (no text)\n",
                       n, tag, obj_name, fn_name);
             }
-            tls_busy = 0;
             return;
         }
     }
@@ -758,7 +767,6 @@ static void capture(const char* tag, LONG n, void* stack)
                   changed ? "  (changed)" : "");
             if (changed) speak_slot(object, idx);
         }
-        tls_busy = 0;
         return;
     }
 
@@ -788,7 +796,6 @@ static void capture(const char* tag, LONG n, void* stack)
             // new must stay quiet or every redraw would read the tab aloud.
             if (changed) speak_slot(object, idx);
         }
-        tls_busy = 0;
         return;
     }
 
@@ -818,14 +825,12 @@ static void capture(const char* tag, LONG n, void* stack)
             logf_("[%ld] %s %s.%s  ITEM %d unresolved\n",
                   n, tag, obj_name, fn_name, idx);
         }
-        tls_busy = 0;
         return;
     }
 
     if (!p->nstrings && !p->nnumbers) {
         logf_("[%ld] %s %s.%s (no text)\n", n, tag, obj_name, fn_name);
-        tls_busy = 0;   // every exit must clear the guard, or the first
-        return;         // text-free call silences the hook for good
+        return;
     }
 
     for (int i = 0; i < p->nstrings; i++)
@@ -959,7 +964,68 @@ static void capture(const char* tag, LONG n, void* stack)
         strncpy_s(g_last_fn, sizeof g_last_fn, fn_name, _TRUNCATE);
         g_last_at = now;
     }
-    tls_busy = 0;
+}
+
+// The re-entrancy guard, which covers a hooked native being reached from
+// inside another one. It is cleared in a termination handler because a fault
+// does not leave through any return: the thunk's __except catches it, and a
+// guard cleared by hand at each exit stayed set -- after one access violation
+// while aiming, every later capture on the game thread saw itself as nested
+// and returned at once, and the mod went silent for the rest of the session,
+// pause menu and dialogue boxes included.
+static void capture(const char* tag, LONG n, void* stack)
+{
+    static __declspec(thread) int tls_busy;
+    if (tls_busy) return;
+    tls_busy = 1;
+    tls_where[0] = 0;
+    __try { capture_body(tag, n, stack); }
+    __finally { tls_busy = 0; }
+}
+
+// What a fault was doing, taken in the exception filter while the record is
+// still available: the code address, as module+offset so it can be found in a
+// disassembly of this DLL, and the address it tried to read or write.
+typedef struct {
+    DWORD     code;
+    void*     at;
+    ULONG_PTR access;     // 0 read, 1 write, 8 execute
+    ULONG_PTR addr;
+    int       has_addr;
+} Fault;
+
+static int fault_note(EXCEPTION_POINTERS* ep, Fault* f)
+{
+    const EXCEPTION_RECORD* r = ep->ExceptionRecord;
+    f->code = r->ExceptionCode;
+    f->at = r->ExceptionAddress;
+    f->has_addr = r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+                  r->NumberParameters >= 2;
+    f->access = f->has_addr ? r->ExceptionInformation[0] : 0;
+    f->addr = f->has_addr ? r->ExceptionInformation[1] : 0;
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static void fault_log(const char* prefix, const Fault* f, const char* where)
+{
+    char mod[MAX_PATH] = "?";
+    uintptr_t rva = (uintptr_t)f->at;
+    HMODULE m;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)f->at, &m) &&
+        GetModuleFileNameA(m, mod, sizeof mod)) {
+        rva -= (uintptr_t)m;
+        char* slash = strrchr(mod, '\\');
+        if (slash) memmove(mod, slash + 1, strlen(slash + 1) + 1);
+    }
+    char access[48] = "";
+    if (f->has_addr)
+        _snprintf_s(access, sizeof access, _TRUNCATE, ", %s %p",
+                    f->access == 1 ? "writing" : f->access == 8 ? "executing" : "reading",
+                    (void*)f->addr);
+    logf_("%s faulted (0x%08lx) at %s+0x%X%s%s%s\n", prefix, f->code, mod,
+          (unsigned)rva, access, where && *where ? ", in " : "", where ? where : "");
 }
 
 // MinHook needs a distinct trampoline per target, so each native gets its own
@@ -1182,10 +1248,13 @@ static int rewrite_cmd(LONG n, void* stack)
                                      void* stack, void* result)               \
     {                                                                         \
         LONG n = InterlockedIncrement(&g_calls);                              \
+        Fault f;                                                              \
         __try { capture(tag, n, stack); }                                     \
-        __except (EXCEPTION_EXECUTE_HANDLER) {                                \
-            logf_("[%ld] %s capture faulted (0x%08lx)\n",                     \
-                  n, tag, GetExceptionCode());                                \
+        __except (fault_note(GetExceptionInformation(), &f)) {                \
+            char prefix[64];                                                  \
+            _snprintf_s(prefix, sizeof prefix, _TRUNCATE,                     \
+                        "[%ld] %s capture", n, tag);                          \
+            fault_log(prefix, &f, tls_where);                                 \
         }                                                                     \
         g_orig_##id(self, edx, stack, result);                                \
     }
@@ -1207,6 +1276,7 @@ static int rewrite_cmd(LONG n, void* stack)
 
 static ULONGLONG g_cursor_at;
 static float g_cursor_last[3];
+static CursorGrid g_grid_last;
 
 static void cursor_watch(void* self)
 {
@@ -1217,12 +1287,35 @@ static void cursor_watch(void* self)
     g_cursor_at = now;
 
     char why[256];
-    if (!cursor_fields(why, sizeof why)) {
+    int fields = cursor_fields(why, sizeof why);
+    if (!fields) {
         // Said once per cursor, not once per frame: g_tried latches inside
         // cursor.c, so a failure reports itself and then stays quiet.
         if (strcmp(why, "already failed") != 0)
             logf_("cursor: %s\n", why);
         return;
+    }
+    // Success is worth a line too: these are the offsets anything that writes
+    // into the cursor will be trusting.
+    if (fields == 2) logf_("cursor: %s\n", why);
+
+    // The grid's origin, off XComWorldData. Waiting for GetWorldData to be
+    // called is not a failure and is not logged; the tile then reads "?".
+    char grid_why[256];
+    int grid = cursor_world_fields(grid_why, sizeof grid_why);
+    if (grid == 2)
+        logf_("grid: %s\n", grid_why);
+    else if (!grid && strcmp(grid_why, "already failed") != 0 &&
+             strcmp(grid_why, "no world data yet") != 0 &&
+             strcmp(grid_why, "UObject::Class not probed yet") != 0)
+        logf_("grid: %s\n", grid_why);
+
+    CursorGrid g;
+    int have_grid = grid && cursor_grid(&g);
+    if (have_grid && memcmp(&g, &g_grid_last, sizeof g) != 0) {
+        g_grid_last = g;
+        logf_("grid: Min %.1f, %.1f, %.1f  size %d x %d x %d tiles\n",
+              g.min_x, g.min_y, g.min_z, g.num_x, g.num_y, g.num_z);
     }
 
     float x, y, z;
@@ -1231,20 +1324,51 @@ static void cursor_watch(void* self)
         return;
     g_cursor_last[0] = x; g_cursor_last[1] = y; g_cursor_last[2] = z;
 
-    // The tile is the position divided by WORLD_StepSize. Whether the origin
-    // lines up is exactly what a mission has to say: adjacent tiles should
-    // differ by one, and the step between them by 96.
-    logf_("cursor: at %.1f, %.1f, %.1f  tile %d, %d\n", x, y, z,
-          (int)(x / CURSOR_TILE), (int)(y / CURSOR_TILE));
+    if (!have_grid) {
+        logf_("cursor: at %.1f, %.1f, %.1f  tile ? (%s)\n", x, y, z,
+              grid ? "grid unreadable" : grid_why);
+        return;
+    }
+
+    // The native's own arithmetic (see cursor.h): floor((pos - Min) / 96).
+    // The fraction is printed so the log can confirm it rather than trust it
+    // -- a cursor at rest in the middle of a tile should read +0.50 on both
+    // axes, and anything else means Min is not the origin the native uses.
+    int tx = cursor_tile_axis(x, g.min_x, CURSOR_TILE);
+    int ty = cursor_tile_axis(y, g.min_y, CURSOR_TILE);
+    float fx = (x - g.min_x) / CURSOR_TILE - (float)tx;
+    float fy = (y - g.min_y) / CURSOR_TILE - (float)ty;
+    int off_grid = tx < 0 || ty < 0 || tx >= g.num_x || ty >= g.num_y;
+    logf_("cursor: at %.1f, %.1f, %.1f  tile %d, %d (+%.2f, +%.2f)%s\n",
+          x, y, z, tx, ty, fx, fy, off_grid ? "  OFF GRID" : "");
+}
+
+// Hands over XComWorldData, which owns the grid's origin. The native is static
+// and writes the object into Result unconditionally (both builds), so the
+// object is read after the original has run. Half the tactical script calls
+// this, so the hook does nothing beyond one pointer comparison.
+static ExecFn g_orig_worlddata;
+static LONG g_worlddata_faulted;
+static void __fastcall hook_worlddata(void* self, void* edx,
+                                      void* stack, void* result)
+{
+    g_orig_worlddata(self, edx, stack, result);
+    __try { cursor_world_seen(*(void**)result); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (!InterlockedExchange(&g_worlddata_faulted, 1))
+            logf_("grid: reading GetWorldData's result faulted (0x%08lx)\n",
+                  GetExceptionCode());
+    }
 }
 
 static ExecFn g_orig_cursormode;
 static void __fastcall hook_cursormode(void* self, void* edx,
                                        void* stack, void* result)
 {
+    Fault f;
     __try { cursor_watch(self); }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        logf_("cursor: watch faulted (0x%08lx)\n", GetExceptionCode());
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        fault_log("cursor: watch", &f, NULL);
     }
     g_orig_cursormode(self, edx, stack, result);
 }
@@ -1257,10 +1381,12 @@ static void __fastcall hook_checkinput(void* self, void* edx,
 {
     LONG n = InterlockedIncrement(&g_calls);
     int suppress = 0;
+    Fault f;
     __try { suppress = rewrite_cmd(n, stack); }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        logf_("[%ld] Input        rewrite faulted (0x%08lx)\n",
-              n, GetExceptionCode());
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        char prefix[64];
+        _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "[%ld] Input        rewrite", n);
+        fault_log(prefix, &f, NULL);
     }
     g_orig_checkinput(self, edx, stack, result);
 
@@ -1384,12 +1510,17 @@ static DWORD WINAPI init(LPVOID param)
     int cursor_armed = arm(tbl, n, mod, "AXCom3DCursorexecGetCursorMode",
                            (LPVOID)hook_cursormode, (LPVOID*)&g_orig_cursormode);
 
+    // The grid's origin. Without it the cursor still reads, but not as a tile.
+    int grid_armed = arm(tbl, n, mod, "UXComWorldDataexecGetWorldData",
+                         (LPVOID)hook_worlddata, (LPVOID*)&g_orig_worlddata);
+
     free(tbl);
     if (!armed) { logf_("FATAL: nothing armed\n"); return 1; }
 
-    logf_("%d/3 text hooks armed, key remap %s, cursor watch %s"
+    logf_("%d/3 text hooks armed, key remap %s, cursor watch %s, grid %s"
           " -- navigate the UI to produce traffic\n---\n",
-          armed, input_armed ? "on" : "OFF", cursor_armed ? "on" : "OFF");
+          armed, input_armed ? "on" : "OFF", cursor_armed ? "on" : "OFF",
+          grid_armed ? "on" : "OFF");
 
     // Said aloud, because the log is the one part of this mod its user cannot
     // read.  Now that the launcher attaches during startup rather than on

@@ -18,7 +18,7 @@ cl /nologo /W3 /O2 /MT /LD ^
    "%HERE%main.c" "%HERE%natives.c" "%HERE%names.c" "%HERE%speech.c" "%HERE%focus.c" "%HERE%dialog.c" "%HERE%help.c" "%HERE%shot.c" "%HERE%cursor.c" "%HERE%props.c" "%HERE%input.c" ^
    "%MH%\src\hook.c" "%MH%\src\buffer.c" "%MH%\src\trampoline.c" "%MH%\src\hde\hde32.c" ^
    /Fe:xcom_uihook.dll ^
-   /link /OUT:xcom_uihook.dll ole32.lib oleaut32.lib sapi.lib
+   /link /OUT:xcom_uihook.dll /MAP:xcom_uihook.map ole32.lib oleaut32.lib sapi.lib
 if errorlevel 1 (popd & echo DLL BUILD FAILED & exit /b 1)
 
 cl /nologo /W3 /O2 /MT "%HERE%inject.c" "%HERE%injector.c" /Fe:inject.exe /link user32.lib

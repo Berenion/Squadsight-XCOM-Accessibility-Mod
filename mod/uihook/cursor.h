@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include <stdint.h>
+#include <math.h>
 
 // The battle cursor: finding it, and reading where it stands.
 //
@@ -42,7 +43,9 @@ void* cursor_object(void);
 
 // Resolves the named fields against the cursor's class, once.  `why` receives
 // a readable account either way -- what was found and where, or what failed.
-// Returns 1 when the cursor's position can be read.
+// Returns 2 on the call that resolved them, so the offsets it chose can be put
+// on record once, 1 on every later call, and 0 when the position cannot be
+// read.
 int cursor_fields(char* why, size_t why_sz);
 
 // Reads the cursor's position.  Returns 0 when the fields are not resolved or
@@ -51,6 +54,51 @@ int cursor_position(float* x, float* y, float* z);
 
 // One tile, in world units: XComWorldData.WORLD_StepSize.
 #define CURSOR_TILE 96.0f
+
+// The grid's origin.
+//
+// A tile is not the position divided by 96.  The native that answers
+// GetTileCoordinatesFromPosition does, in both builds,
+//
+//     TileX = appFloor((Position.X - Min.X) * (1/96))
+//     TileY = appFloor((Position.Y - Min.Y) * (1/96))
+//     TileZ = appFloor((Position.Z - Min.Z) * (1/64))    // WORLD_FloorHeight
+//
+// with appFloor spelled cvtss2si(2f - 0.5) >> 1 (EW .text 0x5d0730, the same
+// bytes in EU).  So the origin is the world's own bounds, and the rounding is
+// a floor, not the truncation a C cast gives -- which differs for every
+// negative coordinate.  The origin lives on XComWorldData as
+//
+//     var Box WorldBounds;      // { Vector Min; Vector Max; byte IsValid; }
+//     var int NumX, NumY, NumZ;
+//
+// and that object is handed over by the static native GetWorldData, whose
+// return value is the object: the hook reads it out of Result.
+
+// Records the world data object.  Called from the hook on GetWorldData, which
+// half the tactical script calls, so after the first sighting this is one
+// comparison.
+void cursor_world_seen(void* world);
+
+// Resolves WorldBounds / NumX / NumY / NumZ on the world object's class, once
+// per object.  Same contract as cursor_fields: 2 on the call that resolved
+// them, 1 afterwards, 0 on failure, with `why` saying which.
+int cursor_world_fields(char* why, size_t why_sz);
+
+typedef struct {
+    float min_x, min_y, min_z;
+    int   num_x, num_y, num_z;
+} CursorGrid;
+
+// Reads the grid as it stands now.  The values are read on every call rather
+// than cached, because the world data is rebuilt when a map loads.
+int cursor_grid(CursorGrid* g);
+
+// One axis of the native's arithmetic.  `step` is CURSOR_TILE for X and Y.
+static __inline int cursor_tile_axis(float pos, float min, float step)
+{
+    return (int)floorf((pos - min) / step);
+}
 
 // Forgets the cursor -- leaving a mission destroys it, and the next mission
 // spawns another.

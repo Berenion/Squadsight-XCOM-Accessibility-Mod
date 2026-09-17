@@ -12,7 +12,8 @@ static struct {
     char weapon[SHOT_MAX_TEXT];
     char said[SHOT_MAX_TEXT];     // what was last announced, verbatim
     char said_weapon[SHOT_MAX_TEXT];
-} g;
+} g = { 1 };    // available until told otherwise, as shot_reset leaves it;
+                // the DLL never calls shot_reset, so this is its start state
 
 void shot_reset(void)
 {
@@ -54,6 +55,19 @@ static void set_measure(char* dst, size_t sz, const char* label, const char* val
     _snprintf_s(dst, sz, _TRUNCATE, "%s %s", value, label);
 }
 
+// "0%", "0", "0.0 %": a number that is zero, whatever the panel dressed it in.
+// Anything without a digit is not a zero -- an empty value is handled apart.
+static int is_zero_percent(const char* v)
+{
+    int digits = 0;
+    for (; v && *v; v++) {
+        if (*v >= '1' && *v <= '9') return 0;
+        if (*v == '0') digits++;
+        else if (*v != '.' && *v != '%' && *v != ' ') return 0;
+    }
+    return digits > 0;
+}
+
 int shot_note(const char* fn, const char* a, const char* b, int flag,
               char* out, size_t out_sz)
 {
@@ -78,7 +92,11 @@ int shot_note(const char* fn, const char* a, const char* b, int flag,
         return 0;
     }
     if (strstr(fn, "SetCriticalChance")) {
-        set_measure(g.crit, sizeof g.crit, a, b);
+        // The panel sends a crit chance with every shot, and "0% critical"
+        // on nearly all of them buries the number that matters. It is said
+        // only when there is a chance.
+        if (is_zero_percent(b)) g.crit[0] = 0;
+        else set_measure(g.crit, sizeof g.crit, a, b);
         return 0;
     }
     if (strstr(fn, "SetWeaponStats")) {

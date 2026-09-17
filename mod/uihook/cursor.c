@@ -12,12 +12,20 @@ static uint32_t g_location_off;
 static int      g_resolved;
 static int      g_tried;
 
+// The grid's owner, XComWorldData; see "the world's grid" below.
+static void*    g_world;
+static int      g_world_resolved;
+static int      g_world_tried;
+
 void cursor_forget(void)
 {
     g_cursor = NULL;
     g_location_off = 0;
     g_resolved = 0;
     g_tried = 0;
+    g_world = NULL;
+    g_world_resolved = 0;
+    g_world_tried = 0;
 }
 
 void cursor_seen(void* self)
@@ -138,6 +146,98 @@ int cursor_fields(char* why, size_t why_sz)
     _snprintf_s(why, why_sz, _TRUNCATE,
                 "class %s, SuperStruct +0x%X, Location +0x%X",
                 cls_name, g_super_off, g_location_off);
+    return 2;
+}
+
+// ---- the world's grid ------------------------------------------------------
+
+static uint32_t g_bounds_off, g_numx_off, g_numy_off, g_numz_off;
+
+void cursor_world_seen(void* world)
+{
+    if (world && world != g_world) {
+        g_world = world;
+        g_world_resolved = 0;
+        g_world_tried = 0;
+    }
+}
+
+int cursor_world_fields(char* why, size_t why_sz)
+{
+    if (g_world_resolved) {
+        _snprintf_s(why, why_sz, _TRUNCATE, "WorldBounds +0x%X", g_bounds_off);
+        return 1;
+    }
+    if (g_world_tried) { _snprintf_s(why, why_sz, _TRUNCATE, "already failed"); return 0; }
+    if (!g_world) { _snprintf_s(why, why_sz, _TRUNCATE, "no world data yet"); return 0; }
+    g_world_tried = 1;
+
+    uint32_t class_off = props_class_offset();
+    if (!class_off) {
+        // Not a verdict on this object, so let the next call try again.
+        g_world_tried = 0;
+        _snprintf_s(why, why_sz, _TRUNCATE, "UObject::Class not probed yet");
+        return 0;
+    }
+    if (!readable((const uint8_t*)g_world + class_off, sizeof(void*))) {
+        _snprintf_s(why, why_sz, _TRUNCATE, "world data %p: class unreadable", g_world);
+        return 0;
+    }
+    const void* cls = *(const void* const*)((const uint8_t*)g_world + class_off);
+    char cls_name[128] = "?";
+    object_name((void*)cls, cls_name, sizeof cls_name);
+
+    // The object came out of a return slot, so this is the check that the slot
+    // was read correctly: anything else in it would not be this class.
+    if (strcmp(cls_name, "XComWorldData") != 0) {
+        _snprintf_s(why, why_sz, _TRUNCATE,
+                    "GetWorldData returned %p of class %s, not XComWorldData",
+                    g_world, cls_name);
+        return 0;
+    }
+    if (!find_super_offset(cls)) {
+        _snprintf_s(why, why_sz, _TRUNCATE,
+                    "class %s: no SuperStruct offset reaches Object", cls_name);
+        return 0;
+    }
+    const char* missing =
+        !field_offset(cls, "WorldBounds", &g_bounds_off) ? "WorldBounds" :
+        !field_offset(cls, "NumX", &g_numx_off)          ? "NumX" :
+        !field_offset(cls, "NumY", &g_numy_off)          ? "NumY" :
+        !field_offset(cls, "NumZ", &g_numz_off)          ? "NumZ" : NULL;
+    if (missing) {
+        _snprintf_s(why, why_sz, _TRUNCATE,
+                    "class %s: no property named %s", cls_name, missing);
+        return 0;
+    }
+
+    g_world_resolved = 1;
+    _snprintf_s(why, why_sz, _TRUNCATE,
+                "%p class %s, WorldBounds +0x%X, NumX +0x%X, NumY +0x%X, NumZ +0x%X",
+                g_world, cls_name, g_bounds_off, g_numx_off, g_numy_off, g_numz_off);
+    return 2;
+}
+
+int cursor_grid(CursorGrid* g)
+{
+    if (!g_world_resolved || !g_world) return 0;
+    const uint8_t* w = (const uint8_t*)g_world;
+    uint32_t lo = g_bounds_off, hi = g_bounds_off + 3 * sizeof(float);
+    if (g_numx_off < lo) lo = g_numx_off;
+    if (g_numy_off < lo) lo = g_numy_off;
+    if (g_numz_off < lo) lo = g_numz_off;
+    if (g_numx_off + 4 > hi) hi = g_numx_off + 4;
+    if (g_numy_off + 4 > hi) hi = g_numy_off + 4;
+    if (g_numz_off + 4 > hi) hi = g_numz_off + 4;
+    if (!readable(w + lo, hi - lo)) return 0;   // one query covers all four
+
+    const float* min = (const float*)(w + g_bounds_off);   // Box.Min leads
+    g->min_x = min[0];
+    g->min_y = min[1];
+    g->min_z = min[2];
+    g->num_x = *(const int32_t*)(w + g_numx_off);
+    g->num_y = *(const int32_t*)(w + g_numy_off);
+    g->num_z = *(const int32_t*)(w + g_numz_off);
     return 1;
 }
 
