@@ -87,29 +87,39 @@ static int find_super_offset(const void* cls)
     return 0;
 }
 
-// The offset of a named property, searched up the class chain.
-static int field_offset(const void* cls, const char* want, uint32_t* out)
+// A named property, searched up the class chain.
+static const void* field_find(const void* cls, const char* want)
 {
     for (int depth = 0; cls && depth < 24; depth++) {
         if (!readable((const uint8_t*)cls + USTRUCT_CHILDREN, sizeof(void*)))
-            return 0;
+            return NULL;
         const void* field = *(const void* const*)((const uint8_t*)cls + USTRUCT_CHILDREN);
 
-        for (int guard = 0; field && guard < 512; guard++) {
+        // XGUnit alone declares over 700 members -- functions, states and
+        // constants are children too -- and a guard of 512 stopped short of
+        // XGUnit.m_kPlayer, silently. The guard is against a cycle, not a
+        // budget.
+        for (int guard = 0; field && guard < 8192; guard++) {
             if (!readable(field, 0x68)) break;
             char name[128];
             if (object_name((void*)field, name, sizeof name) &&
-                strcmp(name, want) == 0) {
-                *out = *(const uint32_t*)((const uint8_t*)field + UPROPERTY_OFFSET);
-                return 1;
-            }
+                strcmp(name, want) == 0)
+                return field;
             field = *(const void* const*)((const uint8_t*)field + UFIELD_NEXT);
         }
 
-        if (!readable((const uint8_t*)cls + g_super_off, sizeof(void*))) return 0;
+        if (!readable((const uint8_t*)cls + g_super_off, sizeof(void*))) return NULL;
         cls = *(const void* const*)((const uint8_t*)cls + g_super_off);
     }
-    return 0;
+    return NULL;
+}
+
+static int field_offset(const void* cls, const char* want, uint32_t* out)
+{
+    const void* field = field_find(cls, want);
+    if (!field) return 0;
+    *out = *(const uint32_t*)((const uint8_t*)field + UPROPERTY_OFFSET);
+    return 1;
 }
 
 int cursor_fields(char* why, size_t why_sz)
@@ -171,6 +181,17 @@ int object_field_offset(const void* obj, const char* name, uint32_t* out)
     if (!cls || !readable(cls, 0x60)) return 0;
     if (!find_super_offset(cls)) return 0;
     return field_offset(cls, name, out);
+}
+
+const void* object_field_prop(const void* obj, const char* name)
+{
+    uint32_t class_off = props_class_offset();
+    if (!obj || !class_off) return NULL;
+    if (!readable((const uint8_t*)obj + class_off, sizeof(void*))) return NULL;
+    const void* cls = *(const void* const*)((const uint8_t*)obj + class_off);
+    if (!cls || !readable(cls, 0x60)) return NULL;
+    if (!find_super_offset(cls)) return NULL;
+    return field_find(cls, name);
 }
 
 int cursor_chained_pawn(void** out)
@@ -274,6 +295,8 @@ int cursor_grid(CursorGrid* g)
     g->num_z = *(const int32_t*)(w + g_numz_off);
     return 1;
 }
+
+void* cursor_world(void) { return g_world_resolved ? g_world : NULL; }
 
 int cursor_position(float* x, float* y, float* z)
 {

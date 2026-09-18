@@ -61,6 +61,10 @@ int cursor_position(float* x, float* y, float* z);
 // property -- which also makes it a test of what kind of object this is.
 int object_field_offset(const void* obj, const char* name, uint32_t* out);
 
+// The UProperty itself, for a field that needs its type to be read -- a bool
+// is one bit of a dword (props_read_bool). NULL when there is no such field.
+const void* object_field_prop(const void* obj, const char* name);
+
 // The soldier the cursor is leashed to (XCom3DCursor.ChainedPawn), which
 // changes when the player switches soldier.  Returns 0 when it could not be
 // resolved or read; *out may be NULL on success.
@@ -107,6 +111,10 @@ typedef struct {
 // Reads the grid as it stands now.  The values are read on every call rather
 // than cached, because the world data is rebuilt when a map loads.
 int cursor_grid(CursorGrid* g);
+
+// The world data object, once its class has been confirmed as XComWorldData;
+// NULL before then. tile queries call its natives through it.
+void* cursor_world(void);
 
 // One axis of the native's arithmetic.  `step` is CURSOR_TILE for X and Y.
 static __inline int cursor_tile_axis(float pos, float min, float step)

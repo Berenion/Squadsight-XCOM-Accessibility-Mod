@@ -21,6 +21,7 @@
 #include "speech.h"
 #include "cursor.h"
 #include "nav.h"
+#include "tile.h"
 
 static int failures;
 
@@ -923,6 +924,121 @@ int main(void)
         check(navh_path_result(z + NAVH_LIFT, 0, 9000) == NAVH_WAIT &&
               navh_poll(9000 + 10 * NAVH_SETTLE_MS) == NAVH_WAIT,
               "failures during the search say nothing");
+    }
+
+    printf("\nwhat is on a tile\n");
+    {
+        // A thunk's shape, written by hand: the out-parameter notify calls
+        // through a register too, but without loading `this` first.
+        static const unsigned char thunk[] = {
+            0x8B, 0x80, 0xD0, 0x00, 0x00, 0x00,     // mov eax, [eax+0xD0]
+            0x52,                                   // push edx
+            0xFF, 0xD0,                             // call eax     (notify)
+            0x8B, 0x92, 0xF4, 0x01, 0x00, 0x00,     // mov edx, [edx+0x1F4]
+            0x55,                                   // push ebp
+            0x8B, 0xCB,                             // mov ecx, ebx
+            0xFF, 0xD2,                             // call edx     (the method)
+            0xC2, 0x08, 0x00,                       // ret 8
+            0x8B, 0x91, 0x00, 0x02, 0x00, 0x00,     // past the end: ignored
+            0x8B, 0xCB, 0xFF, 0xD1,
+        };
+        check(tile_vtable_slot(thunk, sizeof thunk) == 0x1F4,
+              "the slot is the call that has `this` loaded");
+        check(tile_vtable_slot(thunk, 9) == -1, "a notify alone is not a slot");
+        static const unsigned char other_reg[] = {
+            0x8B, 0x92, 0xEC, 0x01, 0x00, 0x00,     // mov edx, [edx+0x1EC]
+            0x8B, 0xCB, 0xFF, 0xD0,                 // call eax: not the loaded register
+            0xC2, 0x08, 0x00,
+        };
+        check(tile_vtable_slot(other_reg, sizeof other_reg) == -1,
+              "a call through another register does not count");
+
+        TileReport r;
+        char say[TILE_MAX_TEXT];
+
+        memset(&r, 0, sizeof r);
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "No cover.") == 0, "nothing: no cover");
+
+        // The game's North is +Y, the numpad's too; its East is -X, which the
+        // numpad calls west.
+        r.cover_flags = TILE_COVER_N;
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "High cover north.") == 0, "a direction bit alone is high cover");
+        r.cover_flags = TILE_COVER_E | TILE_COVER_ELOW;
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "Low cover west.") == 0, "the game's East is -X, spoken west");
+        r.cover_flags = TILE_COVER_W;
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "High cover east.") == 0, "and its West is east");
+
+        r.cover_flags = TILE_COVER_N | TILE_COVER_S | TILE_COVER_W |
+                        TILE_COVER_E | TILE_COVER_ELOW;
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "High cover north, east and south. Low cover west.") == 0,
+              "high then low, each clockwise from north");
+
+        r.cover_flags = TILE_COVER_DIAGONAL | TILE_COVER_N | TILE_COVER_W | TILE_COVER_WLOW;
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "High cover northwest. Low cover northeast.") == 0,
+              "diagonal cover is turned 45 degrees");
+
+        r.cover_flags = 0;
+        r.dash = 1;
+        r.smoke = 1;
+        r.poison = 1;
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "Dash. No cover. Smoke. Poison.") == 0,
+              "dash first, hazards last");
+
+        char tiny[8];
+        tile_describe(&r, tiny, sizeof tiny);
+        check(strlen(tiny) < sizeof tiny, "a short buffer truncates");
+
+        r.turns = 3;
+        r.smoke = r.poison = 0;
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "3 turns. No cover.") == 0, "a move past this turn says its turns");
+
+        // Costs from the second mission run: standard move 12, dash 24.
+        check(tile_turns(10, 24, 12) == 1, "within this turn's reach is one turn");
+        check(tile_turns(24, 24, 12) == 1, "the dash limit itself is still one turn");
+        check(tile_turns(25, 24, 12) == 2, "one past it is two");
+        check(tile_turns(54, 24, 12) == 3, "54 is 24 + 24 + 6: three turns");
+        check(tile_turns(30, 12, 12) == 2,
+              "after moving once, this turn has only the standard move left");
+        check(tile_turns(-1, 24, 12) == 0 && tile_turns(5, 0, 12) == 0,
+              "nonsense numbers give no answer");
+
+        // A thunk that takes no arguments keeps `this` in esi.
+        static const unsigned char no_args[] = {
+            0x8B, 0x06,                             // mov eax, [esi]
+            0x8B, 0x90, 0xC8, 0x04, 0x00, 0x00,     // mov edx, [eax+0x4C8]
+            0x8B, 0xCE,                             // mov ecx, esi
+            0xFF, 0xD2,                             // call edx
+            0xC2, 0x08, 0x00,
+        };
+        check(tile_vtable_slot(no_args, sizeof no_args) == 0x4C8,
+              "`this` from esi counts too");
+
+        char where[64];
+        tile_offset_text(3, -2, where, sizeof where);
+        check(strcmp(where, "2 south, 3 east") == 0, "an offset says north-south first");
+        tile_offset_text(0, 5, where, sizeof where);
+        check(strcmp(where, "5 north") == 0, "a straight offset has one part");
+        tile_offset_text(0, 0, where, sizeof where);
+        check(strcmp(where, "here") == 0, "no offset is here");
+
+        TileContact c[3] = {
+            { "Zombie", 0, -8 }, { "Chryssalid", 5, 2 }, { "Sectoid", -1, 1 },
+        };
+        char list[256];
+        tile_contacts(c, 3, "none", list, sizeof list);
+        check(strcmp(list, "Sectoid, 1 north, 1 west. Chryssalid, 2 north, 5 east. "
+                           "Zombie, 8 south.") == 0,
+              "contacts nearest first");
+        tile_contacts(c, 0, "No enemies in sight.", list, sizeof list);
+        check(strcmp(list, "No enemies in sight.") == 0, "an empty list says so");
     }
 
     printf("\nspeech debounce\n");

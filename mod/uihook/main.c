@@ -52,6 +52,7 @@
 #include "shot.h"
 #include "cursor.h"
 #include "nav.h"
+#include "tile.h"
 #include "props.h"
 #include "input.h"
 #include "../../tools/vendor/MinHook/include/MinHook.h"
@@ -559,6 +560,8 @@ static ULONGLONG g_last_at;
 // handler that logs runs after it, and it needs this still in place.
 static __declspec(thread) char tls_where[256];
 
+static void unit_note(void* flag, const char* name, const char* nick);
+
 static void capture_body(const char* tag, LONG n, void* stack)
 {
     if (!readable(stack, 0x20)) {
@@ -638,6 +641,16 @@ static void capture_body(const char* tag, LONG n, void* stack)
     // The shot about to be taken. Its panel states one thing per call and
     // says nothing on any of them, so the burst is composed and spoken once.
     // shot.c holds the order it depends on.
+    // A unit's name, over its head. Each argument arrives twice -- as the
+    // parameter and again in the ASValue array -- and an empty nickname not
+    // at all, so a second string equal to the first is the name repeated.
+    if (strncmp(obj_name, "UIUnitFlag_", 11) == 0 && strcmp(fn_name, "SetNames") == 0 &&
+        p->nstrings > 0) {
+        const char* nick = p->nstrings > 1 && strcmp(p->strings[1], p->strings[0]) != 0
+                               ? p->strings[1] : "";
+        unit_note(object, p->strings[0], nick);
+    }
+
     if (shot_is_panel(obj_name)) {
         // Each argument arrives twice -- once as the parameter, once inside
         // the ASValue array built from it -- so the first occurrences are
@@ -1299,6 +1312,7 @@ static CursorGrid g_grid_last;
 // -- so the game's own validation, floor snap and path preview run on it.
 
 static int       g_numpad_down[10];
+static int       g_radar_down[2];       // numpad +, numpad -
 static void*     g_nav_cursor;          // the cursor navigation began on
 static void*     g_nav_pawn;            // ChainedPawn when navigation began
 static POINT     g_nav_mouse;           // where the mouse was, to notice it moving
@@ -1352,12 +1366,542 @@ static int cursor_tile(const CursorGrid* g, int* tx, int* ty, float* z)
     return 1;
 }
 
+// ---- what is on the tile ---------------------------------------------------
+//
+// The game's own answers, asked of its C++ directly: see tile.h for why the
+// vtable, and how the slots are found. These are pure queries, called on the
+// game thread from inside one of its own natives, which is where the script
+// would have called them from.
+typedef int (__fastcall* TileCoverFn)(void* self, void* edx, float x, float y,
+                                      float z, TileCoverPoint* out);
+typedef int (__fastcall* TileTestFn)(void* self, void* edx, int x, int y, int z);
+typedef int (__fastcall* UnitTestFn)(void* self, void* edx);
+
+static int       g_tile_slot_cover = -1, g_tile_slot_smoke = -1, g_tile_slot_poison = -1;
+static int       g_unit_slot_visible = -1;  // XGUnitNativeBase.IsAliveAndVisible
+static uint8_t*  g_image_lo;            // the game's image, to check a vtable entry
+static uint8_t*  g_image_hi;            // points into it before calling it
+static void*     g_path_pawn;           // the pathing pawn that built the last path
+static void*     g_reach_pawn;          // the pawn the path offsets were resolved on
+static ULONGLONG g_tile_due;            // when the target tile is to be described
+static int       g_tile_due_at[2];
+static int       g_tile_due_dash;       // whether its path says anything about it
+
+// A step is announced once, when what is on the tile is known, with the
+// coordinates last: "Ellis. Low cover south. 44, 12." Until then the step's
+// coordinates, and anyone found standing there, wait here. If nothing decides
+// the tile in STEP_FALLBACK_MS, what is known is said anyway.
+#define STEP_FALLBACK_MS 1500
+static int       g_step_pending;
+static ULONGLONG g_step_deadline;
+static char      g_step_coords[NAV_MAX_TEXT];
+static char      g_step_who[TILE_MAX_TEXT];   // units on the tile, found on arrival
+
+// How long after a tile's first path it is described. None: the next frame.
+// It was 200 ms while "Dash" came from DestinationReachability, which the
+// dash rebuild (ChangeDashState) changes a tick later. The path's own cost
+// needs no such wait -- the pathfinder builds the whole path at once, past
+// the dash limit included (costs of 54 against a MaxPathCost of 24).
+#define TILE_DESCRIBE_DELAY_MS 0
+// The soldier's own tile has no verdict to wait for, only the floor search,
+// which on level ground settles on its first frame.
+#define OWN_TILE_DELAY_MS 60
+
+// A virtual function of `obj`, or NULL when the slot is unknown or the entry
+// does not point into the game's image.
+static void* tile_vfn(void* obj, int slot)
+{
+    if (slot < 0 || !obj || !readable(obj, sizeof(void*))) return NULL;
+    uint8_t* vt = *(uint8_t**)obj;
+    if (!readable(vt + slot, sizeof(void*))) return NULL;
+    uint8_t* fn = *(uint8_t**)(vt + slot);
+    if (fn < g_image_lo || fn >= g_image_hi) return NULL;
+    return fn;
+}
+
+// An object's field, by name: the offset is looked up again whenever the
+// object's class is not the one it was last found on. An offset belongs to
+// the class, and a walk up XGUnit's chain passes hundreds of members, each a
+// VirtualQuery -- once per class, not once per unit per key press.
+static int field_ptr(void* obj, const char* name, uint32_t* off, void** found_on,
+                     size_t size, const void** out)
+{
+    if (!obj) return 0;
+    uint32_t class_off = props_class_offset();
+    if (!class_off || !readable((const uint8_t*)obj + class_off, sizeof(void*))) return 0;
+    void* cls = *(void* const*)((const uint8_t*)obj + class_off);
+    if (!cls) return 0;
+    if (cls != *found_on) {
+        if (!object_field_offset(obj, name, off)) {
+            logf_("field: no %s on this object's class\n", name);
+            return 0;
+        }
+        *found_on = cls;
+    }
+    const uint8_t* v = (const uint8_t*)obj + *off;
+    if (!readable(v, size)) return 0;
+    *out = v;
+    return 1;
+}
+
+// The soldier's own tile, from the pawn the cursor is chained to. `z` gets the
+// pawn's height, which stands in for a cursor's: both are compared with the
+// floor through NAV_CURSOR_LIFT.
+//
+// Needed because the cursor is not the soldier. In mouse mode it follows the
+// mouse every frame, and when the soldier changes the camera pans while the
+// mouse stays put, so the cursor lands wherever the mouse now points -- in one
+// run, three soldiers in a row began at the map's northern edge, rows 54 to
+// 60 of 61, where no path went anywhere.
+static uint32_t g_soldier_loc_off;
+static void*    g_soldier_loc_on;
+
+static int soldier_tile(const CursorGrid* g, int* tx, int* ty, float* z)
+{
+    void* pawn = NULL;
+    const void* v;
+    if (!cursor_chained_pawn(&pawn) || !pawn ||
+        !field_ptr(pawn, "Location", &g_soldier_loc_off, &g_soldier_loc_on,
+                   3 * sizeof(float), &v))
+        return 0;
+    const float* loc = (const float*)v;
+    *tx = cursor_tile_axis(loc[0], g->min_x, CURSOR_TILE);
+    *ty = cursor_tile_axis(loc[1], g->min_y, CURSOR_TILE);
+    *z = loc[2];
+    return 1;
+}
+
+// How far the path just built goes, against how far the soldier may go:
+//   0 a standard move, 1 a dash, 2 past this turn's reach, -1 unreadable.
+// *turns_out gets how many turns the path takes (tile_turns).
+//
+// DestinationReachability was the first try and said "dash" on every tile:
+// SetActive(kUnit, bCanDash) sets it to 1 for any soldier who *can* dash. The
+// second -- the path's XComPath.Cost over XComPathingPawn.StandardMoveLength,
+// the test the tutorial's "Dashing!" makes -- was right up to the dash limit
+// and then called everything beyond it a dash as well: the pathfinder builds
+// paths far past the limit (costs of 54 against a standard move of 12). The
+// limit is the one XGUnit.SetDashing applies: twice the standard move, and
+// only while m_iMovesActionsPerformed is 0. MaxPathCost is the pawn's current
+// allowance, which is either of those depending on which the path last asked
+// for, so it only ever raises the limit.
+static uint32_t g_path_off, g_std_off, g_maxcost_off, g_cost_off;
+static void*    g_cost_class_path;
+static uint32_t g_gameunit_off, g_moves_off;
+static void*    g_gameunit_on, *g_moves_on;
+
+static int tile_dash(int* cost_out, int* std_out, int* max_out, int* moves_out,
+                     int* turns_out)
+{
+    *cost_out = *std_out = *max_out = *moves_out = -1;
+    *turns_out = 0;
+    void* pawn = g_path_pawn;
+    if (!pawn) return -1;
+    if (pawn != g_reach_pawn) {
+        if (!object_field_offset(pawn, "Path", &g_path_off) ||
+            !object_field_offset(pawn, "StandardMoveLength", &g_std_off) ||
+            !object_field_offset(pawn, "MaxPathCost", &g_maxcost_off))
+            return -1;
+        g_reach_pawn = pawn;
+    }
+    const uint8_t* p = (const uint8_t*)pawn;
+    if (!readable(p + g_path_off, sizeof(void*)) || !readable(p + g_std_off, 4) ||
+        !readable(p + g_maxcost_off, 4))
+        return -1;
+    void* path = *(void**)(p + g_path_off);
+    *std_out = *(const int32_t*)(p + g_std_off);
+    *max_out = *(const int32_t*)(p + g_maxcost_off);
+    if (!path) return -1;
+    if (path != g_cost_class_path) {
+        if (!object_field_offset(path, "Cost", &g_cost_off)) return -1;
+        g_cost_class_path = path;
+    }
+    if (!readable((const uint8_t*)path + g_cost_off, 4)) return -1;
+    *cost_out = *(const int32_t*)((const uint8_t*)path + g_cost_off);
+    if (*std_out <= 0 || *cost_out < 0) return -1;
+
+    // Moves already made this turn, off the soldier: ChainedPawn.m_kGameUnit.
+    void* soldier = NULL;
+    const void* v;
+    if (cursor_chained_pawn(&soldier) && soldier &&
+        field_ptr(soldier, "m_kGameUnit", &g_gameunit_off, &g_gameunit_on, sizeof(void*), &v)) {
+        void* unit = *(void* const*)v;
+        if (field_ptr(unit, "m_iMovesActionsPerformed", &g_moves_off, &g_moves_on, 4, &v))
+            *moves_out = *(const int32_t*)v;
+    }
+    int limit = *moves_out == 0 ? 2 * *std_out : *std_out;
+    if (*max_out > limit) limit = *max_out;
+
+    *turns_out = tile_turns(*cost_out, limit, *std_out);
+    if (*cost_out > limit) return 2;
+    return *cost_out > *std_out;
+}
+
+// ---- who is where ----------------------------------------------------------
+//
+// Every unit has a flag over its head, and UIUnitFlag.SetNames(unitName,
+// unitNickName) arrives through the text hooks once per flag: a soldier's
+// surname and nickname, an alien's or civilian's name. The flag also holds
+// its unit (UIUnitFlag.m_kUnit, an XGUnit), whose m_kPawn has the Location.
+// So the table is kept by flag object, as focus.c keeps its lists, and the
+// position is read when it is asked for -- units move, flags do not change.
+//
+// Only what a sighted player could see is ever said. The flag hides itself
+// unless m_kUnit.IsVisible(), and the native IsAliveAndVisible is that test
+// with the dead left out, asked of the unit through its vtable like the tile
+// queries. A unit it cannot be asked about counts as unseen.
+#define UNIT_MAX 64
+
+typedef struct {
+    void* flag;
+    char  name[64];
+    char  nick[64];
+} UnitName;
+
+static UnitName  g_units[UNIT_MAX];
+static int       g_nunits;
+static uint32_t  g_flag_unit_off, g_unit_pawn_off, g_pawn_loc_off;
+static void*     g_flag_unit_cls_obj, *g_unit_pawn_cls_obj, *g_pawn_loc_cls_obj;
+
+static void unit_note(void* flag, const char* name, const char* nick)
+{
+    int i;
+    for (i = 0; i < g_nunits && g_units[i].flag != flag; i++) {}
+    if (i == g_nunits) {
+        if (g_nunits == UNIT_MAX) return;
+        g_nunits++;
+    }
+    g_units[i].flag = flag;
+    strncpy_s(g_units[i].name, sizeof g_units[i].name, name, _TRUNCATE);
+    strncpy_s(g_units[i].nick, sizeof g_units[i].nick, nick, _TRUNCATE);
+}
+
+typedef struct {
+    const UnitName* who;
+    void*  unit;
+    void*  pawn;
+    float  loc[3];
+    int    friendly;
+} UnitSeen;
+
+// The player a unit belongs to (XGUnit.m_kPlayer).
+static uint32_t g_player_off;
+static void*    g_player_on;
+
+static void* unit_player(void* unit)
+{
+    const void* v;
+    if (!field_ptr(unit, "m_kPlayer", &g_player_off, &g_player_on, sizeof(void*), &v))
+        return NULL;
+    return *(void* const*)v;
+}
+
+// The player the soldier being moved belongs to: ChainedPawn.m_kGameUnit.
+static uint32_t g_squad_unit_off;
+static void*    g_squad_unit_on;
+
+static void* squad_player(void)
+{
+    void* pawn = NULL;
+    const void* v;
+    if (!cursor_chained_pawn(&pawn) || !pawn ||
+        !field_ptr(pawn, "m_kGameUnit", &g_squad_unit_off, &g_squad_unit_on,
+                   sizeof(void*), &v))
+        return NULL;
+    return unit_player(*(void* const*)v);
+}
+
+// A flag's unit, if it is alive and in sight: its pawn, where it stands, and
+// whether it is on the side of the soldier being moved.
+//
+// The side is the unit's player, compared with the soldier's. The flag's own
+// m_bIsFriendly was the first try and put Chryssalids in the squad: this
+// session never found UBoolProperty::BitMask ("no BitMask -- bools read as a
+// whole dword"), and that bool shares its dword with m_bIsDead, m_bIsSelected
+// and the rest, so any of them set read as friendly.
+static int unit_seen(const UnitName* u, void* squad, UnitSeen* out)
+{
+    const void* v;
+    if (!field_ptr(u->flag, "m_kUnit", &g_flag_unit_off, &g_flag_unit_cls_obj, sizeof(void*), &v))
+        return 0;
+    void* unit = *(void* const*)v;
+    UnitTestFn visible = (UnitTestFn)tile_vfn(unit, g_unit_slot_visible);
+    if (!visible || !visible(unit, NULL)) return 0;
+    if (!field_ptr(unit, "m_kPawn", &g_unit_pawn_off, &g_unit_pawn_cls_obj, sizeof(void*), &v))
+        return 0;
+    void* pawn = *(void* const*)v;
+    if (!field_ptr(pawn, "Location", &g_pawn_loc_off, &g_pawn_loc_cls_obj, 3 * sizeof(float), &v))
+        return 0;
+    out->who = u;
+    out->unit = unit;
+    out->pawn = pawn;
+    memcpy(out->loc, v, 3 * sizeof(float));
+    out->friendly = squad && unit_player(unit) == squad;
+    return 1;
+}
+
+// What the squad can see: every enemy in any living squad member's
+// XGUnitNativeBase.m_arrVisibleEnemies.
+//
+// IsAliveAndVisible alone let unrevealed pods through -- the radar listed
+// Chryssalids 29 tiles north that no one had met. The game's own minimap
+// draws enemies from the active soldier's m_arrVisibleEnemies
+// (UITacticalHUD_Radar.UpdateBlips), and targeting from the squad's; the
+// union across the squad is what a sighted player could have on screen.
+#define SEEN_MAX 128
+
+typedef struct {
+    void* unit[SEEN_MAX];
+    int   n;
+} SeenSet;
+
+static uint32_t g_visen_off;
+static void*    g_visen_on;
+
+static void squad_sight(void* squad, SeenSet* set)
+{
+    set->n = 0;
+    if (!squad) return;
+    for (int i = 0; i < g_nunits; i++) {
+        UnitSeen s;
+        if (!unit_seen(&g_units[i], squad, &s) || !s.friendly) continue;
+        const void* v;
+        if (!field_ptr(s.unit, "m_arrVisibleEnemies", &g_visen_off, &g_visen_on,
+                       sizeof(FArray), &v))
+            continue;
+        const FArray* a = (const FArray*)v;
+        if (a->Num <= 0 || a->Num > SEEN_MAX ||
+            !readable(a->Data, (size_t)a->Num * sizeof(void*)))
+            continue;
+        void* const* e = (void* const*)a->Data;
+        for (int k = 0; k < a->Num; k++) {
+            int j;
+            for (j = 0; j < set->n && set->unit[j] != e[k]; j++) {}
+            if (j == set->n && set->n < SEEN_MAX) set->unit[set->n++] = e[k];
+        }
+    }
+}
+
+static int seen_has(const SeenSet* set, const void* unit)
+{
+    for (int j = 0; j < set->n; j++)
+        if (set->unit[j] == unit) return 1;
+    return 0;
+}
+
+static void unit_label(const UnitName* u, char* out, size_t out_sz)
+{
+    _snprintf_s(out, out_sz, _TRUNCATE, u->nick[0] ? "%s, %s" : "%s", u->name, u->nick);
+}
+
+// "Wright, Disco. Sectoid." -- everyone in sight whose pawn stands on
+// (tx, ty). With a floor known, a unit on another storey of the same column
+// is left out: a pawn's origin is its middle, about one floor above its feet.
+// *mine is set when one of them is the soldier being moved.
+static void units_on_tile(int tx, int ty, int have_floor, float floor,
+                          char* out, size_t out_sz, int* mine)
+{
+    size_t used = 0;
+    out[0] = 0;
+    if (mine) *mine = 0;
+    CursorGrid g;
+    if (!cursor_grid(&g)) return;
+    void* soldier = NULL;
+    cursor_chained_pawn(&soldier);
+    // Someone not on the squad is named only once the squad has seen them,
+    // or stepping onto a hidden alien's tile would give it away.
+    void* squad = squad_player();
+    static SeenSet sight;
+    squad_sight(squad, &sight);
+    for (int i = 0; i < g_nunits; i++) {
+        UnitSeen s;
+        if (!unit_seen(&g_units[i], squad, &s)) continue;
+        if (!s.friendly && !seen_has(&sight, s.unit)) continue;
+        if (cursor_tile_axis(s.loc[0], g.min_x, CURSOR_TILE) != tx ||
+            cursor_tile_axis(s.loc[1], g.min_y, CURSOR_TILE) != ty)
+            continue;
+        if (have_floor && (s.loc[2] < floor - 32.0f || s.loc[2] > floor + 192.0f)) {
+            logf_("tile: %s stands in this column at %.1f, not on floor %.1f\n",
+                  g_units[i].name, s.loc[2], floor);
+            continue;
+        }
+        if (mine && s.pawn == soldier) *mine = 1;
+        char label[160];
+        unit_label(&g_units[i], label, sizeof label);
+        int w = _snprintf_s(out + used, out_sz - used, _TRUNCATE, "%s%s.",
+                            used ? " " : "", label);
+        if (w < 0) break;
+        used += (size_t)w;
+    }
+}
+
+// Describes tile (tx, ty) with its floor at `floor`. Returns 0 when the game
+// could not be asked, leaving `say` empty. `with_dash` is off where the last
+// path is not this tile's; `with_who` off where the units were said already.
+static int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
+                       char* say, size_t say_sz)
+{
+    say[0] = 0;
+    void* world = cursor_world();
+    CursorGrid g;
+    if (!world || !cursor_grid(&g)) return 0;
+    TileCoverFn cover = (TileCoverFn)tile_vfn(world, g_tile_slot_cover);
+    if (!cover) return 0;
+
+    // Where XGAction_EndMove asks: the floor under the destination, plus 4.
+    float x = g.min_x + ((float)tx + 0.5f) * CURSOR_TILE;
+    float y = g.min_y + ((float)ty + 0.5f) * CURSOR_TILE;
+    float z = floor + 4.0f;
+    TileCoverPoint cp;
+    memset(&cp, 0, sizeof cp);
+    int has_cover = cover(world, NULL, x, y, z, &cp) != 0;
+
+    // The layer is WORLD_FloorHeight (64) deep, measured from Min.Z as the
+    // tile natives do.
+    int tz = cursor_tile_axis(z, g.min_z, 64.0f);
+    TileTestFn smoke = (TileTestFn)tile_vfn(world, g_tile_slot_smoke);
+    TileTestFn poison = (TileTestFn)tile_vfn(world, g_tile_slot_poison);
+
+    TileReport r;
+    memset(&r, 0, sizeof r);
+    r.cover_flags = has_cover ? cp.flags : 0;
+    r.smoke = smoke ? smoke(world, NULL, tx, ty, tz) != 0 : 0;
+    r.poison = poison ? poison(world, NULL, tx, ty, tz) != 0 : 0;
+    int cost = -1, std = -1, maxc = -1, moves = -1, turns = 0;
+    int reach = with_dash ? tile_dash(&cost, &std, &maxc, &moves, &turns) : -1;
+    r.dash = reach == 1;
+    r.turns = reach == 2 ? turns : 0;
+
+    // Who is standing there comes first: it is what the tile *is*.
+    char who[TILE_MAX_TEXT] = "", what[TILE_MAX_TEXT];
+    if (with_who) units_on_tile(tx, ty, 1, floor, who, sizeof who, NULL);
+    tile_describe(&r, what, sizeof what);
+    _snprintf_s(say, say_sz, _TRUNCATE, "%s%s%s", who, who[0] ? " " : "", what);
+
+    // The cover point carries its own tile, which is the check on the one
+    // asked about -- and on the layer this file worked out for smoke.
+    logf_("tile: %d, %d floor %.1f (layer %d): cover %s flags 0x%05X at %d, %d, %d; "
+          "path cost %d, standard move %d, max %d, moves made %d, turns %d, smoke %d, "
+          "poison %d -> \"%s\"\n",
+          tx, ty, floor, tz, has_cover ? "yes" : "no", (unsigned)cp.flags,
+          cp.x, cp.y, cp.z, cost, std, maxc, moves, turns, r.smoke, r.poison, say);
+    return 1;
+}
+
+// Says the pending step: anyone standing there, `body`, then the
+// coordinates. Once per step.
+static void nav_step_say(const char* body)
+{
+    if (!g_step_pending) return;
+    g_step_pending = 0;
+    char say[TILE_MAX_TEXT + TILE_MAX_TEXT + NAV_MAX_TEXT];
+    _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s.", g_step_who,
+                g_step_who[0] && body[0] ? " " : "", body,
+                g_step_who[0] || body[0] ? " " : "", g_step_coords);
+    logf_("nav: said \"%s\"\n", say);
+    speech_say_now(say);
+}
+
+// A tile no path reaches. A unit standing on it is the likeliest reason, and
+// worth more than the verdict: when one was found on arrival, its name is the
+// whole answer.
+static void nav_say_no_path(int tx, int ty)
+{
+    logf_("nav: %d, %d unreachable%s\n", tx, ty, g_step_who[0] ? " -- occupied" : "");
+    nav_step_say(g_step_who[0] ? "" : "No path.");
+}
+
+// ---- the radar -------------------------------------------------------------
+//
+// Numpad + lists the enemies in sight, numpad - the rest of the squad, each
+// by offset from the soldier being moved, nearest first: "Chryssalid, 2
+// north, 5 east." Offsets are tiles in the numpad's directions, so the answer
+// is also the way there. The minimap does the same job for a sighted player,
+// and draws from the same condition: a contact is on it while it is in sight.
+static void radar(int friendly)
+{
+    CursorGrid g;
+    int sx, sy;
+    float sz;
+    if (!cursor_grid(&g) || !soldier_tile(&g, &sx, &sy, &sz)) {
+        speech_say_now("No soldier.");
+        return;
+    }
+    void* soldier = NULL;
+    cursor_chained_pawn(&soldier);
+    void* squad = squad_player();
+    if (!squad) {
+        logf_("radar: the soldier's player is unreadable\n");
+        speech_say_now("No soldier.");
+        return;
+    }
+
+    // Measured from the tile being navigated to, so the offsets are the keys
+    // to press from where the player is now; from the soldier until a step
+    // has been taken. The soldier is left out only when measuring from their
+    // own tile -- away from it, where they stand is worth hearing too.
+    int ox = sx, oy = sy;
+    nav_target(&ox, &oy);
+    int from_soldier = ox == sx && oy == sy;
+    static SeenSet sight;
+    if (!friendly) squad_sight(squad, &sight);
+
+    static char labels[UNIT_MAX][160];
+    TileContact c[UNIT_MAX];
+    int n = 0;
+    for (int i = 0; i < g_nunits; i++) {
+        UnitSeen s;
+        if (!unit_seen(&g_units[i], squad, &s) || s.friendly != friendly ||
+            (from_soldier && s.pawn == soldier) ||
+            (!friendly && !seen_has(&sight, s.unit)))
+            continue;
+        unit_label(&g_units[i], labels[n], sizeof labels[n]);
+        c[n].name = labels[n];
+        c[n].dx = cursor_tile_axis(s.loc[0], g.min_x, CURSOR_TILE) - ox;
+        c[n].dy = cursor_tile_axis(s.loc[1], g.min_y, CURSOR_TILE) - oy;
+        n++;
+    }
+    static char say[2048];
+    tile_contacts(c, n,
+                  !friendly ? "No enemies in sight." :
+                  from_soldier ? "No one else in the squad." : "No squad in sight.",
+                  say, sizeof say);
+    logf_("radar: %s from %d, %d%s%s: %s\n", friendly ? "squad" : "enemies", ox, oy,
+          from_soldier ? " (the soldier)" : " (the target)",
+          friendly ? "" : sight.n ? "" : ", the squad sees no one", say);
+    speech_say_now(say);
+}
+
+// Sets the slots from the thunks, once, at startup.
+static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
+{
+    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)mod;
+    const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)((const uint8_t*)mod + dos->e_lfanew);
+    g_image_lo = (uint8_t*)mod;
+    g_image_hi = (uint8_t*)mod + nt->OptionalHeader.SizeOfImage;
+
+    static const struct { const char* name; int* slot; } want[] = {
+        { "UXComWorldDataexecGetCoverPoint",         &g_tile_slot_cover },
+        { "UXComWorldDataexecTileContainsSmoke",     &g_tile_slot_smoke },
+        { "UXComWorldDataexecTileContainsPoison",    &g_tile_slot_poison },
+        { "AXGUnitNativeBaseexecIsAliveAndVisible",  &g_unit_slot_visible },
+    };
+    for (int i = 0; i < (int)(sizeof want / sizeof want[0]); i++) {
+        const uint8_t* code = (const uint8_t*)natives_find(tbl, n, want[i].name);
+        *want[i].slot = code && readable(code, 0x180) ? tile_vtable_slot(code, 0x180) : -1;
+        if (*want[i].slot < 0) logf_("  %-38s vtable slot NOT FOUND\n", want[i].name);
+        else                   logf_("  %-38s vtable +0x%X\n", want[i].name, *want[i].slot);
+    }
+}
+
 static void nav_stop(const char* why)
 {
     if (!nav_active()) return;
     nav_end();
     g_nav_live = 0;
     g_nav_parked = 0;
+    g_tile_due = 0;
+    g_step_pending = 0;
     logf_("nav: released (%s)\n", why);
 }
 
@@ -1414,12 +1958,56 @@ static void nav_press(int digit)
         return;
     }
 
+    // Until a step has been taken, "here" is the soldier, not the mouse.
+    if (!nav_active()) {
+        int sx, sy;
+        float sz;
+        if (soldier_tile(&g, &sx, &sy, &sz) &&
+            sx >= 0 && sy >= 0 && sx < g.num_x && sy < g.num_y) {
+            // The cursor's height is kept when it is on the soldier already:
+            // it is the one the floor search is known to work from. An earlier
+            // run read this pawn's height as 215.8 for two soldiers on
+            // different ground, so it is only a fallback, and the search
+            // sweeps several hundred units either way.
+            if (sx != tx || sy != ty) {
+                logf_("nav: cursor on %d, %d (z %.1f), soldier on %d, %d (z %.1f) -- "
+                      "using the soldier\n", tx, ty, z, sx, sy, sz);
+                z = sz;
+            }
+            tx = sx;
+            ty = sy;
+        } else {
+            logf_("nav: soldier's position unreadable, using the cursor's\n");
+        }
+    }
+
     if (digit == 5) {
         // Where the cursor actually is, which is what the game accepted --
         // not necessarily the target, if that was somewhere it cannot stand.
-        char say[NAV_MAX_TEXT];
-        nav_describe(tx, ty, say, sizeof say);
-        logf_("nav: numpad 5 -> cursor on %s\n", say);
+        // And what is there, from the cursor's own height: it stands
+        // NAVH_LIFT above the floor it was placed on.
+        char say[NAV_MAX_TEXT + TILE_MAX_TEXT];
+        char what[TILE_MAX_TEXT] = "";
+        char coords[NAV_MAX_TEXT];
+        nav_describe(tx, ty, coords, sizeof coords);
+        logf_("nav: numpad 5 -> cursor on %s\n", coords);
+        // The last path is this tile's only while navigating to it, and never
+        // on the soldier's own tile: the game builds no path to where the
+        // soldier stands, so the one left over belongs to somewhere else.
+        int ntx, nty, sx, sy;
+        float sz;
+        int own = soldier_tile(&g, &sx, &sy, &sz) && sx == tx && sy == ty;
+        int path_is_here = nav_target(&ntx, &nty) && ntx == tx && nty == ty && !own;
+        Fault f;
+        __try {
+            if (!tile_report(tx, ty, z - NAV_CURSOR_LIFT, path_is_here, 1, what, sizeof what))
+                what[0] = 0;
+        }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("tile: report", &f, NULL);
+            what[0] = 0;
+        }
+        _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s.", what, what[0] ? " " : "", coords);
         speech_say_now(say);
         return;
     }
@@ -1443,15 +2031,39 @@ static void nav_press(int digit)
         logf_("nav: begins on %d, %d, ground estimate %.1f\n", tx, ty, navh_ground());
     }
 
-    char say[NAV_MAX_TEXT];
+    char say[NAV_MAX_TEXT + TILE_MAX_TEXT];
     NavGrid ng = { g.num_x, g.num_y };
     int moved = nav_move(&ng, dx, dy, say, sizeof say);
     nav_target(&tx, &ty);
     if (moved) {
+        g_tile_due = 0;
         navh_begin_tile();
         g_nav_path_tile[0] = tx;
         g_nav_path_tile[1] = ty;
         g_nav_phase_logged = (NavHeightPhase)-1;
+
+        // Who stands there is found now, on arrival, and not from the tile's
+        // verdict: another unit's tile gets only "No path", and the soldier's
+        // own tile gets no verdict at all -- the game builds no path to
+        // within 64 units of the soldier (XGAction_Path.DoPathingTick).
+        int mine = 0;
+        Fault f;
+        __try { units_on_tile(tx, ty, 0, 0.0f, g_step_who, sizeof g_step_who, &mine); }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("tile: units", &f, NULL);
+            g_step_who[0] = 0;
+        }
+        strncpy_s(g_step_coords, sizeof g_step_coords, say, _TRUNCATE);
+        g_step_pending = 1;
+        g_step_deadline = GetTickCount64() + STEP_FALLBACK_MS;
+        // With no verdict coming for the soldier's own tile, its cover is
+        // described on a timer instead, once the floor search has settled.
+        if (mine) {
+            g_tile_due = GetTickCount64() + OWN_TILE_DELAY_MS;
+            g_tile_due_at[0] = tx;
+            g_tile_due_at[1] = ty;
+            g_tile_due_dash = 0;
+        }
     }
 
     // The middle of the tile; the height comes from navh_query_z each frame.
@@ -1462,7 +2074,9 @@ static void nav_press(int digit)
     g_nav_key_at = GetTickCount64();
 
     logf_("nav: numpad %d -> target %d, %d  \"%s\"\n", digit, tx, ty, say);
-    speech_say_now(say);
+    // A step waits for its description (nav_step_say); only the edge, which
+    // moves nothing, is answered at once.
+    if (!moved) speech_say_now(say);
 }
 
 static void nav_poll(void)
@@ -1477,10 +2091,33 @@ static void nav_poll(void)
         } else if (GetCursorPos(&m) &&
                    (labs(m.x - g_nav_mouse.x) > 2 || labs(m.y - g_nav_mouse.y) > 2)) {
             nav_stop("the mouse moved");
+        } else if (g_tile_due && GetTickCount64() >= g_tile_due) {
+            // A reached tile, described on the frame after its first path
+            // (TILE_DESCRIBE_DELAY_MS), outside the pathfinder's own call.
+            int tx, ty;
+            g_tile_due = 0;
+            if (nav_target(&tx, &ty) && tx == g_tile_due_at[0] && ty == g_tile_due_at[1]) {
+                char what[TILE_MAX_TEXT] = "";
+                Fault f;
+                __try {
+                    if (!tile_report(tx, ty, navh_ground(), g_tile_due_dash, 0,
+                                     what, sizeof what))
+                        what[0] = 0;
+                }
+                __except (fault_note(GetExceptionInformation(), &f)) {
+                    fault_log("tile: report", &f, NULL);
+                    what[0] = 0;
+                }
+                nav_step_say(what);
+            }
         } else if (navh_poll(GetTickCount64()) == NAVH_NO_PATH) {
-            logf_("nav: %d, %d has no path on its floor %.1f -- said\n",
+            logf_("nav: %d, %d has no path on its floor %.1f\n",
                   g_nav_path_tile[0], g_nav_path_tile[1], navh_ground());
-            speech_say("No path.");
+            nav_say_no_path(g_nav_path_tile[0], g_nav_path_tile[1]);
+        } else if (g_step_pending && GetTickCount64() >= g_step_deadline) {
+            logf_("nav: nothing decided the tile in %d ms -- saying what is known\n",
+                  STEP_FALLBACK_MS);
+            nav_step_say("");
         } else if (!g_nav_parked && g_nav_placed_at < g_nav_key_at &&
                    GetTickCount64() - g_nav_key_at > 300) {
             nav_park_mouse();
@@ -1491,12 +2128,28 @@ static void nav_poll(void)
         // Forget what was held, so a key released while the game was in the
         // background does not read as a fresh press on return.
         memset(g_numpad_down, 0, sizeof g_numpad_down);
+        g_radar_down[0] = g_radar_down[1] = 0;
         return;
     }
     for (int d = 0; d <= 9; d++) {
         int down = (GetAsyncKeyState(VK_NUMPAD0 + d) & 0x8000) != 0;
         if (down && !g_numpad_down[d]) nav_press(d);
         g_numpad_down[d] = down;
+    }
+    // The radar: numpad + for enemies, numpad - for the squad. Neither key is
+    // bound in [XComGame.XComTacticalInput], so, like the digits, they never
+    // reach the game and need no swallowing.
+    static const int radar_keys[2] = { VK_ADD, VK_SUBTRACT };
+    for (int k = 0; k < 2; k++) {
+        int down = (GetAsyncKeyState(radar_keys[k]) & 0x8000) != 0;
+        if (down && !g_radar_down[k]) {
+            Fault f;
+            __try { radar(k == 1); }
+            __except (fault_note(GetExceptionInformation(), &f)) {
+                fault_log("radar", &f, NULL);
+            }
+        }
+        g_radar_down[k] = down;
     }
 }
 
@@ -1872,7 +2525,7 @@ static int   g_path_logged_ok = -1;
 static int   g_path_logged_tile[2] = { -1, -1 };
 static float g_path_logged_z;
 
-static void nav_path_result(void* stack, void* result)
+static void nav_path_result(void* self, void* stack, void* result)
 {
     if (!nav_active() || !readable(stack, 0x20)) return;
     void* node = *(void**)((uint8_t*)stack + FFRAME_NODE);
@@ -1901,13 +2554,18 @@ static void nav_path_result(void* stack, void* result)
         ty = cursor_tile_axis(dest[1], g.min_y, CURSOR_TILE);
     }
     if (dest && tx == g_nav_path_tile[0] && ty == g_nav_path_tile[1]) {
+        g_path_pawn = self;
         NavVerdict v = navh_path_result(dest[2], ok, GetTickCount64());
         nav_log_phase();
         if (v == NAVH_NO_PATH) {
-            logf_("nav: %d, %d has no path at any height -- said\n", tx, ty);
-            speech_say("No path.");
+            logf_("nav: %d, %d has no path at any height\n", tx, ty);
+            nav_say_no_path(tx, ty);
         } else if (v == NAVH_REACHABLE) {
             logf_("nav: %d, %d reachable, floor %.1f\n", tx, ty, navh_ground());
+            g_tile_due = GetTickCount64() + TILE_DESCRIBE_DELAY_MS;
+            g_tile_due_at[0] = tx;
+            g_tile_due_at[1] = ty;
+            g_tile_due_dash = 1;
         }
     }
 
@@ -1942,7 +2600,7 @@ static void __fastcall hook_computepath(void* self, void* edx, void* stack, void
 {
     g_orig_computepath(self, edx, stack, result);
     Fault f;
-    __try { nav_path_result(stack, result); }
+    __try { nav_path_result(self, stack, result); }
     __except (fault_note(GetExceptionInformation(), &f)) {
         fault_log("nav: path result", &f, NULL);
     }
@@ -2189,6 +2847,10 @@ static DWORD WINAPI init(LPVOID param)
                      (LPVOID)hook_flashhit, (LPVOID*)&g_orig_flashhit);
     nav_armed &= arm(tbl, n, mod, "AXComPathingPawnexecComputePath2",
                      (LPVOID)hook_computepath, (LPVOID*)&g_orig_computepath);
+
+    // Not hooks: the implementations behind three world-data natives, called
+    // to say what is on a tile.
+    tile_arm(tbl, n, mod);
 
     free(tbl);
     if (!armed) { logf_("FATAL: nothing armed\n"); return 1; }
