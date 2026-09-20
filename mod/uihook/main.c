@@ -53,6 +53,9 @@
 #include "cursor.h"
 #include "nav.h"
 #include "tile.h"
+#include "sonar.h"
+#include "audio.h"
+#include "learn.h"
 #include "props.h"
 #include "input.h"
 #include "../../tools/vendor/MinHook/include/MinHook.h"
@@ -1310,9 +1313,20 @@ static CursorGrid g_grid_last;
 // last one frame. Instead the target is handed to hook_validpos below, which
 // substitutes it where the game turns that frame's pick into a cursor position
 // -- so the game's own validation, floor snap and path preview run on it.
+//
+// A tap on a direction steps one tile. Holding it glides, tile after tile,
+// until it is let go -- see "holding a direction" below, next to nav_press.
 
 static int       g_numpad_down[10];
 static int       g_radar_down[2];       // numpad +, numpad -
+static int       g_walls_down;          // numpad *
+// Numpad * turns the wall field off and on. A sound that never stops and
+// cannot be stopped is a trap, and the player who wants the words without it
+// -- or who is working next to someone -- has no other way out. Like the
+// digits and the radar keys, numpad * is bound to nothing in a mission:
+// DefaultInput.ini mentions Multiply only in the alias lists of edit boxes and
+// sliders.
+static int       g_walls_on = 1;
 static void*     g_nav_cursor;          // the cursor navigation began on
 static void*     g_nav_pawn;            // ChainedPawn when navigation began
 static POINT     g_nav_mouse;           // where the mouse was, to notice it moving
@@ -1378,6 +1392,7 @@ typedef int (__fastcall* TileTestFn)(void* self, void* edx, int x, int y, int z)
 typedef int (__fastcall* UnitTestFn)(void* self, void* edx);
 
 static int       g_tile_slot_cover = -1, g_tile_slot_smoke = -1, g_tile_slot_poison = -1;
+static int       g_tile_slot_occupied = -1; // XComWorldData.IsTileOccupied
 static int       g_unit_slot_visible = -1;  // XGUnitNativeBase.IsAliveAndVisible
 static uint8_t*  g_image_lo;            // the game's image, to check a vtable entry
 static uint8_t*  g_image_hi;            // points into it before calling it
@@ -1788,6 +1803,183 @@ static int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     return 1;
 }
 
+// ---- the walls around a tile -----------------------------------------------
+//
+// Walls in XCOM sit between tiles, not on them: that is why cover is named by
+// side -- COVER_North is a wall on this tile's northern edge -- and why
+// IsTileOccupied, which asks whether a tile is filled with solid stuff, finds
+// pillars and trucks but walks straight through a partition. So the scan asks
+// both questions of every tile within range:
+//
+//   its cover bits, each of which is a wall face on one of its edges, and
+//   IsTileOccupied, which is a solid object standing on the tile itself.
+//
+// Every face found is one emitter in the field (sonar.h): a wall face sounds
+// from the edge it is on, a solid tile from its own middle. Nothing in range
+// is open ground, and is silence.
+//
+// Each wall is read once, not twice. A wall between two tiles shows in one's
+// north bit and the other's south, so only each tile's own north and east
+// faces are taken; the other two belong to its neighbours and are picked up
+// when the scan reaches them. Reading all four would count every wall twice,
+// which would make a partition as loud as two walls and a corner louder than
+// either.
+//
+// Two limits worth naming. A tile whose cover frame is turned 45 degrees
+// (COVER_Diagonal) describes its corners rather than its sides, so it has
+// nothing to say about any of the four and its cover bits are passed over -- a
+// diagonal wall is heard only as whatever solid stands behind it. And every
+// tile in range is asked about at the floor height of the tile being listened
+// from, because that is the only floor the mod knows; where the ground changes
+// level within range the game answers for whatever tile it finds there
+// instead, which the check on the cover point's own coordinates below turns
+// into silence rather than into a wall that is not there.
+//
+// The game's compass is the mirror of the mod's (see tile.h): its East is this
+// mod's west. So the two faces read off each tile are the game's North bit --
+// the mod's north -- and its West bit, which is the mod's east.
+// Only the two bits that say a wall is there. The matching low-cover bits are
+// deliberately not read: low cover blocks the way as surely as a wall and the
+// field says so, and whether it is waist high is said in words (tile_describe)
+// rather than folded into a level that has to carry distance.
+#define WALL_N_BIT      TILE_COVER_N
+#define WALL_E_BIT      TILE_COVER_W
+
+// How far the scan reaches, in whole tiles: everything the range can hear.
+#define WALL_TILES ((int)SONAR_RANGE)
+
+static int walls_scan(const CursorGrid* g, int tx, int ty, float floor,
+                      SonarField* out)
+{
+    void* world = cursor_world();
+    sonar_field_clear(out);
+    if (!world) return 0;
+    TileCoverFn cover = (TileCoverFn)tile_vfn(world, g_tile_slot_cover);
+    if (!cover) return 0;
+    TileTestFn occupied = (TileTestFn)tile_vfn(world, g_tile_slot_occupied);
+
+    float z = floor + 4.0f;
+    int tz = cursor_tile_axis(z, g->min_z, 64.0f);
+
+    for (int dy = -WALL_TILES; dy <= WALL_TILES; dy++) {
+        for (int dx = -WALL_TILES; dx <= WALL_TILES; dx++) {
+            int x = tx + dx, y = ty + dy;
+            if (x < 0 || y < 0 || x >= g->num_x || y >= g->num_y) {
+                // Off the map. The edge stops a soldier as surely as a wall
+                // does, and a player walking towards it should hear it
+                // coming, so the tile that is not there sounds as solid.
+                sonar_block(out, (float)dx, (float)dy);
+                continue;
+            }
+
+            TileCoverPoint cp;
+            memset(&cp, 0, sizeof cp);
+            float wx = g->min_x + ((float)x + 0.5f) * CURSOR_TILE;
+            float wy = g->min_y + ((float)y + 0.5f) * CURSOR_TILE;
+            // An answer about some other tile is an answer about some other
+            // floor, and is worth less than no answer at all.
+            if (cover(world, NULL, wx, wy, z, &cp) && cp.x == x && cp.y == y &&
+                !(cp.flags & TILE_COVER_DIAGONAL)) {
+                if (cp.flags & WALL_N_BIT)
+                    sonar_face(out, SONAR_AXIS_NS, (float)dx, (float)dy + 0.5f);
+                if (cp.flags & WALL_E_BIT)
+                    sonar_face(out, SONAR_AXIS_EW, (float)dx + 0.5f, (float)dy);
+            }
+
+            // A solid tile sounds from where it stands, and has no side to it.
+            // The tile being listened from is not one of them -- sonar_block
+            // drops one with no bearing -- which is right: what fills the
+            // cursor's own tile is not a wall around it.
+            if (occupied && occupied(world, NULL, x, y, tz))
+                sonar_block(out, (float)dx, (float)dy);
+        }
+    }
+    sonar_field_finish(out);
+    return 1;
+}
+
+// The field, handed to the mixer. Silent where the scan cannot run at all --
+// no world data, no cover slot -- because a field meaning "the mod could not
+// ask" would be indistinguishable from one meaning "open".
+//
+// The tile listened from is the navigation target while one is held and the
+// cursor's own tile otherwise, so the walls are alive under the mouse as well
+// as under the numpad. A scan is two questions of the game about each of the
+// (2 * SONAR_RANGE + 1)^2 tiles in range, so it is rescanned when that tile
+// changes and at most every WALLS_SCAN_MS; while the tile does not change, only
+// every WALLS_IDLE_MS, which is there to catch a wall being blown up rather
+// than to track the player. Between scans the mixer's own glide carries the
+// level, so a tile crossed faster than the scan rate loses nothing but detail.
+#define WALLS_SCAN_MS   40
+#define WALLS_IDLE_MS  250
+#define WALLS_LOG_MS   400
+
+static SonarField g_walls_field;        // the last scan, renewed every frame
+static int        g_walls_have;          // a tile has been scanned
+static int        g_walls_tile[2];
+static ULONGLONG  g_walls_at;
+static ULONGLONG  g_walls_logged;
+
+static void walls_quiet(void)
+{
+    audio_field_off();
+    g_walls_have = 0;
+}
+
+static void walls_poll(void)
+{
+    CursorGrid g;
+    int tx, ty;
+    float floor;
+
+    if (!g_walls_on || !audio_available()) return;
+    if (!cursor_grid(&g)) { walls_quiet(); return; }
+
+    if (nav_active() && nav_target(&tx, &ty)) {
+        floor = navh_ground();
+    } else {
+        float z;
+        if (!cursor_tile(&g, &tx, &ty, &z)) { walls_quiet(); return; }
+        floor = z - NAV_CURSOR_LIFT;
+    }
+
+    ULONGLONG now = GetTickCount64();
+    int same = g_walls_have && tx == g_walls_tile[0] && ty == g_walls_tile[1];
+    if (g_walls_have &&
+        now - g_walls_at < (ULONGLONG)(same ? WALLS_IDLE_MS : WALLS_SCAN_MS)) {
+        // The scan is what is throttled, not the field: the mixer lets an
+        // unrenewed field lapse (audio.h), so the last one has to be handed
+        // over again every frame to say it still holds.
+        audio_field(&g_walls_field);
+        return;
+    }
+    g_walls_at = now;
+
+    Fault flt;
+    __try {
+        if (!walls_scan(&g, tx, ty, floor, &g_walls_field)) { walls_quiet(); return; }
+    }
+    __except (fault_note(GetExceptionInformation(), &flt)) {
+        fault_log("walls: scan", &flt, NULL);
+        walls_quiet();
+        return;
+    }
+    audio_field(&g_walls_field);
+    g_walls_have = 1;
+    g_walls_tile[0] = tx;
+    g_walls_tile[1] = ty;
+
+    // On a change of tile, and rate limited: a glide crosses twenty tiles a
+    // second and a line for each would bury everything else in the log.
+    if (!same && now - g_walls_logged >= WALLS_LOG_MS) {
+        g_walls_logged = now;
+        logf_("walls: %d, %d floor %.1f -- W %.2f N %.2f S %.2f E %.2f\n",
+              tx, ty, floor,
+              g_walls_field.level[SONAR_W], g_walls_field.level[SONAR_N],
+              g_walls_field.level[SONAR_S], g_walls_field.level[SONAR_E]);
+    }
+}
+
 // Says the pending step: anyone standing there, `body`, then the
 // coordinates. Once per step.
 static void nav_step_say(const char* body)
@@ -1884,6 +2076,7 @@ static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
         { "UXComWorldDataexecGetCoverPoint",         &g_tile_slot_cover },
         { "UXComWorldDataexecTileContainsSmoke",     &g_tile_slot_smoke },
         { "UXComWorldDataexecTileContainsPoison",    &g_tile_slot_poison },
+        { "UXComWorldDataexecIsTileOccupied",        &g_tile_slot_occupied },
         { "AXGUnitNativeBaseexecIsAliveAndVisible",  &g_unit_slot_visible },
     };
     for (int i = 0; i < (int)(sizeof want / sizeof want[0]); i++) {
@@ -1898,6 +2091,10 @@ static void nav_stop(const char* why)
 {
     if (!nav_active()) return;
     nav_end();
+    // The field is not silenced. With no target held it simply goes back to
+    // listening from wherever the cursor is, which is where the mouse has
+    // just put it -- the walls are still there, and the player has not
+    // stopped needing to hear them.
     g_nav_live = 0;
     g_nav_parked = 0;
     g_tile_due = 0;
@@ -1947,12 +2144,87 @@ static void nav_confirm(void)
           sent, tx, ty);
 }
 
-static void nav_press(int digit)
+// ---- holding a direction ---------------------------------------------------
+//
+// A tap steps one tile and says what is on it. Holding the key glides: after
+// NAV_HOLD_MS the step repeats, quickening from NAV_GLIDE_MS to
+// NAV_GLIDE_FAST_MS over NAV_GLIDE_RAMP steps, and carries on until the key is
+// let go. It is meant to feel like the camera under WASD -- a way to cross the
+// map or sweep a room -- and it is the field (walls_poll) that makes it worth
+// having: the walls swell and fade as the cursor passes them, so a glide down
+// a corridor is heard as a corridor.
+//
+// Nothing is spoken while it runs. A description costs a path from the game
+// and a floor search, and twenty of them a second would arrive long after the
+// player had stopped and would say the wrong tiles when they did. So the glide
+// announces exactly one tile: the one it ends on.
+//
+// The repeat is driven from here rather than from Windows' own key repeat. The
+// numpad is unbound in the mission, so no key message for it ever reaches the
+// game and there is nothing to read a repeat off; GetAsyncKeyState says only
+// that the key is down now.
+#define NAV_HOLD_MS       260   // held this long before it starts to repeat
+#define NAV_GLIDE_MS      110   // the first repeat
+#define NAV_GLIDE_FAST_MS  50   // where it settles
+#define NAV_GLIDE_RAMP     10   // repeats spent getting there
+
+static int       g_glide_digit;      // the direction being held, 0 for none
+static int       g_glide_steps;      // repeats taken, for the ramp
+static ULONGLONG g_glide_next;       // when the next step is due
+static ULONGLONG g_numpad_at[10];    // when each key last went down
+
+static int glide_interval(int steps)
+{
+    if (steps >= NAV_GLIDE_RAMP) return NAV_GLIDE_FAST_MS;
+    return NAV_GLIDE_MS +
+           (NAV_GLIDE_FAST_MS - NAV_GLIDE_MS) * steps / NAV_GLIDE_RAMP;
+}
+
+// What a step arrives to: who is standing on the tile, the floor under it, the
+// path the game builds to it, and in the end the announcement. Skipped on
+// every step of a glide and run once on the tile it stops on.
+static void nav_arrive(int tx, int ty)
+{
+    g_tile_due = 0;
+    navh_begin_tile();
+    g_nav_path_tile[0] = tx;
+    g_nav_path_tile[1] = ty;
+    g_nav_phase_logged = (NavHeightPhase)-1;
+
+    // Who stands there is found now, on arrival, and not from the tile's
+    // verdict: another unit's tile gets only "No path", and the soldier's
+    // own tile gets no verdict at all -- the game builds no path to
+    // within 64 units of the soldier (XGAction_Path.DoPathingTick).
+    int mine = 0;
+    Fault f;
+    __try { units_on_tile(tx, ty, 0, 0.0f, g_step_who, sizeof g_step_who, &mine); }
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        fault_log("tile: units", &f, NULL);
+        g_step_who[0] = 0;
+    }
+    nav_describe(tx, ty, g_step_coords, sizeof g_step_coords);
+    g_step_pending = 1;
+    g_step_deadline = GetTickCount64() + STEP_FALLBACK_MS;
+    // With no verdict coming for the soldier's own tile, its cover is
+    // described on a timer instead, once the floor search has settled.
+    if (mine) {
+        g_tile_due = GetTickCount64() + OWN_TILE_DELAY_MS;
+        g_tile_due_at[0] = tx;
+        g_tile_due_at[1] = ty;
+        g_tile_due_dash = 0;
+    }
+}
+
+// `gliding` when this is a repeat of a held key rather than a fresh press.
+static void nav_press(int digit, int gliding)
 {
     CursorGrid g;
     int tx, ty;
     float z;
     if (!cursor_grid(&g) || !cursor_tile(&g, &tx, &ty, &z)) {
+        // Said on the press only. A glide that loses the grid under it would
+        // otherwise say this twenty times a second.
+        if (gliding) return;
         logf_("nav: numpad %d with no grid or cursor yet\n", digit);
         speech_say_now("No map yet.");
         return;
@@ -2008,6 +2280,10 @@ static void nav_press(int digit)
             what[0] = 0;
         }
         _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s.", what, what[0] ? " " : "", coords);
+        // Nothing is played here. Numpad 5 is the key for "where am I", and
+        // the shape of the room is the larger half of that answer -- but the
+        // field has been answering it all along, so the key only has to
+        // supply the words.
         speech_say_now(say);
         return;
     }
@@ -2035,35 +2311,24 @@ static void nav_press(int digit)
     NavGrid ng = { g.num_x, g.num_y };
     int moved = nav_move(&ng, dx, dy, say, sizeof say);
     nav_target(&tx, &ty);
-    if (moved) {
+    if (moved && !gliding) {
+        nav_arrive(tx, ty);
+    } else if (moved) {
+        // A glide describes nothing, and must not leave anything half
+        // decided behind it either: a description still pending belongs to a
+        // tile the cursor has left, and a path verdict is about to arrive for
+        // one too.
         g_tile_due = 0;
-        navh_begin_tile();
-        g_nav_path_tile[0] = tx;
-        g_nav_path_tile[1] = ty;
-        g_nav_phase_logged = (NavHeightPhase)-1;
-
-        // Who stands there is found now, on arrival, and not from the tile's
-        // verdict: another unit's tile gets only "No path", and the soldier's
-        // own tile gets no verdict at all -- the game builds no path to
-        // within 64 units of the soldier (XGAction_Path.DoPathingTick).
-        int mine = 0;
-        Fault f;
-        __try { units_on_tile(tx, ty, 0, 0.0f, g_step_who, sizeof g_step_who, &mine); }
-        __except (fault_note(GetExceptionInformation(), &f)) {
-            fault_log("tile: units", &f, NULL);
-            g_step_who[0] = 0;
-        }
-        strncpy_s(g_step_coords, sizeof g_step_coords, say, _TRUNCATE);
-        g_step_pending = 1;
-        g_step_deadline = GetTickCount64() + STEP_FALLBACK_MS;
-        // With no verdict coming for the soldier's own tile, its cover is
-        // described on a timer instead, once the floor search has settled.
-        if (mine) {
-            g_tile_due = GetTickCount64() + OWN_TILE_DELAY_MS;
-            g_tile_due_at[0] = tx;
-            g_tile_due_at[1] = ty;
-            g_tile_due_dash = 0;
-        }
+        g_step_pending = 0;
+        g_nav_path_tile[0] = -1;
+        g_nav_path_tile[1] = -1;
+        // The floor search is not restarted per step. It takes several frames
+        // and a glide gives it fifty milliseconds, so restarting it would
+        // leave the height permanently unsettled; the ground carries over
+        // instead, which is right on the level ground a glide is for. The tile
+        // it stops on gets a search of its own, from nav_arrive. Whether the
+        // cursor can actually be placed at that height does not hold the glide
+        // up: what the field listens from is nav's own target, not the cursor.
     }
 
     // The middle of the tile; the height comes from navh_query_z each frame.
@@ -2073,14 +2338,31 @@ static void nav_press(int digit)
     g_nav_live = 1;
     g_nav_key_at = GetTickCount64();
 
-    logf_("nav: numpad %d -> target %d, %d  \"%s\"\n", digit, tx, ty, say);
+    if (!gliding)
+        logf_("nav: numpad %d -> target %d, %d  \"%s\"\n", digit, tx, ty, say);
     // A step waits for its description (nav_step_say); only the edge, which
-    // moves nothing, is answered at once.
-    if (!moved) speech_say_now(say);
+    // moves nothing, is answered at once -- and not while gliding, where it
+    // would repeat "Edge" twenty times a second against the side of the map.
+    if (!moved && !gliding) speech_say_now(say);
 }
 
 static void nav_poll(void)
 {
+    // Practice owns the numpad while it is on (learn.h). Navigation stands
+    // aside completely rather than filtering the keys one at a time: a held
+    // target with nobody reading the keys is a cursor stuck where it was left,
+    // so the target is released and the field is left to practice to drive.
+    if (learn_active()) {
+        if (nav_active()) nav_stop("sound practice");
+        memset(g_numpad_down, 0, sizeof g_numpad_down);
+        g_radar_down[0] = g_radar_down[1] = 0;
+        g_walls_down = 0;
+        g_glide_digit = 0;
+        g_glide_steps = 0;
+        g_walls_have = 0;
+        return;
+    }
+
     if (nav_active()) {
         void* pawn = NULL;
         POINT m;
@@ -2129,13 +2411,61 @@ static void nav_poll(void)
         // background does not read as a fresh press on return.
         memset(g_numpad_down, 0, sizeof g_numpad_down);
         g_radar_down[0] = g_radar_down[1] = 0;
+        g_walls_down = 0;
+        g_glide_digit = 0;
+        g_glide_steps = 0;
+        // And the walls go quiet: a field playing on over another window is
+        // describing a game the player is not looking at.
+        walls_quiet();
         return;
     }
+    ULONGLONG now = GetTickCount64();
     for (int d = 0; d <= 9; d++) {
         int down = (GetAsyncKeyState(VK_NUMPAD0 + d) & 0x8000) != 0;
-        if (down && !g_numpad_down[d]) nav_press(d);
+        if (down && !g_numpad_down[d]) {
+            g_numpad_at[d] = now;
+            nav_press(d, 0);
+        }
         g_numpad_down[d] = down;
     }
+
+    // Which direction is being held. The one pressed most recently wins, so
+    // rolling from one key to the next turns the glide instead of arguing
+    // with it.
+    int held = 0;
+    for (int d = 1; d <= 9; d++) {
+        int dx, dy;
+        if (!g_numpad_down[d] || !nav_step_for_digit(d, &dx, &dy)) continue;
+        if (!held || g_numpad_at[d] > g_numpad_at[held]) held = d;
+    }
+
+    if (!held) {
+        // Let go. The tile it stopped on is the one worth describing, and the
+        // only one the glide says anything about.
+        if (g_glide_digit && g_glide_steps > 0) {
+            int tx, ty;
+            logf_("nav: glide of %d step%s ends\n", g_glide_steps,
+                  g_glide_steps == 1 ? "" : "s");
+            if (nav_active() && nav_target(&tx, &ty)) nav_arrive(tx, ty);
+        }
+        g_glide_digit = 0;
+        g_glide_steps = 0;
+    } else if (held != g_glide_digit) {
+        int was_gliding = g_glide_digit && g_glide_steps > 0;
+        g_glide_digit = held;
+        // A fresh hold waits out NAV_HOLD_MS so that a tap is a tap. A turn
+        // taken mid-glide does not: the player is already moving and a pause
+        // there would read as the key being missed.
+        if (!was_gliding) {
+            g_glide_steps = 0;
+            g_glide_next = g_numpad_at[held] + NAV_HOLD_MS;
+        }
+    } else if (now >= g_glide_next) {
+        nav_press(held, 1);
+        if (g_glide_steps < NAV_GLIDE_RAMP) g_glide_steps++;
+        g_glide_next = now + glide_interval(g_glide_steps);
+    }
+
     // The radar: numpad + for enemies, numpad - for the squad. Neither key is
     // bound in [XComGame.XComTacticalInput], so, like the digits, they never
     // reach the game and need no swallowing.
@@ -2151,6 +2481,20 @@ static void nav_poll(void)
         }
         g_radar_down[k] = down;
     }
+    // Numpad *: the wall field off and on. Answered in words, because a
+    // feature that has just gone quiet cannot announce itself with a sound.
+    int walls = (GetAsyncKeyState(VK_MULTIPLY) & 0x8000) != 0;
+    if (walls && !g_walls_down) {
+        g_walls_on = !g_walls_on;
+        if (!g_walls_on) walls_quiet();
+        logf_("walls: field %s\n", g_walls_on ? "on" : "off");
+        speech_say_now(g_walls_on ? "Wall sound on." : "Wall sound off.");
+    }
+    g_walls_down = walls;
+
+    // Last, so a step taken this frame is already in the target the field
+    // listens from.
+    walls_poll();
 }
 
 static void cursor_watch(void* self)
@@ -2790,6 +3134,19 @@ static DWORD WINAPI init(LPVOID param)
     if (slash) *(slash + 1) = 0;
     speech_init(dll_dir, why, sizeof why);
     logf_("speech: %s\n", why);
+
+    // The wall field's mixer. A machine with no output device loses the field
+    // and keeps everything else, so this is reported and never fatal.
+    char audio_why[256];
+    audio_start(audio_why, sizeof audio_why);
+    logf_("audio: %s\n", audio_why);
+
+    // Sound practice, on a thread of its own so that it works at the main menu
+    // and not only in a mission. It uses the mixer and speech, so it starts
+    // after both.
+    char learn_why[256];
+    learn_start(learn_why, sizeof learn_why);
+    logf_("practice: %s\n", learn_why);
 
     NativeEntry* tbl = (NativeEntry*)malloc(sizeof(NativeEntry) * MAX_NATIVES);
     if (!tbl) { logf_("FATAL: out of memory\n"); return 1; }
