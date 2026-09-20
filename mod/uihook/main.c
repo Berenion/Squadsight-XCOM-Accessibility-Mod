@@ -1409,6 +1409,15 @@ static int       g_tile_due_dash;       // whether its path says anything about 
 #define STEP_FALLBACK_MS 1500
 static int       g_step_pending;
 static ULONGLONG g_step_deadline;
+// The fallback speaks the coordinates and gives up on the description -- but
+// the description is not always gone, only late. The pathfinder does not run
+// while a soldier is walking, and in the 2026-09-20 log a step taken during a
+// move had its path built one line *after* the deadline had already said
+// "44, 6.", so "Low cover west." was worked out and thrown away. When that
+// happens the tile is remembered here and the missing half is said on its own
+// when it turns up; the coordinates are not repeated, having just been heard.
+static int       g_step_late;
+static int       g_step_late_at[2];
 static char      g_step_coords[NAV_MAX_TEXT];
 static char      g_step_who[TILE_MAX_TEXT];   // units on the tile, found on arrival
 
@@ -1982,9 +1991,9 @@ static void walls_poll(void)
 
 // Says the pending step: anyone standing there, `body`, then the
 // coordinates. Once per step.
-static void nav_step_say(const char* body)
+static int nav_step_say(const char* body)
 {
-    if (!g_step_pending) return;
+    if (!g_step_pending) return 0;
     g_step_pending = 0;
     char say[TILE_MAX_TEXT + TILE_MAX_TEXT + NAV_MAX_TEXT];
     _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s.", g_step_who,
@@ -1992,6 +2001,7 @@ static void nav_step_say(const char* body)
                 g_step_who[0] || body[0] ? " " : "", g_step_coords);
     logf_("nav: said \"%s\"\n", say);
     speech_say_now(say);
+    return 1;
 }
 
 // A tile no path reaches. A unit standing on it is the likeliest reason, and
@@ -2087,10 +2097,14 @@ static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
     }
 }
 
+// Defined with the pick, below: the interface lent to the mouse's own pick.
+static void nav_forget_interface(void);
+
 static void nav_stop(const char* why)
 {
     if (!nav_active()) return;
     nav_end();
+    nav_forget_interface();
     // The field is not silenced. With no target held it simply goes back to
     // listening from wherever the cursor is, which is where the mouse has
     // just put it -- the walls are still there, and the player has not
@@ -2099,6 +2113,7 @@ static void nav_stop(const char* why)
     g_nav_parked = 0;
     g_tile_due = 0;
     g_step_pending = 0;
+    g_step_late = 0;
     logf_("nav: released (%s)\n", why);
 }
 
@@ -2203,6 +2218,7 @@ static void nav_arrive(int tx, int ty)
         g_step_who[0] = 0;
     }
     nav_describe(tx, ty, g_step_coords, sizeof g_step_coords);
+    g_step_late = 0;
     g_step_pending = 1;
     g_step_deadline = GetTickCount64() + STEP_FALLBACK_MS;
     // With no verdict coming for the soldier's own tile, its cover is
@@ -2390,7 +2406,12 @@ static void nav_poll(void)
                     fault_log("tile: report", &f, NULL);
                     what[0] = 0;
                 }
-                nav_step_say(what);
+                if (!nav_step_say(what) && g_step_late && what[0] &&
+                    tx == g_step_late_at[0] && ty == g_step_late_at[1]) {
+                    g_step_late = 0;
+                    logf_("nav: %d, %d described late -- \"%s\"\n", tx, ty, what);
+                    speech_say_now(what);
+                }
             }
         } else if (navh_poll(GetTickCount64()) == NAVH_NO_PATH) {
             logf_("nav: %d, %d has no path on its floor %.1f\n",
@@ -2400,6 +2421,7 @@ static void nav_poll(void)
             logf_("nav: nothing decided the tile in %d ms -- saying what is known\n",
                   STEP_FALLBACK_MS);
             nav_step_say("");
+            g_step_late = nav_target(&g_step_late_at[0], &g_step_late_at[1]);
         } else if (!g_nav_parked && g_nav_placed_at < g_nav_key_at &&
                    GetTickCount64() - g_nav_key_at > 300) {
             nav_park_mouse();
@@ -2723,6 +2745,107 @@ static void*    g_pick_hud;
 static uint32_t g_pick_hit_off;         // CachedHitLocation, on the HUD
 static int      g_pick_logged;
 
+// ---- the pick the mouse has to agree to -----------------------------------
+//
+// For a soldier who is not flying, GetAdjustedMousePickPoint ends
+//
+//     if(kHUD.CachedMouseInteractionInterface != none) { ... return true; }
+//     return false;
+//
+// and Mouse_CheckForPathing places the cursor only when it returns true. That
+// interface is whatever the *mouse's own* trace hit this frame -- an actor
+// inside the level volume, standing on a floor, from
+// XComTacticalHUD.GetMousePickActor. So when the mouse rests where its ray
+// hits nothing worth picking -- over the HUD, off the map, or on the sky after
+// the camera panned out from under it -- the pick is refused, and with it the
+// whole chain navigation rides on: no CursorSetLocation, no floor snap, no
+// GetClosestValidCursorPosition, no path. The target moves and the game never
+// hears of it, so every step falls through to STEP_FALLBACK_MS and comes out
+// as bare coordinates a second and a half late. In the log of 2026-09-20 that
+// started on the first tile after a release and never recovered: thirteen
+// steps in a row, each one a wait.
+//
+// The refusal turns on a comparison against none and nothing else -- nothing
+// calls the interface between that test and the placement -- so the last actor
+// the mouse really did hit is lent back for exactly that stretch and taken out
+// again before anything can read it. Nothing is invented: until the mouse has
+// picked something at least once this navigation, the frame is left as it was.
+static uint32_t g_pick_iface_off;       // CachedMouseInteractionInterface
+static void*    g_pick_iface_seen[2];   // the last one the mouse itself hit
+static void**   g_pick_iface_lent;      // where it was lent, to take back
+static int      g_pick_iface_state = -1;
+
+// An UnrealScript interface is two pointers: the object, then its interface
+// table. Both are put back, and only if they are still the ones lent.
+static void nav_return_interface(void)
+{
+    void** slot = g_pick_iface_lent;
+    if (!slot) return;
+    g_pick_iface_lent = NULL;
+    if (!writable(slot, 2 * sizeof(void*))) return;
+    if (slot[0] != g_pick_iface_seen[0] || slot[1] != g_pick_iface_seen[1]) return;
+    slot[0] = NULL;
+    slot[1] = NULL;
+}
+
+static void nav_return_interface_guarded(void)
+{
+    Fault f;
+    __try { nav_return_interface(); }
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        fault_log("nav: interface", &f, NULL);
+    }
+}
+
+static void nav_lend_interface(void* hud)
+{
+    nav_return_interface();
+    if (!g_pick_iface_off) return;
+    void** slot = (void**)((uint8_t*)hud + g_pick_iface_off);
+    if (!writable(slot, 2 * sizeof(void*))) return;
+
+    if (slot[0]) {                      // the mouse picked something itself
+        g_pick_iface_seen[0] = slot[0];
+        g_pick_iface_seen[1] = slot[1];
+        // Only worth a line as the answer to one that said it had stopped.
+        if (g_pick_iface_state == 0)
+            logf_("nav: the mouse picks the map again\n");
+        g_pick_iface_state = 1;
+        return;
+    }
+
+    // Lending a destroyed actor would be read once, by the next frame's
+    // mouse-out, so the remembered one is checked for still being an object
+    // before it goes back in.
+    char name[128];
+    int alive = g_pick_iface_seen[0] && readable(g_pick_iface_seen[0], 0x60) &&
+                object_name(g_pick_iface_seen[0], name, sizeof name) && name[0];
+    if (alive) {
+        slot[0] = g_pick_iface_seen[0];
+        slot[1] = g_pick_iface_seen[1];
+        g_pick_iface_lent = slot;
+    } else {
+        g_pick_iface_seen[0] = NULL;
+        g_pick_iface_seen[1] = NULL;
+    }
+    if (g_pick_iface_state != 0) {
+        g_pick_iface_state = 0;
+        logf_("nav: the mouse picks nothing -- %s\n",
+              alive ? "lending back the last actor it hit" :
+                      "none to lend, the game will refuse the placement");
+    }
+}
+
+// Navigation is over: the remembered actor is dropped rather than carried
+// into a battle, or a map, where it no longer exists.
+static void nav_forget_interface(void)
+{
+    nav_return_interface_guarded();
+    g_pick_iface_seen[0] = NULL;
+    g_pick_iface_seen[1] = NULL;
+    g_pick_iface_state = -1;
+}
+
 static int nav_aim_pick(void* stack)
 {
     void* node = *(void**)((uint8_t*)stack + FFRAME_NODE);
@@ -2753,6 +2876,9 @@ static int nav_aim_pick(void* stack)
                     g_pick_hud_local = off;
                     g_pick_hud = obj;
                     g_pick_hit_off = hit;
+                    if (!object_field_offset(obj, "CachedMouseInteractionInterface",
+                                             &g_pick_iface_off))
+                        g_pick_iface_off = 0;
                     break;
                 }
             }
@@ -2766,8 +2892,9 @@ static int nav_aim_pick(void* stack)
             }
             return 0;
         }
-        logf_("nav: pick HUD local +0x%X, CachedHitLocation +0x%X\n",
-              g_pick_hud_local, g_pick_hit_off);
+        logf_("nav: pick HUD local +0x%X, CachedHitLocation +0x%X, "
+              "CachedMouseInteractionInterface +0x%X\n",
+              g_pick_hud_local, g_pick_hit_off, g_pick_iface_off);
     }
 
     if (!readable(locals + g_pick_hud_local, sizeof(void*))) return 0;
@@ -2777,6 +2904,9 @@ static int nav_aim_pick(void* stack)
         if (!hud || !object_field_offset(hud, "CachedHitLocation", &hit)) return 0;
         g_pick_hud = hud;
         g_pick_hit_off = hit;
+        if (!object_field_offset(hud, "CachedMouseInteractionInterface",
+                                 &g_pick_iface_off))
+            g_pick_iface_off = 0;
     }
     float* v = (float*)((uint8_t*)hud + g_pick_hit_off);
     if (!writable(v, 3 * sizeof(float))) return 0;
@@ -2784,6 +2914,8 @@ static int nav_aim_pick(void* stack)
     v[1] = g_nav_world[1];
     v[2] = navh_query_z();
     g_nav_world[2] = v[2];
+    // Last, because it decides whether the game will take any of the above.
+    nav_lend_interface(hud);
     return 1;
 }
 
@@ -3023,6 +3155,10 @@ static void __fastcall hook_validpos(void* self, void* edx,
 {
     int placed = 0;
     Fault f;
+    // Reaching here means the pick was accepted, so whatever was lent to make
+    // it accepted has done its work and comes straight back out -- before the
+    // native runs, and long before anything else on this frame reads it.
+    nav_return_interface_guarded();
     if (g_nav_live) {
         __try { placed = nav_substitute(stack); }
         __except (fault_note(GetExceptionInformation(), &f)) {
