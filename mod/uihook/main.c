@@ -3105,6 +3105,74 @@ static void scan_add_world(void)
 }
 
 // ---- the ways up -----------------------------------------------------------
+// ---- where the tutorial is holding the cursor ------------------------------
+//
+// The EW tutorial does not merely suggest a move, it refuses every other one,
+// and a player who cannot see the pulsing marker has no way to find out
+// where. It is one Kismet action: SeqAct_RestrictMovementCursor takes a
+// Locator placed in the map, lifts its Z by 24, and hands it to
+// XComPathingPawn.SetDirectedTargetPoint, which is what fills vTargetPoint.
+// SeqAct_UnrestrictMovementCursor clears it again.
+//
+// ⛔ bUseTargetPoint is not read, although it exists. It is a bool among ten
+// on that pawn and this build found no UBoolProperty::BitMask ("props: no
+// BitMask"), so it would read as whatever its neighbours are. The game does
+// not trust it alone either: XComDirectedTacticalExperience.InvalidMovement
+// asks for the bool AND for X + Y + Z != 0, and the vector test is the one
+// that survives having no mask.
+//
+// Filed under the objectives, because a tutorial waypoint and a Meld canister
+// are the same thing to a player working out where to go -- which is the
+// grouping the XCOM 2 mod arrived at for the same reason.
+//
+// What is NOT here: SeqAct_RestrictMovementCursorToCover, the tutorial's
+// other restriction, which sets bFirstMoveOutOfCover and no position at all.
+// That one is a rule and not a place; it has no tile to point at, and its
+// flag is a bool with the same mask problem and no vector to fall back on.
+static FieldSlot g_soldier_unit, g_path_pawn_field, g_target_point;
+
+// The Locator's own Z, before the game lifted it: scan_item_at takes the lift
+// back off to find the floor the marker stands on.
+#define TUTORIAL_POINT_LIFT 24.0f
+
+static void scan_add_tutorial(void)
+{
+    void* pawn = NULL;
+    const void* v;
+    if (!cursor_chained_pawn(&pawn) || !pawn) return;
+    if (!field_ptr(pawn, "m_kGameUnit", &g_soldier_unit, sizeof(void*), &v)) return;
+    void* unit = *(void* const*)v;
+    if (!unit || !unit_is_live(unit)) return;
+
+    if (!field_ptr(unit, "m_kPathingPawn", &g_path_pawn_field, sizeof(void*), &v)) return;
+    void* ppawn = *(void* const*)v;
+    if (!ppawn || !unit_is_live(ppawn)) return;
+
+    if (!field_ptr(ppawn, "vTargetPoint", &g_target_point, 3 * sizeof(float), &v)) return;
+    const float* pt = (const float*)v;
+    if (pt[0] + pt[1] + pt[2] == 0.0f) return;      // the game's own test
+
+    ScanItem it;
+    memset(&it, 0, sizeof it);
+    it.kind = SCAN_OBJECTIVES;
+    strncpy_s(it.name, sizeof it.name, "Tutorial target", _TRUNCATE);
+    int placed = scan_item_at(&it, pt, TUTORIAL_POINT_LIFT);
+    if (placed) scan_add(&it);
+
+    // Logged when the point moves, which is when the tutorial advances a
+    // step -- not once per press, and not every frame.
+    static float said[3];
+    if (pt[0] != said[0] || pt[1] != said[1] || pt[2] != said[2]) {
+        memcpy(said, pt, sizeof said);
+        logf_("tutorial: movement restricted to (%.0f, %.0f, %.0f)%s\n",
+              pt[0], pt[1], pt[2],
+              placed ? "" : " -- off the grid, not offered");
+        if (placed) logf_("tutorial: that is tile %d, %d, floor %d\n",
+                          it.tx, it.ty, it.tz);
+    }
+}
+
+// ---- the ways up -----------------------------------------------------------
 //
 // A ramp is not an actor: XComWorldData holds the ways up a ledge as
 // COVER_ClimbOnto_* and COVER_ClimbOver_* in the same flags word GetCoverPoint
@@ -3242,6 +3310,9 @@ static int scan_rebuild(void)
         scan_add_units();
     if (c == SCAN_ALL || c == SCAN_DOORS || c == SCAN_OBJECTIVES || c == SCAN_INTERACT)
         scan_add_world();
+    // Three field reads and no walk, so it costs nothing outside a tutorial
+    // -- and inside one it is the only objective that matters.
+    if (c == SCAN_ALL || c == SCAN_OBJECTIVES) scan_add_tutorial();
     // The climb scan is a query per tile, so it runs only when its own
     // category is showing: "Everything" would pay for it on every press, and
     // a hundred ledges would bury the doors and the people in it anyway.
