@@ -3184,19 +3184,43 @@ static int scan_origin(CursorGrid* g, int* tx, int* ty, int* tz, float* world_z)
 {
     float z;
     if (!cursor_grid(g)) return 0;
-    if (soldier_tile(g, tx, ty, &z) || cursor_tile(g, tx, ty, &z)) {
-        float feet[3];
-        feet[0] = g->min_x + ((float)*tx + 0.5f) * CURSOR_TILE;
-        feet[1] = g->min_y + ((float)*ty + 0.5f) * CURSOR_TILE;
-        feet[2] = z - NAV_CURSOR_LIFT;
-        *tz = floor_of(feet);
-        // The climb scan asks the cover native, which wants a world height and
-        // not a floor number -- so the height is carried out separately rather
-        // than worked back out of a floor that is three grid rows deep.
-        if (world_z) *world_z = feet[2];
-        return 1;
+    if (!soldier_tile(g, tx, ty, &z) && !cursor_tile(g, tx, ty, &z)) return 0;
+
+    // While a step is being navigated, THAT tile is where the player is, and
+    // it is what everything here is measured from: an offset is the keys left
+    // to press, so after stepping one north towards a Floater two north the
+    // answer has to be one north. The radar has always worked this way; the
+    // scanner measured from the soldier and so kept saying two.
+    //
+    // Only while navigating. Off the numpad the cursor cannot be trusted to
+    // say where the player is -- in mouse mode it follows the mouse every
+    // frame, and a soldier switch leaves it wherever the mouse happens to
+    // point -- which is the same reason navigation itself begins from the
+    // soldier rather than from the cursor.
+    int ntx, nty;
+    if (nav_active() && nav_target(&ntx, &nty)) {
+        int cx, cy;
+        float cz;
+        // The height comes from the cursor, which the mod places on the
+        // navigated tile -- but only once it is actually there. A placement
+        // that has not landed yet would otherwise hand over a height from
+        // the tile the cursor is still on, which on a stairwell is a
+        // different floor; the soldier's stands in until it does.
+        if (cursor_tile(g, &cx, &cy, &cz) && cx == ntx && cy == nty) z = cz;
+        *tx = ntx;
+        *ty = nty;
     }
-    return 0;
+
+    float feet[3];
+    feet[0] = g->min_x + ((float)*tx + 0.5f) * CURSOR_TILE;
+    feet[1] = g->min_y + ((float)*ty + 0.5f) * CURSOR_TILE;
+    feet[2] = z - NAV_CURSOR_LIFT;
+    *tz = floor_of(feet);
+    // The climb scan asks the cover native, which wants a world height and
+    // not a floor number -- so the height is carried out separately rather
+    // than worked back out of a floor that is three grid rows deep.
+    if (world_z) *world_z = feet[2];
+    return 1;
 }
 
 static int scan_rebuild(void)
@@ -3358,8 +3382,10 @@ static void scan_distance(int shift)
         scan_say(say);
         return;
     }
-    // Measured afresh from where the soldier is now, not from where the scan
-    // was taken: the point of the key is to ask again after moving.
+    // Measured afresh from where the player is NOW -- the navigated tile
+    // while there is one, the soldier otherwise -- and not from where the
+    // scan was taken: the whole point of the key is to ask again after
+    // moving, and the answer is the keys still to press.
     int tx, ty, tz;
     if (scan_origin(&g, &tx, &ty, &tz, &g_scan_world_z)) {
         g_scan_grid = g;

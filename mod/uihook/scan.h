@@ -16,6 +16,11 @@
 //   End                          how far the selection is, and which way
 //   Shift + End                  the same, back to the soldier
 //
+// Every offset the scanner speaks is measured from the tile being navigated
+// to while there is one, and from the soldier otherwise -- so an offset is
+// always the keys still to press. Step one north towards something two north
+// and it becomes one north.
+//
 // Page Up and Page Down are unbound in [XComGame.XComTacticalInput] -- the
 // global Camera bindings for them are removed with -Bindings -- so, like the
 // numpad, they never become an InputEvent and nothing has to be swallowed.
