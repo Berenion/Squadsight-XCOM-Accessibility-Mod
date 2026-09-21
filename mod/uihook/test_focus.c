@@ -22,6 +22,7 @@
 #include "cursor.h"
 #include "nav.h"
 #include "tile.h"
+#include "scan.h"
 
 static int failures;
 
@@ -1039,6 +1040,129 @@ int main(void)
               "contacts nearest first");
         tile_contacts(c, 0, "No enemies in sight.", list, sizeof list);
         check(strcmp(list, "No enemies in sight.") == 0, "an empty list says so");
+    }
+
+    printf("\nthe scanner\n");
+    {
+        // A scan is built the way main.c builds one: begin from a tile, add
+        // whatever was found, end. Nothing here needs the game.
+        ScanItem it;
+        char say[SCAN_MAX_TEXT];
+
+        scan_forget();
+        while (scan_category() != SCAN_ALL) scan_cycle_category(1);
+        while (scan_floor() != SCAN_ALL_FLOORS) scan_cycle_floor(1, 4);
+
+        scan_begin(10, 10, 2);
+        memset(&it, 0, sizeof it);
+        it.kind = SCAN_DOORS;  it.tx = 14; it.ty = 10; it.tz = 2;
+        strcpy_s(it.name, sizeof it.name, "Door");
+        check(scan_add(&it) == 1, "an item is kept");
+        it.kind = SCAN_ENEMIES; it.tx = 11; it.ty = 10; it.tz = 2;
+        strcpy_s(it.name, sizeof it.name, "Sectoid");
+        scan_add(&it);
+        it.kind = SCAN_SQUAD;  it.tx = 10; it.ty = 16; it.tz = 2;
+        strcpy_s(it.name, sizeof it.name, "Payne");
+        scan_add(&it);
+        check(scan_end() == 3, "everything lands in All");
+
+        check(scan_cycle(1) == 1 && scan_selected(&it) &&
+              strcmp(it.name, "Sectoid") == 0, "forwards starts at the nearest");
+        scan_cycle(1);
+        check(scan_selected(&it) && strcmp(it.name, "Door") == 0,
+              "then the next nearest");
+        scan_cycle(1);
+        scan_cycle(1);
+        check(scan_selected(&it) && strcmp(it.name, "Sectoid") == 0,
+              "and wraps round");
+        scan_cycle(-1);
+        check(scan_selected(&it) && strcmp(it.name, "Payne") == 0,
+              "backwards wraps the other way");
+
+        // The list is thrown away and rebuilt on every press. A unit that has
+        // walked a tile must keep the selection rather than lose it.
+        scan_cycle(-1);
+        check(scan_selected(&it) && strcmp(it.name, "Door") == 0, "on the door");
+        scan_begin(10, 10, 2);
+        it.kind = SCAN_ENEMIES; it.tx = 12; it.ty = 10; it.tz = 2;
+        strcpy_s(it.name, sizeof it.name, "Sectoid");
+        scan_add(&it);
+        it.kind = SCAN_DOORS;  it.tx = 14; it.ty = 10; it.tz = 2;
+        strcpy_s(it.name, sizeof it.name, "Door");
+        scan_add(&it);
+        scan_end();
+        check(scan_selected(&it) && strcmp(it.name, "Door") == 0,
+              "the selection survives a rebuild");
+
+        // A door one storey up is farther than one the same distance away on
+        // this floor, or every stairwell cycles upstairs first.
+        scan_begin(10, 10, 2);
+        it.kind = SCAN_DOORS; it.tx = 10; it.ty = 10; it.tz = 4;
+        strcpy_s(it.name, sizeof it.name, "Upstairs door");
+        scan_add(&it);
+        it.kind = SCAN_DOORS; it.tx = 13; it.ty = 10; it.tz = 2;
+        strcpy_s(it.name, sizeof it.name, "Near door");
+        scan_add(&it);
+        // The old selection ("Door") is in neither, so scan_end drops it and
+        // the next cycle starts from the nearest again.
+        scan_end();
+        scan_cycle(1);
+        check(scan_selected(&it) && strcmp(it.name, "Near door") == 0,
+              "the storey counts towards distance");
+
+        // Categories filter as they are added, not afterwards.
+        scan_cycle_category(1);
+        check(scan_category() == SCAN_SQUAD, "Ctrl steps the category");
+        scan_begin(10, 10, 2);
+        it.kind = SCAN_DOORS; it.tx = 11; it.ty = 10; it.tz = 2;
+        strcpy_s(it.name, sizeof it.name, "Door");
+        check(scan_add(&it) == 0, "a door is refused by the Squad category");
+        it.kind = SCAN_SQUAD;
+        strcpy_s(it.name, sizeof it.name, "Payne");
+        check(scan_add(&it) == 1, "a squad member is not");
+        check(scan_end() == 1, "one item in Squad");
+
+        // Alt steps the storey filter, and runs off the end back to all.
+        while (scan_category() != SCAN_ALL) scan_cycle_category(1);
+        check(scan_cycle_floor(1, 3) == 0, "Alt starts at the bottom storey");
+        scan_cycle_floor(1, 3);
+        check(scan_floor() == 1, "then climbs");
+        scan_cycle_floor(1, 3);
+        check(scan_cycle_floor(1, 3) == SCAN_ALL_FLOORS,
+              "and runs off the top back to all floors");
+        check(scan_cycle_floor(-1, 3) == 2, "backwards enters at the top");
+        while (scan_floor() != SCAN_ALL_FLOORS) scan_cycle_floor(1, 3);
+
+        // What it says.
+        memset(&it, 0, sizeof it);
+        it.tx = 14; it.ty = 7; it.tz = 2;
+        strcpy_s(it.name, sizeof it.name, "Door");
+        scan_describe(&it, 10, 10, 2, say, sizeof say);
+        check(strcmp(say, "Door, 3 south, 4 east.") == 0, "an item on this floor");
+        scan_describe(&it, 10, 10, 1, say, sizeof say);
+        check(strcmp(say, "Door, 3 south, 4 east, one floor up.") == 0,
+              "and one a storey above");
+        scan_describe(&it, 10, 10, 4, say, sizeof say);
+        check(strcmp(say, "Door, 3 south, 4 east, two floors down.") == 0,
+              "and two below");
+        it.tx = 10; it.ty = 10;
+        scan_describe(&it, 10, 10, 2, say, sizeof say);
+        check(strcmp(say, "Door, here.") == 0, "and one underfoot");
+
+        scan_category_text(SCAN_ENEMIES, SCAN_ALL_FLOORS, 3, say, sizeof say);
+        check(strcmp(say, "Enemies, 3 found.") == 0, "a category change");
+        scan_category_text(SCAN_ENEMIES, 1, 1, say, sizeof say);
+        check(strcmp(say, "Enemies, floor 2, 1 found.") == 0,
+              "a category change with a storey filter");
+        scan_floor_text(SCAN_ALL_FLOORS, say, sizeof say);
+        check(strcmp(say, "All floors.") == 0, "the filter off");
+        scan_empty_text(SCAN_CIVILIANS, say, sizeof say);
+        check(strcmp(say, "No civilians.") == 0, "an empty category");
+        scan_empty_text(SCAN_ALL, say, sizeof say);
+        check(strcmp(say, "Nothing found.") == 0, "an empty map");
+
+        scan_forget();
+        check(scan_selected(&it) == 0, "forgetting drops the selection");
     }
 
     printf("\nspeech debounce\n");

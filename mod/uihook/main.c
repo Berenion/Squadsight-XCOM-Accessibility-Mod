@@ -48,6 +48,8 @@
 #include "speech.h"
 #include "focus.h"
 #include "dialog.h"
+#include "scan.h"
+#include "objects.h"
 #include "help.h"
 #include "shot.h"
 #include "cursor.h"
@@ -78,12 +80,18 @@ static long g_repeat;
 static ULONGLONG g_repeat_since;
 static char g_last_spoken[MAX_STR];
 
+// The log is flushed per line on purpose: it is the one part of this mod its
+// user cannot read, so it has to survive a crash and stay readable while the
+// game runs. What was not on purpose was OutputDebugStringA beside it --
+// every call takes the machine-wide DBWinMutex, and the battle hooks emit a
+// line per flag per frame, so the game's UI thread was queueing on a global
+// lock thousands of times a mission to write to a debugger nobody had
+// attached. The log file says everything the debug channel did.
 static void emit(const char* line)
 {
     if (!g_log) return;
     fputs(line, g_log);
     fflush(g_log);
-    OutputDebugStringA(line);
 }
 
 static void logf_(const char* fmt, ...)
@@ -1390,10 +1398,12 @@ typedef int (__fastcall* TileCoverFn)(void* self, void* edx, float x, float y,
                                       float z, TileCoverPoint* out);
 typedef int (__fastcall* TileTestFn)(void* self, void* edx, int x, int y, int z);
 typedef int (__fastcall* UnitTestFn)(void* self, void* edx);
+typedef int (__fastcall* CursorFloorFn)(void* self, void* edx, float x, float y, float z);
 
 static int       g_tile_slot_cover = -1, g_tile_slot_smoke = -1, g_tile_slot_poison = -1;
 static int       g_tile_slot_occupied = -1; // XComWorldData.IsTileOccupied
 static int       g_unit_slot_visible = -1;  // XGUnitNativeBase.IsAliveAndVisible
+static int       g_cursor_slot_floor = -1;  // XCom3DCursor.WorldZToCursorFloor
 static uint8_t*  g_image_lo;            // the game's image, to check a vtable entry
 static uint8_t*  g_image_hi;            // points into it before calling it
 static void*     g_path_pawn;           // the pathing pawn that built the last path
@@ -1409,6 +1419,11 @@ static int       g_tile_due_dash;       // whether its path says anything about 
 #define STEP_FALLBACK_MS 1500
 static int       g_step_pending;
 static ULONGLONG g_step_deadline;
+
+// How many times the game has computed a path since the current step began.
+// Counted for every caller, not only the navigated tile, because the question
+// it answers is whether the game is pathing at all.
+static volatile LONG g_path_calls;
 // The fallback speaks the coordinates and gives up on the description -- but
 // the description is not always gone, only late. The pathfinder does not run
 // while a soldier is walking, and in the 2026-09-20 log a step taken during a
@@ -1443,26 +1458,51 @@ static void* tile_vfn(void* obj, int slot)
     return fn;
 }
 
+// Where a field lookup's answer is kept, for one call site.
+//
+// Both answers, deliberately. A miss is the expensive one: field_find walks
+// every child of every class up the chain -- XGUnit alone declares over 700
+// members -- decoding a name for each, and gives up only at Object. Keeping
+// only the hit meant that a class *without* the field paid that walk on every
+// single call, and a mission spent 311 of them on one lookup.
+//
+// Two classes rather than one, because the classes alternate. The unit flags
+// are walked in a row, and the two whose class has no m_kUnit sit among
+// fourteen whose class does; a single slot would have each of them evicting
+// the other, which is how the miss got expensive in the first place.
+typedef struct {
+    void*    on;        // the class the offset was found on
+    void*    absent;    // a class since proved not to have the field at all
+    uint32_t off;
+} FieldSlot;
+
 // An object's field, by name: the offset is looked up again whenever the
-// object's class is not the one it was last found on. An offset belongs to
-// the class, and a walk up XGUnit's chain passes hundreds of members, each a
-// VirtualQuery -- once per class, not once per unit per key press.
-static int field_ptr(void* obj, const char* name, uint32_t* off, void** found_on,
+// object's class is not one this slot has already decided. An offset belongs
+// to the class, so that is once per class, not once per unit per key press.
+static int field_ptr(void* obj, const char* name, FieldSlot* slot,
                      size_t size, const void** out)
 {
     if (!obj) return 0;
     uint32_t class_off = props_class_offset();
     if (!class_off || !readable((const uint8_t*)obj + class_off, sizeof(void*))) return 0;
     void* cls = *(void* const*)((const uint8_t*)obj + class_off);
-    if (!cls) return 0;
-    if (cls != *found_on) {
-        if (!object_field_offset(obj, name, off)) {
-            logf_("field: no %s on this object's class\n", name);
+    if (!cls || cls == slot->absent) return 0;
+    if (cls != slot->on) {
+        if (!object_field_offset(obj, name, &slot->off)) {
+            slot->absent = cls;
+            // A class that cannot be read is not a missing field, it is a
+            // dead object, and the answer is to stop holding the pointer --
+            // which is whoever is holding it to say, not this. Saying it here
+            // filled a log with "on an unreadable class" and named neither
+            // the object nor anything that could be done about it.
+            char cls_name[128];
+            if (object_class_name(obj, cls_name, sizeof cls_name))
+                logf_("field: no %s on %s\n", name, cls_name);
             return 0;
         }
-        *found_on = cls;
+        slot->on = cls;
     }
-    const uint8_t* v = (const uint8_t*)obj + *off;
+    const uint8_t* v = (const uint8_t*)obj + slot->off;
     if (!readable(v, size)) return 0;
     *out = v;
     return 1;
@@ -1477,16 +1517,14 @@ static int field_ptr(void* obj, const char* name, uint32_t* off, void** found_on
 // mouse stays put, so the cursor lands wherever the mouse now points -- in one
 // run, three soldiers in a row began at the map's northern edge, rows 54 to
 // 60 of 61, where no path went anywhere.
-static uint32_t g_soldier_loc_off;
-static void*    g_soldier_loc_on;
+static FieldSlot g_soldier_loc;
 
 static int soldier_tile(const CursorGrid* g, int* tx, int* ty, float* z)
 {
     void* pawn = NULL;
     const void* v;
     if (!cursor_chained_pawn(&pawn) || !pawn ||
-        !field_ptr(pawn, "Location", &g_soldier_loc_off, &g_soldier_loc_on,
-                   3 * sizeof(float), &v))
+        !field_ptr(pawn, "Location", &g_soldier_loc, 3 * sizeof(float), &v))
         return 0;
     const float* loc = (const float*)v;
     *tx = cursor_tile_axis(loc[0], g->min_x, CURSOR_TILE);
@@ -1511,8 +1549,7 @@ static int soldier_tile(const CursorGrid* g, int* tx, int* ty, float* z)
 // for, so it only ever raises the limit.
 static uint32_t g_path_off, g_std_off, g_maxcost_off, g_cost_off;
 static void*    g_cost_class_path;
-static uint32_t g_gameunit_off, g_moves_off;
-static void*    g_gameunit_on, *g_moves_on;
+static FieldSlot g_gameunit, g_moves;
 
 static int tile_dash(int* cost_out, int* std_out, int* max_out, int* moves_out,
                      int* turns_out)
@@ -1548,9 +1585,9 @@ static int tile_dash(int* cost_out, int* std_out, int* max_out, int* moves_out,
     void* soldier = NULL;
     const void* v;
     if (cursor_chained_pawn(&soldier) && soldier &&
-        field_ptr(soldier, "m_kGameUnit", &g_gameunit_off, &g_gameunit_on, sizeof(void*), &v)) {
+        field_ptr(soldier, "m_kGameUnit", &g_gameunit, sizeof(void*), &v)) {
         void* unit = *(void* const*)v;
-        if (field_ptr(unit, "m_iMovesActionsPerformed", &g_moves_off, &g_moves_on, 4, &v))
+        if (field_ptr(unit, "m_iMovesActionsPerformed", &g_moves, 4, &v))
             *moves_out = *(const int32_t*)v;
     }
     int limit = *moves_out == 0 ? 2 * *std_out : *std_out;
@@ -1584,16 +1621,35 @@ typedef struct {
 
 static UnitName  g_units[UNIT_MAX];
 static int       g_nunits;
-static uint32_t  g_flag_unit_off, g_unit_pawn_off, g_pawn_loc_off;
-static void*     g_flag_unit_cls_obj, *g_unit_pawn_cls_obj, *g_pawn_loc_cls_obj;
+static FieldSlot g_flag_unit, g_unit_pawn, g_pawn_loc;
+
+// A flag that has stopped being one. Its slot is left empty rather than
+// closed up, because everything that walks this table walks it by index and
+// an empty slot is skipped for nothing -- field_ptr answers a null object
+// without reading anything.
+static void unit_forget(UnitName* u)
+{
+    logf_("units: the flag for %s is gone -- dropped\n",
+          u->name[0] ? u->name : "someone");
+    u->flag = NULL;
+    u->name[0] = 0;
+    u->nick[0] = 0;
+}
 
 static void unit_note(void* flag, const char* name, const char* nick)
 {
-    int i;
-    for (i = 0; i < g_nunits && g_units[i].flag != flag; i++) {}
+    if (!flag) return;
+    int i, free_slot = -1;
+    for (i = 0; i < g_nunits && g_units[i].flag != flag; i++)
+        if (!g_units[i].flag && free_slot < 0) free_slot = i;
     if (i == g_nunits) {
-        if (g_nunits == UNIT_MAX) return;
-        g_nunits++;
+        // A mission's worth of flags is dropped as its units die, so the
+        // emptied slots are where the next mission's go. Without this a long
+        // session would fill the table with the dead and stop noticing the
+        // living.
+        if (free_slot >= 0) i = free_slot;
+        else if (g_nunits < UNIT_MAX) g_nunits++;
+        else return;
     }
     g_units[i].flag = flag;
     strncpy_s(g_units[i].name, sizeof g_units[i].name, name, _TRUNCATE);
@@ -1609,28 +1665,25 @@ typedef struct {
 } UnitSeen;
 
 // The player a unit belongs to (XGUnit.m_kPlayer).
-static uint32_t g_player_off;
-static void*    g_player_on;
+static FieldSlot g_player;
 
 static void* unit_player(void* unit)
 {
     const void* v;
-    if (!field_ptr(unit, "m_kPlayer", &g_player_off, &g_player_on, sizeof(void*), &v))
+    if (!field_ptr(unit, "m_kPlayer", &g_player, sizeof(void*), &v))
         return NULL;
     return *(void* const*)v;
 }
 
 // The player the soldier being moved belongs to: ChainedPawn.m_kGameUnit.
-static uint32_t g_squad_unit_off;
-static void*    g_squad_unit_on;
+static FieldSlot g_squad_unit;
 
 static void* squad_player(void)
 {
     void* pawn = NULL;
     const void* v;
     if (!cursor_chained_pawn(&pawn) || !pawn ||
-        !field_ptr(pawn, "m_kGameUnit", &g_squad_unit_off, &g_squad_unit_on,
-                   sizeof(void*), &v))
+        !field_ptr(pawn, "m_kGameUnit", &g_squad_unit, sizeof(void*), &v))
         return NULL;
     return unit_player(*(void* const*)v);
 }
@@ -1643,18 +1696,29 @@ static void* squad_player(void)
 // session never found UBoolProperty::BitMask ("no BitMask -- bools read as a
 // whole dword"), and that bool shares its dword with m_bIsDead, m_bIsSelected
 // and the rest, so any of them set read as friendly.
-static int unit_seen(const UnitName* u, void* squad, UnitSeen* out)
+static int unit_seen(UnitName* u, void* squad, UnitSeen* out)
 {
     const void* v;
-    if (!field_ptr(u->flag, "m_kUnit", &g_flag_unit_off, &g_flag_unit_cls_obj, sizeof(void*), &v))
+    if (!u->flag) return 0;
+    if (!field_ptr(u->flag, "m_kUnit", &g_flag_unit, sizeof(void*), &v)) {
+        // A flag whose class has no m_kUnit is not a flag any more. Flags
+        // are destroyed with their units -- eleven Chryssalids and zombies
+        // died over one mission, and loading a save replaced the squad's four
+        // as well -- and the engine hands the memory straight on, so what is
+        // left behind reads as an AudioComponent, or as a class pointer that
+        // is not readable at all. The table held sixteen of them, and every
+        // pass over it paid a failed class-chain walk for each. Dropping the
+        // entry is the answer; the question does not get better with age.
+        unit_forget(u);
         return 0;
+    }
     void* unit = *(void* const*)v;
     UnitTestFn visible = (UnitTestFn)tile_vfn(unit, g_unit_slot_visible);
     if (!visible || !visible(unit, NULL)) return 0;
-    if (!field_ptr(unit, "m_kPawn", &g_unit_pawn_off, &g_unit_pawn_cls_obj, sizeof(void*), &v))
+    if (!field_ptr(unit, "m_kPawn", &g_unit_pawn, sizeof(void*), &v))
         return 0;
     void* pawn = *(void* const*)v;
-    if (!field_ptr(pawn, "Location", &g_pawn_loc_off, &g_pawn_loc_cls_obj, 3 * sizeof(float), &v))
+    if (!field_ptr(pawn, "Location", &g_pawn_loc, 3 * sizeof(float), &v))
         return 0;
     out->who = u;
     out->unit = unit;
@@ -1679,8 +1743,7 @@ typedef struct {
     int   n;
 } SeenSet;
 
-static uint32_t g_visen_off;
-static void*    g_visen_on;
+static FieldSlot g_visen;
 
 static void squad_sight(void* squad, SeenSet* set)
 {
@@ -1690,7 +1753,7 @@ static void squad_sight(void* squad, SeenSet* set)
         UnitSeen s;
         if (!unit_seen(&g_units[i], squad, &s) || !s.friendly) continue;
         const void* v;
-        if (!field_ptr(s.unit, "m_arrVisibleEnemies", &g_visen_off, &g_visen_on,
+        if (!field_ptr(s.unit, "m_arrVisibleEnemies", &g_visen,
                        sizeof(FArray), &v))
             continue;
         const FArray* a = (const FArray*)v;
@@ -2088,6 +2151,7 @@ static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
         { "UXComWorldDataexecTileContainsPoison",    &g_tile_slot_poison },
         { "UXComWorldDataexecIsTileOccupied",        &g_tile_slot_occupied },
         { "AXGUnitNativeBaseexecIsAliveAndVisible",  &g_unit_slot_visible },
+        { "AXCom3DCursorexecWorldZToCursorFloor",    &g_cursor_slot_floor },
     };
     for (int i = 0; i < (int)(sizeof want / sizeof want[0]); i++) {
         const uint8_t* code = (const uint8_t*)natives_find(tbl, n, want[i].name);
@@ -2221,6 +2285,7 @@ static void nav_arrive(int tx, int ty)
     g_step_late = 0;
     g_step_pending = 1;
     g_step_deadline = GetTickCount64() + STEP_FALLBACK_MS;
+    g_path_calls = 0;
     // With no verdict coming for the soldier's own tile, its cover is
     // described on a timer instead, once the floor search has settled.
     if (mine) {
@@ -2362,6 +2427,735 @@ static void nav_press(int digit, int gliding)
     if (!moved && !gliding) speech_say_now(say);
 }
 
+// ---- the scanner -----------------------------------------------------------
+//
+// Ported from the Wasteland 2 accessibility mod, key for key. scan.h holds the
+// keys and the reasoning; this is where the lists come from.
+//
+// Three sources, because XCOM keeps these things in three different places:
+//
+//   units   the flag table above (g_units). A flag exists for every soldier,
+//           alien and civilian, and unit_seen has already settled whether it
+//           can be seen at all. The side comes from the unit's own m_eTeam
+//           rather than from the flag: eTeam_Neutral is a civilian, and the
+//           flag's m_bIsFriendly shares a dword with m_bIsDead in this build.
+//
+//   world   the game's object table (objects.h). Doors, windows, panels,
+//           ladders, Meld canisters and the radar array are level actors that
+//           never pass through the UI, and no native lists them:
+//           GetInteractionPoints comes closest but covers only
+//           XComInteractiveLevelActor, which a ladder is not.
+//
+//   climbs  the tiles around the soldier, from the cover flags the mod already
+//           asks for. COVER_ClimbOnto_* and COVER_ClimbOver_* live in the same
+//           flags word walls_scan reads, so a way up a ledge -- a ramp, a
+//           crate, a low wall -- costs one query per tile and nothing else.
+//
+// Only the units are gated on being seen. XCOM draws the whole map, so a
+// sighted player can pick out a door across it, and hiding level actors would
+// take away something the screen already gives.
+
+// XComInteractiveLevelActor.IconSocket: how the level designer classified it.
+// XGDOOR_Icon 0, XGWINDOW_Icon 1, XGBUTTON_Icon 2. Read rather than asking the
+// native IsDoor(), because this is a plain byte on the actor and calling into
+// script is something this DLL does not do.
+#define ICON_WINDOW  1
+#define ICON_BUTTON  2
+
+// COVER_ClimbOnto_N..W and COVER_ClimbOver_N..W, from XComWorldData.
+#define COVER_CLIMB_ONTO 0x001E0000
+#define COVER_CLIMB_OVER 0x01E00000
+
+#define SCAN_CLIMB_RADIUS 12    // tiles each way the climb scan covers
+#define SCAN_CLIMB_APART   4    // tiles between two climbs worth naming apart
+#define TEAM_NEUTRAL      1     // Object.ETeam.eTeam_Neutral -- a civilian
+
+static FieldSlot g_icon, g_ladder_loc, g_ilact_loc;
+static FieldSlot g_meld_loc, g_meld_turns, g_team;
+
+// Where the scan was measured from, and the grid it was taken on, so Home and
+// End answer about the same scan the player has just heard.
+static CursorGrid g_scan_grid;
+static int        g_scan_from[3];
+static float      g_scan_world_z;   // the origin's own height, for tile queries
+static int        g_scan_have;
+
+// A unit's team, from XGUnitNativeBase.m_eTeam (Object.ETeam, one byte).
+static int unit_team(void* unit)
+{
+    const void* v;
+    if (!field_ptr(unit, "m_eTeam", &g_team, 1, &v)) return 0;
+    return *(const uint8_t*)v;
+}
+
+// An actor's Location, through the same field walk everything else uses.
+static int actor_location(void* actor, FieldSlot* slot, float* out)
+{
+    const void* v;
+    if (!field_ptr(actor, "Location", slot, 3 * sizeof(float), &v)) return 0;
+    memcpy(out, v, 3 * sizeof(float));
+    return 1;
+}
+
+// ---- what a floor is -------------------------------------------------------
+//
+// Not a row of the world grid. XComWorldData steps its Z axis by
+// WORLD_FloorHeight, 64 units, and a map 18 of those tall was announced as
+// having eighteen floors -- on a building with two. A *floor*, as the game and
+// the player mean it, is XCom3DCursor.CURSOR_OUTDOOR_FLOOR_HEIGHT: 192 units,
+// three grid rows. The first run had a soldier on 259.1 and another on 533.4
+// called five floors apart; they are one.
+//
+// The game will answer this itself -- WorldZToCursorFloor is native on the
+// cursor, and takes the whole position, so it can tell an indoor floor from
+// the ground outside it. That is the answer used. The division is only the
+// fallback for a build where the thunk does not have the shape tile_vtable_slot
+// reads, and it is the same division the constant describes.
+#define CURSOR_FLOOR_HEIGHT 192.0f
+
+static int floor_of(const float* world)
+{
+    void* cur = cursor_object();
+    CursorFloorFn fn = (CursorFloorFn)tile_vfn(cur, g_cursor_slot_floor);
+    if (fn) return fn(cur, NULL, world[0], world[1], world[2]);
+    CursorGrid g;
+    if (!cursor_grid(&g)) return 0;
+    return cursor_tile_axis(world[2], g.min_z, CURSOR_FLOOR_HEIGHT);
+}
+
+// How many floors the map has. XCom3DCursorForCursorVolumes works m_iMaxFloor
+// out from the cursor volumes the level was built with, so it is the map's own
+// count; the grid's height in floors is the fallback.
+static FieldSlot g_maxfloor;
+
+static int floor_count(void)
+{
+    const void* v;
+    void* cur = cursor_object();
+    if (cur && field_ptr(cur, "m_iMaxFloor", &g_maxfloor,
+                         sizeof(int32_t), &v)) {
+        int n = *(const int32_t*)v + 1;         // m_iMaxFloor is the top index
+        if (n > 0 && n < 64) return n;
+    }
+    CursorGrid g;
+    if (!cursor_grid(&g)) return 1;
+    int n = (int)((float)g.num_z * 64.0f / CURSOR_FLOOR_HEIGHT);
+    return n > 0 ? n : 1;
+}
+
+// Fills in an item's tile from its world position. 0 when the grid is unknown.
+//
+// `lift` is how far the position stands above the floor it is on. A pawn's
+// Location is its middle, NAV_CURSOR_LIFT above its feet, and scan_origin
+// takes that off the tile the scan is measured from -- so an item that does
+// not take it off too reads one storey high. The first run said "Payne, here,
+// one floor up" about the very soldier the scan was measured from. A level
+// actor's Location is already at its base, so it passes 0.
+static int scan_item_at(ScanItem* it, const float* world, float lift)
+{
+    if (!g_scan_have) return 0;
+    memcpy(it->world, world, 3 * sizeof(float));
+    it->tx = cursor_tile_axis(world[0], g_scan_grid.min_x, CURSOR_TILE);
+    it->ty = cursor_tile_axis(world[1], g_scan_grid.min_y, CURSOR_TILE);
+    // Off the grid is not a place the cursor can go, so it is not a place the
+    // scanner may offer. A class default object put "Radar array" on tile
+    // 65, -12 -- world (0, 0), which is where an object with no position sits
+    // -- and Home sent the cursor over the edge of the map after it.
+    if (it->tx < 0 || it->ty < 0 ||
+        it->tx >= g_scan_grid.num_x || it->ty >= g_scan_grid.num_y)
+        return 0;
+    float feet[3] = { world[0], world[1], world[2] - lift };
+    it->tz = floor_of(feet);
+    return 1;
+}
+
+// ---- the units -------------------------------------------------------------
+
+// The player the squad belongs to, kept from the last time it could be read.
+//
+// squad_player goes through the cursor's ChainedPawn, and during a soldier
+// switch that is briefly nothing -- at which point every unit reads as not
+// friendly and the scan comes back empty. The first run showed it: "Squad, 5
+// found" and then, one key later, "No squad", with "nav: released (the soldier
+// changed)" between them. The player does not change within a mission, so the
+// last one read is the right answer while the cursor is between soldiers.
+static void* g_scan_squad;
+
+static void* scan_squad_player(void)
+{
+    void* p = squad_player();
+    if (p) g_scan_squad = p;
+    return p ? p : g_scan_squad;
+}
+
+static void scan_add_units(void)
+{
+    void* squad = scan_squad_player();
+    static SeenSet sight;
+    squad_sight(squad, &sight);
+
+    for (int i = 0; i < g_nunits; i++) {
+        UnitSeen s;
+        if (!unit_seen(&g_units[i], squad, &s)) continue;
+
+        ScanItem it;
+        memset(&it, 0, sizeof it);
+        if (s.friendly) {
+            it.kind = SCAN_SQUAD;
+        } else if (unit_team(s.unit) == TEAM_NEUTRAL) {
+            // A civilian is on nobody's side, so no one holds them in
+            // m_arrVisibleEnemies. IsAliveAndVisible -- which unit_seen has
+            // already asked -- is the whole gate, the same one the squad gets.
+            it.kind = SCAN_CIVILIANS;
+        } else {
+            // Aliens go through the squad's own sight, as the radar does:
+            // IsAliveAndVisible alone let unrevealed pods through.
+            if (!seen_has(&sight, s.unit)) continue;
+            it.kind = SCAN_ENEMIES;
+        }
+        unit_label(&g_units[i], it.name, sizeof it.name);
+        if (scan_item_at(&it, s.loc, NAV_CURSOR_LIFT)) scan_add(&it);
+    }
+}
+
+// ---- the level actors, kept between key presses ----------------------------
+//
+// A full walk of the object table is 175,000 entries and tens of milliseconds
+// -- one run measured 78 ms, five frames, with the game thread stopped for
+// all of it -- and doing one per key press was felt as lag. The first attempt
+// at that was a three-second cache, which only moved the stall around: every
+// press more than three seconds after the last one paid for it again, which
+// is most presses.
+//
+// So the walk is done once per mission and then kept up to date instead. What
+// is kept is the *actors*, not the finished items: what the scanner says
+// about one -- its tile, and a Meld canister's countdown -- is worked out
+// again on every press, so nothing here is ever stale.
+//
+// Keeping up to date is two cheap things. Actors that have gone are dropped,
+// because a door can be blown off its hinges and a canister can expire, and
+// objects_still asks the table rather than trusting the pointer. Then the
+// walk resumes where it stopped, over whatever the mission has added since,
+// which is usually nothing. A different cursor or a different grid is a
+// different map, and starts again from the beginning.
+typedef struct {
+    void* actor;
+    int   idx;      // its slot in the object table, for objects_still
+    int   kind;     // 0 interactive, 1 ladder, 2 Meld canister
+} WorldActor;
+
+static WorldActor g_wactors[SCAN_MAX];
+static int        g_wactor_n;
+static int        g_world_next;     // where the last walk stopped
+static int        g_world_have;
+static void*      g_world_cursor;
+static CursorGrid g_world_grid;
+
+static ScanItem   g_world[SCAN_MAX];
+static int        g_world_n;
+
+static void world_keep(const ScanItem* it)
+{
+    if (g_world_n < SCAN_MAX) g_world[g_world_n++] = *it;
+}
+
+
+static void scan_describe_interactive(void* actor)
+{
+    ScanItem it;
+    memset(&it, 0, sizeof it);
+
+    const void* v;
+    int icon = 0;
+    if (field_ptr(actor, "IconSocket", &g_icon, 1, &v))
+        icon = *(const uint8_t*)v;
+
+    // The radar array is the objective on the missions that have one, and it
+    // is an interactive actor like any other -- so it is named and filed
+    // before the icon gets a say.
+    if (object_is_a(actor, "XComRadarArrayActor")) {
+        it.kind = SCAN_OBJECTIVES;
+        strncpy_s(it.name, sizeof it.name, "Radar array", _TRUNCATE);
+    } else if (icon == ICON_WINDOW) {
+        it.kind = SCAN_INTERACT;
+        strncpy_s(it.name, sizeof it.name, "Window", _TRUNCATE);
+    } else if (icon == ICON_BUTTON) {
+        it.kind = SCAN_INTERACT;
+        strncpy_s(it.name, sizeof it.name, "Panel", _TRUNCATE);
+    } else {
+        it.kind = SCAN_DOORS;
+        strncpy_s(it.name, sizeof it.name, "Door", _TRUNCATE);
+    }
+
+    float world[3];
+    if (!actor_location(actor, &g_ilact_loc, world)) return;
+    if (scan_item_at(&it, world, 0.0f)) world_keep(&it);
+}
+
+static void scan_describe_ladder(void* actor)
+{
+    ScanItem it;
+    memset(&it, 0, sizeof it);
+    it.kind = SCAN_INTERACT;
+    strncpy_s(it.name, sizeof it.name, "Ladder", _TRUNCATE);
+    float world[3];
+    if (!actor_location(actor, &g_ladder_loc, world)) return;
+    if (scan_item_at(&it, world, 0.0f)) world_keep(&it);
+}
+
+static void scan_describe_meld(void* actor)
+{
+    ScanItem it;
+    memset(&it, 0, sizeof it);
+    it.kind = SCAN_OBJECTIVES;
+
+    // How long it lasts is the whole decision about a canister, and it is an
+    // int -- unlike m_bCollected, which is a bool, and a bool in this build
+    // shares its dword with its neighbours (props: "no BitMask"). So a
+    // collected canister is not filtered out; one whose timer has run out is.
+    const void* v;
+    int turns = -1;
+    if (field_ptr(actor, "m_iTurnsUntilDestroyed", &g_meld_turns, sizeof(int32_t), &v))
+        turns = *(const int32_t*)v;
+
+    if (turns == 0) return;                     // its timer has run out
+    if (turns > 0)
+        _snprintf_s(it.name, sizeof it.name, _TRUNCATE,
+                    "Meld canister, %d turn%s left", turns, turns == 1 ? "" : "s");
+    else
+        strncpy_s(it.name, sizeof it.name, "Meld canister", _TRUNCATE);
+
+    float world[3];
+    if (!actor_location(actor, &g_meld_loc, world)) return;
+    if (scan_item_at(&it, world, 0.0f)) world_keep(&it);
+}
+
+// What the scanner would say about each actor it is holding, worked out
+// afresh: the tiles are relative to a grid, and a canister's countdown is
+// relative to the turn.
+static void scan_world_items(void)
+{
+    g_world_n = 0;
+    for (int i = 0; i < g_wactor_n; i++) {
+        switch (g_wactors[i].kind) {
+        case 0:  scan_describe_interactive(g_wactors[i].actor); break;
+        case 1:  scan_describe_ladder(g_wactors[i].actor);      break;
+        default: scan_describe_meld(g_wactors[i].actor);        break;
+        }
+    }
+}
+
+// The walk hands back an index into the class list it was given; this carries
+// the mapping across it, since a visitor gets no state of its own beyond ctx
+// and this keeps the call cheap.
+static const int* g_scan_kinds;
+
+static int scan_collect_world(void* actor, int which, int idx, void* ctx)
+{
+    (void)ctx;
+    if (g_wactor_n >= SCAN_MAX) return 0;
+    g_wactors[g_wactor_n].actor = actor;
+    g_wactors[g_wactor_n].idx   = idx;
+    g_wactors[g_wactor_n].kind  = g_scan_kinds[which];
+    g_wactor_n++;
+    return 1;
+}
+
+// The three classes, resolved together, because finding a class by name costs
+// a pass over the whole table. After the first scan of a mission they come
+// from the cache. `map` receives the kind each entry of `use` stands for.
+static int scan_world_classes(const void** use, int* map)
+{
+    static const char* const names[] = {
+        "XComInteractiveLevelActor", "XComLadder", "XComMeldContainerActor",
+    };
+    const void* cls[3];
+    objects_classes(names, cls, 3);
+
+    int n = 0;
+    for (int i = 0; i < 3; i++)
+        if (cls[i]) { use[n] = cls[i]; map[n] = i; n++; }
+    return n;
+}
+
+static void scan_world_full(const void* const* use, int nclasses)
+{
+    g_wactor_n = 0;
+    g_world_next = 0;
+    if (objects_each_from(use, nclasses, 0, &g_world_next,
+                          scan_collect_world, NULL) < 0) {
+        logf_("scan: the object table could not be read this press\n");
+        return;
+    }
+
+    unsigned ms;
+    int entries;
+    objects_last_walk(&ms, &entries);
+    logf_("scan: full object walk %d entries in %u ms, %d actors kept\n",
+          entries, ms, g_wactor_n);
+}
+
+static void scan_world_catch_up(const void* const* use, int nclasses)
+{
+    int had = g_wactor_n;
+
+    int keep = 0;
+    for (int i = 0; i < g_wactor_n; i++)
+        if (objects_still(g_wactors[i].actor, g_wactors[i].idx, use, nclasses))
+            g_wactors[keep++] = g_wactors[i];
+    g_wactor_n = keep;
+
+    int was = g_world_next;
+    objects_each_from(use, nclasses, g_world_next, &g_world_next,
+                      scan_collect_world, NULL);
+
+    // Silent when nothing has changed, which is the usual answer and the
+    // whole point of not walking the table again.
+    int gone = had - keep, found = g_wactor_n - keep;
+    if (gone || found)
+        logf_("scan: %d gone, %d new over %d entries added since\n",
+              gone, found, g_world_next - was);
+}
+
+static void scan_add_world(void)
+{
+    g_world_n = 0;
+    if (!objects_ready()) {
+        // The probe at startup runs while the game is still in its shell,
+        // where the object table can be too small to recognise. In a mission
+        // it is not, so it is worth another look -- and the answer is logged
+        // whichever way it goes, once.
+        char why[256];
+        int got = objects_retry(why, sizeof why);
+        if (why[0]) logf_("objects: %s%s\n", got ? "" : "still unavailable -- ", why);
+        if (!got) return;
+    }
+
+    const void* use[3];
+    int map[3];
+    int nclasses = scan_world_classes(use, map);
+    if (!nclasses) return;
+    g_scan_kinds = map;
+
+    // A different cursor, or a different grid, is a different map: what was
+    // found last time belongs to one that is gone. So is a table that has
+    // shrunk below where the last walk stopped -- it cannot be the table
+    // those indices were taken from, and resuming into it would count
+    // everything a second time.
+    int same_map = g_world_have && g_world_cursor == cursor_object() &&
+                   memcmp(&g_world_grid, &g_scan_grid, sizeof g_world_grid) == 0 &&
+                   g_world_next <= objects_count();
+    if (same_map) scan_world_catch_up(use, nclasses);
+    else          scan_world_full(use, nclasses);
+
+    g_world_have = 1;
+    g_world_cursor = cursor_object();
+    g_world_grid = g_scan_grid;
+
+    scan_world_items();
+    for (int i = 0; i < g_world_n; i++) scan_add(&g_world[i]);
+}
+
+// ---- the ways up -----------------------------------------------------------
+//
+// A ramp is not an actor: XComWorldData holds the ways up a ledge as
+// COVER_ClimbOnto_* and COVER_ClimbOver_* in the same flags word GetCoverPoint
+// already answers with, and a ramp shows as the ClimbOnto that leads onto it.
+// So this walks the tiles around the soldier and keeps the ones whose flags
+// say a unit can get up there. One query per tile, so it is bounded, and it
+// runs only for its own category.
+
+static void scan_add_climbs(void)
+{
+    void* world_data = cursor_world();
+    if (!g_scan_have || !world_data) return;
+    TileCoverFn cover = (TileCoverFn)tile_vfn(world_data, g_tile_slot_cover);
+    if (!cover) return;
+
+    const CursorGrid* g = &g_scan_grid;
+    float z = g_scan_world_z + 4.0f;    // just off the floor, as walls_scan asks
+    static int kept[SCAN_MAX][2];
+    int nkept = 0;
+
+    for (int dy = -SCAN_CLIMB_RADIUS; dy <= SCAN_CLIMB_RADIUS; dy++) {
+        for (int dx = -SCAN_CLIMB_RADIUS; dx <= SCAN_CLIMB_RADIUS; dx++) {
+            int x = g_scan_from[0] + dx, y = g_scan_from[1] + dy;
+            if (x < 0 || y < 0 || x >= g->num_x || y >= g->num_y) continue;
+
+            float wx = g->min_x + ((float)x + 0.5f) * CURSOR_TILE;
+            float wy = g->min_y + ((float)y + 0.5f) * CURSOR_TILE;
+            TileCoverPoint cp;
+            memset(&cp, 0, sizeof cp);
+            // An answer about some other tile is an answer about some other
+            // floor, and is worth less than no answer at all -- the same test
+            // walls_scan makes.
+            if (!cover(world_data, NULL, wx, wy, z, &cp)) continue;
+            if (cp.x != x || cp.y != y) continue;
+
+            int onto = (cp.flags & COVER_CLIMB_ONTO) != 0;
+            int over = (cp.flags & COVER_CLIMB_OVER) != 0;
+            if (!onto && !over) continue;
+
+            // One entry per ledge, not per tile. Climbable cover is
+            // everywhere -- the first run found 155 of them within twelve
+            // tiles, which is a list nobody can use -- and a wall you can
+            // vault is one place, however many tiles long it is. So a tile is
+            // kept only when nothing already kept is within SCAN_CLIMB_APART.
+            // NB: not `near` -- windows.h still defines that as nothing,
+            // and `int near = 0;` compiles to `int = 0;`.
+            int crowded = 0;
+            for (int k = 0; k < nkept && !crowded; k++) {
+                int kx = kept[k][0] - x, ky = kept[k][1] - y;
+                if (kx * kx + ky * ky <= SCAN_CLIMB_APART * SCAN_CLIMB_APART)
+                    crowded = 1;
+            }
+            if (crowded) continue;
+            if (nkept < SCAN_MAX) {
+                kept[nkept][0] = x;
+                kept[nkept][1] = y;
+                nkept++;
+            }
+
+            ScanItem it;
+            memset(&it, 0, sizeof it);
+            it.kind = SCAN_INTERACT;
+            strncpy_s(it.name, sizeof it.name,
+                      onto ? "Ledge up" : "Low wall", _TRUNCATE);
+            float here[3] = { wx, wy, z };
+            if (scan_item_at(&it, here, 0.0f)) scan_add(&it);
+        }
+    }
+}
+
+// ---- building and saying ---------------------------------------------------
+
+// Where the scan is measured from: the soldier being moved, falling back to
+// the cursor when there is none. The height convention is nav's own -- a
+// pawn's Location is a lift above its feet.
+static int scan_origin(CursorGrid* g, int* tx, int* ty, int* tz, float* world_z)
+{
+    float z;
+    if (!cursor_grid(g)) return 0;
+    if (soldier_tile(g, tx, ty, &z) || cursor_tile(g, tx, ty, &z)) {
+        float feet[3];
+        feet[0] = g->min_x + ((float)*tx + 0.5f) * CURSOR_TILE;
+        feet[1] = g->min_y + ((float)*ty + 0.5f) * CURSOR_TILE;
+        feet[2] = z - NAV_CURSOR_LIFT;
+        *tz = floor_of(feet);
+        // The climb scan asks the cover native, which wants a world height and
+        // not a floor number -- so the height is carried out separately rather
+        // than worked back out of a floor that is three grid rows deep.
+        if (world_z) *world_z = feet[2];
+        return 1;
+    }
+    return 0;
+}
+
+static int scan_rebuild(void)
+{
+    CursorGrid g;
+    int tx, ty, tz;
+    // Asked before scan_begin, so a moment when there is no cursor to measure
+    // from leaves the list that was there rather than emptying it.
+    if (!scan_origin(&g, &tx, &ty, &tz, &g_scan_world_z)) return scan_count();
+    g_scan_have = 1;
+    g_scan_grid = g;
+    g_scan_from[0] = tx;
+    g_scan_from[1] = ty;
+    g_scan_from[2] = tz;
+
+    scan_begin(tx, ty, tz);
+    ScanCategory c = scan_category();
+    if (c == SCAN_ALL || c == SCAN_SQUAD || c == SCAN_ENEMIES || c == SCAN_CIVILIANS)
+        scan_add_units();
+    if (c == SCAN_ALL || c == SCAN_DOORS || c == SCAN_OBJECTIVES || c == SCAN_INTERACT)
+        scan_add_world();
+    // The climb scan is a query per tile, so it runs only when its own
+    // category is showing: "Everything" would pay for it on every press, and
+    // a hundred ledges would bury the doors and the people in it anyway.
+    if (c == SCAN_INTERACT) scan_add_climbs();
+    return scan_end();
+}
+
+static void scan_say(const char* what)
+{
+    logf_("scan: %s\n", what);
+    speech_say_now(what);
+}
+
+static void scan_say_selected(void)
+{
+    ScanItem it;
+    char say[SCAN_MAX_TEXT];
+    if (!scan_selected(&it)) {
+        scan_empty_text(scan_category(), say, sizeof say);
+        scan_say(say);
+        return;
+    }
+    scan_describe(&it, g_scan_from[0], g_scan_from[1], g_scan_from[2],
+                  say, sizeof say);
+    logf_("scan: %s  [%d of %d, %s]\n", say, scan_index(), scan_count(),
+          scan_category_name(scan_category()));
+    speech_say_now(say);
+}
+
+// Page Up and Page Down, with Ctrl for the category and Alt for the storey.
+static void scan_press(int dir, int ctrl, int alt)
+{
+    char say[SCAN_MAX_TEXT];
+
+    if (ctrl) {
+        scan_cycle_category(dir);
+        int n = scan_rebuild();
+        scan_category_text(scan_category(), scan_floor(), n, say, sizeof say);
+        scan_say(say);
+        return;
+    }
+
+    if (alt) {
+        scan_cycle_floor(dir, floor_count());
+        int n = scan_rebuild();
+        char where[48];
+        scan_floor_text(scan_floor(), where, sizeof where);
+        scan_category_text(scan_category(), scan_floor(), n, say, sizeof say);
+        logf_("scan: %s %s\n", where, say);
+        speech_say_now(say);
+        return;
+    }
+
+    scan_rebuild();
+    scan_cycle(dir);
+    scan_say_selected();
+}
+
+// Home: put the cursor on the selection, so the camera goes there and the tile
+// describes itself as a step would. Shift+Home goes back to the soldier.
+//
+// This is the same start nav_press makes on its first key, with one
+// difference: the item's own height is a far better ground estimate than the
+// cursor's, so the floor search usually settles on its first frame.
+static void scan_focus(int tx, int ty, float ground, const char* what)
+{
+    CursorGrid g;
+    if (!cursor_grid(&g)) return;
+
+    nav_begin(tx, ty);
+    g_nav_cursor = cursor_object();
+    g_nav_pawn = NULL;
+    cursor_chained_pawn(&g_nav_pawn);
+    GetCursorPos(&g_nav_mouse);
+    g_nav_parked = 0;
+    navh_set_ground(ground);
+    navh_begin_tile();
+    nav_arrive(tx, ty);
+
+    g_nav_world[0] = g.min_x + ((float)tx + 0.5f) * CURSOR_TILE;
+    g_nav_world[1] = g.min_y + ((float)ty + 0.5f) * CURSOR_TILE;
+    g_nav_world[2] = navh_query_z();
+    g_nav_live = 1;
+    g_nav_key_at = GetTickCount64();
+    logf_("scan: cursor to %s on %d, %d, ground %.1f\n", what, tx, ty, ground);
+}
+
+static void scan_home(int shift)
+{
+    CursorGrid g;
+    char say[SCAN_MAX_TEXT];
+    int tx, ty;
+    float z;
+
+    if (shift) {
+        if (!cursor_grid(&g) || !soldier_tile(&g, &tx, &ty, &z)) {
+            scan_say("No soldier.");
+            return;
+        }
+        scan_focus(tx, ty, z - NAV_CURSOR_LIFT, "the soldier");
+        return;
+    }
+
+    ScanItem it;
+    if (!scan_selected(&it)) {
+        scan_empty_text(scan_category(), say, sizeof say);
+        scan_say(say);
+        return;
+    }
+    scan_focus(it.tx, it.ty, it.world[2], it.name);
+}
+
+// End: how far the selection is and which way. Shift+End answers the same
+// about the soldier, measured from wherever the cursor is now -- the way back.
+static void scan_distance(int shift)
+{
+    CursorGrid g;
+    char say[SCAN_MAX_TEXT];
+
+    if (shift) {
+        int sx, sy, cx, cy;
+        float sz, cz;
+        if (!cursor_grid(&g) || !soldier_tile(&g, &sx, &sy, &sz) ||
+            !cursor_tile(&g, &cx, &cy, &cz)) {
+            scan_say("No soldier.");
+            return;
+        }
+        char where[64];
+        tile_offset_text(sx - cx, sy - cy, where, sizeof where);
+        _snprintf_s(say, sizeof say, _TRUNCATE, "Soldier, %s.", where);
+        scan_say(say);
+        return;
+    }
+
+    ScanItem it;
+    if (!scan_selected(&it)) {
+        scan_empty_text(scan_category(), say, sizeof say);
+        scan_say(say);
+        return;
+    }
+    // Measured afresh from where the soldier is now, not from where the scan
+    // was taken: the point of the key is to ask again after moving.
+    int tx, ty, tz;
+    if (scan_origin(&g, &tx, &ty, &tz, &g_scan_world_z)) {
+        g_scan_grid = g;
+        g_scan_from[0] = tx; g_scan_from[1] = ty; g_scan_from[2] = tz;
+        g_scan_have = 1;
+    }
+    scan_describe(&it, g_scan_from[0], g_scan_from[1], g_scan_from[2],
+                  say, sizeof say);
+    scan_say(say);
+}
+
+// The scanner's keys. Page Up and Page Down are unbound in a mission, and Home
+// only raises an InputEvent nothing handles, so all three are read the way the
+// numpad is. End is the exception -- it is End Turn -- and is swallowed in
+// hook_moviecheck, which is the only reason it can be used here.
+static int g_scan_down[4];      // Page Up, Page Down, Home, End
+
+static void scan_poll(void)
+{
+    static const int keys[4] = { VK_PRIOR, VK_NEXT, VK_HOME, VK_END };
+    int ctrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    int alt   = (GetAsyncKeyState(VK_MENU)    & 0x8000) != 0;
+    int shift = (GetAsyncKeyState(VK_SHIFT)   & 0x8000) != 0;
+
+    for (int k = 0; k < 4; k++) {
+        int down = (GetAsyncKeyState(keys[k]) & 0x8000) != 0;
+        if (down && !g_scan_down[k]) {
+            Fault f;
+            __try {
+                switch (k) {
+                case 0: scan_press(-1, ctrl, alt); break;
+                case 1: scan_press(+1, ctrl, alt); break;
+                case 2: scan_home(shift);          break;
+                case 3: scan_distance(shift);      break;
+                }
+            }
+            __except (fault_note(GetExceptionInformation(), &f)) {
+                fault_log("scan", &f, NULL);
+            }
+        }
+        g_scan_down[k] = down;
+    }
+}
+
 static void nav_poll(void)
 {
     // Practice owns the numpad while it is on (learn.h). Navigation stands
@@ -2371,6 +3165,7 @@ static void nav_poll(void)
     if (learn_active()) {
         if (nav_active()) nav_stop("sound practice");
         memset(g_numpad_down, 0, sizeof g_numpad_down);
+        memset(g_scan_down, 0, sizeof g_scan_down);
         g_radar_down[0] = g_radar_down[1] = 0;
         g_walls_down = 0;
         g_glide_digit = 0;
@@ -2418,8 +3213,16 @@ static void nav_poll(void)
                   g_nav_path_tile[0], g_nav_path_tile[1], navh_ground());
             nav_say_no_path(g_nav_path_tile[0], g_nav_path_tile[1]);
         } else if (g_step_pending && GetTickCount64() >= g_step_deadline) {
-            logf_("nav: nothing decided the tile in %d ms -- saying what is known\n",
-                  STEP_FALLBACK_MS);
+            // How many times the game computed a path while this step was
+            // waiting. Zero means the game never tried, which is a different
+            // fault from a path that came back late, and the two are not
+            // otherwise distinguishable from out here: both look like
+            // silence. XGAction_Path.m_bDoPathingTick is what gates it, and
+            // Mouse_CheckForPathing clears that whenever the Flash hit test
+            // says the mouse was consumed -- so a run of zeroes here should
+            // be read next to the "Flash hit test" lines.
+            logf_("nav: nothing decided the tile in %d ms (%ld path calls) "
+                  "-- saying what is known\n", STEP_FALLBACK_MS, g_path_calls);
             nav_step_say("");
             g_step_late = nav_target(&g_step_late_at[0], &g_step_late_at[1]);
         } else if (!g_nav_parked && g_nav_placed_at < g_nav_key_at &&
@@ -2432,6 +3235,7 @@ static void nav_poll(void)
         // Forget what was held, so a key released while the game was in the
         // background does not read as a fresh press on return.
         memset(g_numpad_down, 0, sizeof g_numpad_down);
+        memset(g_scan_down, 0, sizeof g_scan_down);
         g_radar_down[0] = g_radar_down[1] = 0;
         g_walls_down = 0;
         g_glide_digit = 0;
@@ -2513,6 +3317,11 @@ static void nav_poll(void)
         speech_say_now(g_walls_on ? "Wall sound on." : "Wall sound off.");
     }
     g_walls_down = walls;
+
+    // The scanner: Page Up, Page Down, Home, End. Read here rather than in a
+    // poll of its own so it shares the guards this one already applies --
+    // practice has taken the keys, the game has the foreground.
+    scan_poll();
 
     // Last, so a step taken this frame is already in the target the field
     // listens from.
@@ -2772,6 +3581,7 @@ static int      g_pick_logged;
 // picked something at least once this navigation, the frame is left as it was.
 static uint32_t g_pick_iface_off;       // CachedMouseInteractionInterface
 static void*    g_pick_iface_seen[2];   // the last one the mouse itself hit
+static void*    g_pick_iface_cursor;    // the cursor it was seen under
 static void**   g_pick_iface_lent;      // where it was lent, to take back
 static int      g_pick_iface_state = -1;
 
@@ -2807,6 +3617,7 @@ static void nav_lend_interface(void* hud)
     if (slot[0]) {                      // the mouse picked something itself
         g_pick_iface_seen[0] = slot[0];
         g_pick_iface_seen[1] = slot[1];
+        g_pick_iface_cursor = cursor_object();
         // Only worth a line as the answer to one that said it had stopped.
         if (g_pick_iface_state == 0)
             logf_("nav: the mouse picks the map again\n");
@@ -2816,9 +3627,13 @@ static void nav_lend_interface(void* hud)
 
     // Lending a destroyed actor would be read once, by the next frame's
     // mouse-out, so the remembered one is checked for still being an object
-    // before it goes back in.
+    // before it goes back in -- and for having been seen on this map, since a
+    // new mission spawns a new cursor and everything the old one pointed at is
+    // gone.
     char name[128];
-    int alive = g_pick_iface_seen[0] && readable(g_pick_iface_seen[0], 0x60) &&
+    int alive = g_pick_iface_seen[0] &&
+                g_pick_iface_cursor == cursor_object() &&
+                readable(g_pick_iface_seen[0], 0x60) &&
                 object_name(g_pick_iface_seen[0], name, sizeof name) && name[0];
     if (alive) {
         slot[0] = g_pick_iface_seen[0];
@@ -2836,13 +3651,16 @@ static void nav_lend_interface(void* hud)
     }
 }
 
-// Navigation is over: the remembered actor is dropped rather than carried
-// into a battle, or a map, where it no longer exists.
+// Navigation is over. What was lent goes back, but what was *seen* is kept:
+// the mouse having picked the map once is the only thing that lets a later
+// navigation start placing straight away, and dropping it per navigation left
+// "none to lend, the game will refuse the placement" -- thirteen steps of bare
+// coordinates, 1.5 s apart, in the run of 2026-09-20. It is dropped when the
+// cursor is replaced instead, which is where it actually stops being valid;
+// nav_lend_interface makes that check.
 static void nav_forget_interface(void)
 {
     nav_return_interface_guarded();
-    g_pick_iface_seen[0] = NULL;
-    g_pick_iface_seen[1] = NULL;
     g_pick_iface_state = -1;
 }
 
@@ -3074,6 +3892,7 @@ static void nav_path_result(void* self, void* stack, void* result)
 static ExecFn g_orig_computepath;
 static void __fastcall hook_computepath(void* self, void* edx, void* stack, void* result)
 {
+    InterlockedIncrement(&g_path_calls);
     g_orig_computepath(self, edx, stack, result);
     Fault f;
     __try { nav_path_result(self, stack, result); }
@@ -3084,18 +3903,42 @@ static void __fastcall hook_computepath(void* self, void* edx, void* stack, void
 
 // Whether Flash took a click. InputEvent asks this, through
 // TestMouseConsumedByFlash, before a mouse button may reach RMouse.
+//
+// It is asked several times a frame, so the answer is written when it
+// *changes* and once per confirm, rather than every time. One mission left
+// 1,370 identical "miss" lines, and each had paid for a frame_chain first --
+// five UnrealScript frames walked, a name decoded for each -- to repeat what
+// the first line had already said. The chain is now built only for a line
+// that is going to be written.
+//
+// The change is logged whether or not a confirm is recent, because this
+// answer is not only about clicks: Mouse_CheckForPathing reads it every frame
+// and clears XGAction_Path.m_bDoPathingTick the moment it comes back true,
+// which stops the game pathing until a later frame says false again. Cutting
+// this line back to the confirm window took away the only evidence of that,
+// and a run where nothing was ever pathed could not be told from a run where
+// the paths were merely late. A flip is a handful of lines a mission; the
+// silence in between is the useful part.
+static ULONGLONG g_flash_said_for;
+static int       g_flash_last = -1;
+
 static ExecFn g_orig_flashhit;
 static void __fastcall hook_flashhit(void* self, void* edx, void* stack, void* result)
 {
     g_orig_flashhit(self, edx, stack, result);
     Fault f;
     __try {
-        if (nav_confirm_window()) {
+        int hit = *(int32_t*)result != 0;
+        int changed = hit != g_flash_last;
+        int confirmed = nav_confirm_window() && g_flash_said_for != g_nav_confirm_at;
+        if (changed || confirmed) {
+            g_flash_last = hit;
+            if (confirmed) g_flash_said_for = g_nav_confirm_at;
             char chain[256];
             frame_chain(stack, 5, chain, sizeof chain);
-            logf_("nav: after confirm, Flash hit test %s: %s\n",
-                  *(int32_t*)result ? "HIT -- the click goes to the HUD" : "miss",
-                  chain);
+            logf_("nav: Flash hit test %s%s: %s\n",
+                  hit ? "HIT -- the mouse is on the HUD, pathing stops" : "miss",
+                  confirmed ? ", after confirm" : "", chain);
         }
     }
     __except (fault_note(GetExceptionInformation(), &f)) {
@@ -3109,6 +3952,70 @@ static void __fastcall hook_flashhit(void* self, void* edx, void* stack, void* r
 // -- taken by position, as rewrite_cmd does. Logged only for two seconds after
 // Numpad 0, so the log shows whether the right click arrived as 405 and in
 // what order, without a line per key for the rest of the mission.
+// Reads the Cmd off an InputEvent frame, or -1 when this is not one. The
+// native XComEngine.IsAnyMoviePlaying is called from InputEvent on every bound
+// key, in both builds, so its caller's frame carries (Cmd, Actionmask) -- by
+// position, as rewrite_cmd takes them.
+static int input_event_cmd(void* stack, int* mask_out)
+{
+    if (!readable(stack, 0x20)) return -1;
+    void* node = *(void**)((uint8_t*)stack + FFRAME_NODE);
+    uint8_t* locals = *(uint8_t**)((uint8_t*)stack + FFRAME_LOCALS);
+    char name[128];
+    if (!locals || !object_name(node, name, sizeof name) ||
+        strcmp(name, "InputEvent") != 0)
+        return -1;
+
+    int vals[2], nvals = 0;
+    void* prop = NULL;
+    if (readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
+        prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
+    for (int guard = 0; prop && guard < MAX_FIELDS && nvals < 2; guard++) {
+        if (!readable(prop, 0x68)) return -1;
+        uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
+        uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
+        if ((flags & CPF_PARM) && !(flags & CPF_RETURNPARM) &&
+            props_kind(prop) == PROP_INT && off < 0x1000 &&
+            readable(locals + off, sizeof(int32_t)))
+            vals[nvals++] = *(int32_t*)(locals + off);
+        prop = *(void**)((uint8_t*)prop + UFIELD_NEXT);
+    }
+    if (nvals < 1) return -1;
+    if (mask_out) *mask_out = nvals == 2 ? vals[1] : 0;
+    return vals[0];
+}
+
+// End is the scanner's "how far, and which way" key, and it is also the
+// secondary binding for Backspace_Key_Press -- which is PerformEndTurn. So it
+// has to be taken away from the game, and InputEvent offers exactly one place
+// to do that:
+//
+//     if(Class'XComGame.XComEngine'.static.IsAnyMoviePlaying())
+//     {
+//         return;
+//     }
+//
+// which sits above PreProcessCheckGameLogic and everything that acts on a key.
+// Forcing that native true for one call makes InputEvent return, and the turn
+// does not end.
+//
+// Only for End. Cmd 512 is raised by Backspace as well -- that is its primary
+// binding -- so the key itself decides: End down and Backspace up, or the
+// press is left alone. A player who wants to end the turn with Backspace still
+// can, and one who wants to with End can hold Backspace... which is why the
+// help says End is the scanner's now.
+#define INPUT_CMD_BACKSPACE 512
+
+static int input_is_our_end(int cmd)
+{
+    if (cmd != INPUT_CMD_BACKSPACE) return 0;
+    if (!(GetAsyncKeyState(VK_END) & 0x8000)) return 0;
+    if (GetAsyncKeyState(VK_BACK) & 0x8000) return 0;
+    return 1;
+}
+
+static int g_end_swallowed;
+
 static void nav_watch_input(void* stack)
 {
     if (!nav_confirm_window()) return;
@@ -3142,11 +4049,31 @@ static ExecFn g_orig_moviecheck;
 static void __fastcall hook_moviecheck(void* self, void* edx, void* stack, void* result)
 {
     Fault f;
-    __try { nav_watch_input(stack); }
+    int swallow = 0;
+    __try {
+        nav_watch_input(stack);
+        int mask = 0;
+        swallow = input_is_our_end(input_event_cmd(stack, &mask));
+        if (swallow && !g_end_swallowed) {
+            g_end_swallowed = 1;
+            logf_("scan: End taken from the game (cmd %d, mask %d) -- "
+                  "the turn does not end\n", INPUT_CMD_BACKSPACE, mask);
+        }
+    }
     __except (fault_note(GetExceptionInformation(), &f)) {
         fault_log("nav: watch input", &f, NULL);
     }
     g_orig_moviecheck(self, edx, stack, result);
+
+    // After the original, because what is being replaced is its answer.
+    if (swallow) {
+        __try {
+            if (writable(result, sizeof(int32_t))) *(int32_t*)result = 1;
+        }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("scan: swallow End", &f, NULL);
+        }
+    }
 }
 
 static ExecFn g_orig_validpos;
@@ -3264,6 +4191,7 @@ static DWORD WINAPI init(LPVOID param)
     else
         logf_("names: UNAVAILABLE (%s) -- falling back to raw pointers\n", why);
 
+
     char dll_dir[MAX_PATH];
     GetModuleFileNameA(g_self, dll_dir, MAX_PATH);
     slash = strrchr(dll_dir, '\\');
@@ -3348,10 +4276,11 @@ static DWORD WINAPI init(LPVOID param)
     free(tbl);
     if (!armed) { logf_("FATAL: nothing armed\n"); return 1; }
 
-    logf_("%d/3 text hooks armed, key remap %s, cursor watch %s, grid %s, nav %s"
-          " -- navigate the UI to produce traffic\n---\n",
+    logf_("%d/3 text hooks armed, key remap %s, cursor watch %s, grid %s, nav %s,"
+          " scanner %s -- navigate the UI to produce traffic\n---\n",
           armed, input_armed ? "on" : "OFF", cursor_armed ? "on" : "OFF",
-          grid_armed ? "on" : "OFF", nav_armed ? "on" : "OFF");
+          grid_armed ? "on" : "OFF", nav_armed ? "on" : "OFF",
+          nav_armed ? "on" : "OFF");
 
     // Said aloud, because the log is the one part of this mod its user cannot
     // read.  Now that the launcher attaches during startup rather than on
@@ -3359,6 +4288,19 @@ static DWORD WINAPI init(LPVOID param)
     speech_say(armed == 3 && input_armed
                ? "Accessibility mod ready."
                : "Accessibility mod loaded with errors. Check the log.");
+
+    // The object table, for the scanner: doors, ladders and the Meld are level
+    // actors that nothing else in this DLL would ever see. Last, and after the
+    // banner, because nothing the arming does not need belongs in front of it:
+    // the launcher waits ten seconds for that line and then tells the player
+    // the mod did not arm. An early version of this probe took longer than
+    // that, and the report was "attached but did not arm" about a mod that had
+    // armed perfectly. Not a failure if it is missing either -- the scanner
+    // still has the units, and scan_add_world asks again in a mission.
+    if (objects_init(mod, why, sizeof why))
+        logf_("objects: %s\n", why);
+    else
+        logf_("objects: UNAVAILABLE (%s) -- the scanner will have no doors\n", why);
     return 0;
 }
 

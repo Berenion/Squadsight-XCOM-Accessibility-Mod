@@ -183,6 +183,39 @@ int object_field_offset(const void* obj, const char* name, uint32_t* out)
     return field_offset(cls, name, out);
 }
 
+uint32_t object_super_offset(void) { return g_super_off; }
+
+int object_class_name(const void* obj, char* out, size_t out_sz)
+{
+    if (out && out_sz) out[0] = 0;
+    uint32_t class_off = props_class_offset();
+    if (!obj || !class_off) return 0;
+    if (!readable((const uint8_t*)obj + class_off, sizeof(void*))) return 0;
+    const void* cls = *(const void* const*)((const uint8_t*)obj + class_off);
+    if (!cls || !readable(cls, 0x60)) return 0;
+    return object_name((void*)cls, out, out_sz);
+}
+
+int object_is_a(const void* obj, const char* name)
+{
+    uint32_t class_off = props_class_offset();
+    if (!obj || !name || !class_off) return 0;
+    if (!readable((const uint8_t*)obj + class_off, sizeof(void*))) return 0;
+    const void* cls = *(const void* const*)((const uint8_t*)obj + class_off);
+    if (!cls || !readable(cls, 0x60)) return 0;
+    if (!find_super_offset(cls)) return 0;
+
+    for (int depth = 0; cls && depth < 32; depth++) {
+        char got[128];
+        if (!object_name((void*)cls, got, sizeof got)) return 0;
+        if (strcmp(got, name) == 0) return 1;
+        if (!readable((const uint8_t*)cls + g_super_off, sizeof(void*))) return 0;
+        cls = *(const void* const*)((const uint8_t*)cls + g_super_off);
+        if (cls && !readable(cls, 0x60)) return 0;
+    }
+    return 0;
+}
+
 const void* object_field_prop(const void* obj, const char* name)
 {
     uint32_t class_off = props_class_offset();

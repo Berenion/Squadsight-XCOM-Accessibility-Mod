@@ -65,6 +65,22 @@ int object_field_offset(const void* obj, const char* name, uint32_t* out);
 // is one bit of a dword (props_read_bool). NULL when there is no such field.
 const void* object_field_prop(const void* obj, const char* name);
 
+// Whether an object's class is `name`, or anything below it -- the class chain
+// walked the same way object_field_offset walks it. The scanner asks this of
+// every object in the game's table, so it is a name comparison per class in
+// the chain and nothing more.
+int object_is_a(const void* obj, const char* name);
+
+// The name of an object's own class, for the log and for naming a thing the
+// scanner has no better word for. Returns 0 when it cannot be read.
+int object_class_name(const void* obj, char* out, size_t out_sz);
+
+// Where UStruct::SuperStruct was found, or 0 before any class chain has been
+// walked. Exposed because objects.c matches classes by pointer rather than by
+// name, and needs to climb the chain itself -- once per object in the game's
+// whole table, where a name comparison would be far too slow.
+uint32_t object_super_offset(void);
+
 // The soldier the cursor is leashed to (XCom3DCursor.ChainedPawn), which
 // changes when the player switches soldier.  Returns 0 when it could not be
 // resolved or read; *out may be NULL on success.

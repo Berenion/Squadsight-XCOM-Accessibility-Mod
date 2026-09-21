@@ -163,3 +163,29 @@ int object_name(const void* obj, char* out, size_t out_sz)
     return name_to_string((const FName*)((const uint8_t*)obj + UOBJECT_NAME),
                           out, out_sz);
 }
+
+void names_find(const char* const* texts, int32_t* out, int n)
+{
+    for (int i = 0; i < n; i++) out[i] = -1;
+    if (!g_names || !texts || n <= 0) return;
+    if (!readable(g_names, sizeof *g_names)) return;
+
+    void** data = (void**)g_names->Data;
+    int total = g_names->Num;
+    int left = n;
+
+    for (int i = 0; i < total && left; i++) {
+        if (!readable(&data[i], sizeof(void*))) break;
+        void* entry = data[i];
+        if (!entry) continue;
+        char buf[256];
+        if (!decode_entry(entry, g_name_off, buf, sizeof buf)) continue;
+        for (int k = 0; k < n; k++) {
+            if (out[k] >= 0 || !texts[k]) continue;
+            if (strcmp(buf, texts[k]) != 0) continue;
+            out[k] = i;
+            left--;
+            break;
+        }
+    }
+}
