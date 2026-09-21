@@ -26,12 +26,33 @@
 // changes, so an announcement identical to the last one is dropped. Without
 // that, holding a direction would repeat the same shot indefinitely.
 //
-// What is missing from this panel is *who* is being aimed at: the game shows
-// that with a reticule and puts the name only on the unit's flag
-// (UIUnitFlag.SetNames). Naming the target is the next piece, and a separate
-// one.
+// What this panel does not say is *who* is being aimed at: the game shows that
+// with a reticule and puts the name only on the unit's flag. So the target is
+// described from its flag -- what the flag draws, and nothing it does not --
+// and handed in with shot_set_target before the burst ends. It leads the
+// announcement when it is news, which is what makes Tab audible: two targets
+// at the same odds used to be the same announcement, and the second was
+// dropped as a repeat.
 
 #define SHOT_MAX_TEXT 512
+
+// Who a shot is aimed at, as the screen shows it.
+typedef struct {
+    const char* name;       // the flag's SetNames; "" or NULL when unnamed
+    const char* cover;      // the flag's SetCover shield: "_highCover", "_lowCover",
+                            // "_megaCover", "_none"; "" or NULL when unknown
+    int flanked;            // the shield's flanked state; 1, 0, or -1 unknown
+    int hp, hp_max;         // as the flag displays them; -1 when it shows none
+    int index, count;       // place in the Tab cycle, 0-based; count 0 unknown
+} ShotTarget;
+
+// "Sectoid, 2 of 3. Low cover, flanked. 3 of 4 HP."  Anything unknown is
+// left out rather than guessed.
+void shot_describe_target(const ShotTarget* t, char* out, size_t out_sz);
+
+// The target described for the burst in progress, "" for none. Read by the
+// call that ends the burst, so it must be set before that call.
+void shot_set_target(const char* text);
 
 // True when `obj_name` is the tactical info panel.
 int shot_is_panel(const char* obj_name);

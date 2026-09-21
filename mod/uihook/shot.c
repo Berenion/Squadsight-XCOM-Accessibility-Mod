@@ -10,8 +10,10 @@ static struct {
     char chance[64];
     char crit[64];
     char weapon[SHOT_MAX_TEXT];
+    char target[SHOT_MAX_TEXT];
     char said[SHOT_MAX_TEXT];     // what was last announced, verbatim
     char said_weapon[SHOT_MAX_TEXT];
+    char said_target[SHOT_MAX_TEXT];
 } g = { 1 };    // available until told otherwise, as shot_reset leaves it;
                 // the DLL never calls shot_reset, so this is its start state
 
@@ -66,6 +68,60 @@ static int is_zero_percent(const char* v)
         else if (*v != '.' && *v != '%' && *v != ' ') return 0;
     }
     return digits > 0;
+}
+
+void shot_set_target(const char* text)
+{
+    set(g.target, sizeof g.target, text);
+}
+
+// The flag's shield, in words. The flag draws one of four; an EU cover point
+// that is neither high nor low sends an empty string, which is left unsaid.
+static const char* cover_words(const char* shield)
+{
+    if (!shield) return NULL;
+    if (strcmp(shield, "_highCover") == 0) return "High cover";
+    if (strcmp(shield, "_lowCover") == 0)  return "Low cover";
+    // Hunker Down (TakeCover), or a unit whose cover is always the best.
+    if (strcmp(shield, "_megaCover") == 0) return "Hunkered down";
+    if (strcmp(shield, "_none") == 0)      return "No cover";
+    return NULL;
+}
+
+void shot_describe_target(const ShotTarget* t, char* out, size_t out_sz)
+{
+    if (!out || out_sz == 0) return;
+    out[0] = 0;
+    if (!t || !t->name || !t->name[0]) return;
+
+    char piece[SHOT_MAX_TEXT];
+
+    // The place in the cycle only when there is a cycle: "1 of 1" says
+    // nothing a lone name does not.
+    if (t->count > 1 && t->index >= 0 && t->index < t->count)
+        _snprintf_s(piece, sizeof piece, _TRUNCATE, "%s, %d of %d",
+                    t->name, t->index + 1, t->count);
+    else
+        set(piece, sizeof piece, t->name);
+    join(out, out_sz, piece);
+
+    // The game sets the flanked state only on a unit that is in cover, so
+    // it qualifies the cover rather than standing alone.
+    const char* cover = cover_words(t->cover);
+    if (cover) {
+        if (t->flanked == 1 && strcmp(t->cover, "_none") != 0)
+            _snprintf_s(piece, sizeof piece, _TRUNCATE, "%s, flanked", cover);
+        else
+            set(piece, sizeof piece, cover);
+        join(out, out_sz, piece);
+    }
+
+    // -1 is the flag hiding an enemy's health (the "show enemy health"
+    // option off); nothing is drawn, so nothing is said.
+    if (t->hp >= 0 && t->hp_max > 0) {
+        _snprintf_s(piece, sizeof piece, _TRUNCATE, "%d of %d HP", t->hp, t->hp_max);
+        join(out, out_sz, piece);
+    }
 }
 
 int shot_note(const char* fn, const char* a, const char* b, int flag,
@@ -129,16 +185,27 @@ int shot_note(const char* fn, const char* a, const char* b, int flag,
     // changes -- which is exactly when switching ability changes the weapon.
     int weapon_is_news = g.weapon[0] && strcmp(g.weapon, g.said_weapon) != 0;
 
+    // The target the same way: said when it changes, which is what Tab does,
+    // and not again while the player tries abilities against it. Losing the
+    // target is not news on its own -- the shot that has none says so.
+    int target_is_news = g.target[0] && strcmp(g.target, g.said_target) != 0;
+
     // Update runs whenever the targeting state is touched, not only when it
     // changes.
-    if (!weapon_is_news && strcmp(core, g.said) == 0) return 0;
+    if (!weapon_is_news && !target_is_news && strcmp(core, g.said) == 0) {
+        set(g.said_target, sizeof g.said_target, g.target);
+        return 0;
+    }
 
     char full[SHOT_MAX_TEXT];
     full[0] = 0;
+    // The target first: it is what the key just changed.
+    if (target_is_news) join(full, sizeof full, g.target);
     join(full, sizeof full, core);
     if (weapon_is_news) join(full, sizeof full, g.weapon);
 
     set(g.said, sizeof g.said, core);
+    set(g.said_target, sizeof g.said_target, g.target);
     if (g.weapon[0]) set(g.said_weapon, sizeof g.said_weapon, g.weapon);
     strncpy_s(out, out_sz, full, _TRUNCATE);
     return 1;

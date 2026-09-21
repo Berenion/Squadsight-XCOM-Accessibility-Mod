@@ -475,11 +475,13 @@ static int is_selection_fn(const char* fn)
 // rather than swept, and a selection index is as readable as a label.
 #define ASVALUE_STRIDE 24
 #define ASVALUE_TYPE   0
+#define ASVALUE_B      4
 #define ASVALUE_N      8
 #define ASVALUE_S      12
 
 #define AS_NUMBER 2
 #define AS_STRING 3
+#define AS_BOOL   4
 
 typedef struct {
     char  strings[FOCUS_MAX_LABELS][FOCUS_MAX_LABEL];
@@ -488,6 +490,11 @@ typedef struct {
     int   nnumbers;
     int   bools[8];
     int   nbools;
+    // Bools found inside an ASValue array, apart from the parameter bools
+    // above: everything that reads `bools` was written expecting parameters
+    // only, and a setter passes the same flag both ways.
+    int   abools[8];
+    int   nabools;
 } Payload;
 
 static void payload_add_string(Payload* p, const char* s)
@@ -540,6 +547,8 @@ static void read_array(const FArray* a, Payload* out)
                     }
                 } else if (ty == AS_NUMBER) {
                     payload_add_number(out, *(const float*)(e + ASVALUE_N));
+                } else if (ty == AS_BOOL && out->nabools < 8) {
+                    out->abools[out->nabools++] = *(const int32_t*)(e + ASVALUE_B) != 0;
                 }
             }
             return;
@@ -572,6 +581,8 @@ static ULONGLONG g_last_at;
 static __declspec(thread) char tls_where[256];
 
 static void unit_note(void* flag, const char* name, const char* nick);
+static void unit_flag_drew(void* flag, const char* fn, const Payload* p);
+static void shot_target_now(void* stack);
 
 static void capture_body(const char* tag, LONG n, void* stack)
 {
@@ -606,6 +617,7 @@ static void capture_body(const char* tag, LONG n, void* stack)
     p->nstrings = 0;
     p->nnumbers = 0;
     p->nbools   = 0;
+    p->nabools  = 0;
 
     void* prop = NULL;
     if (readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
@@ -661,6 +673,8 @@ static void capture_body(const char* tag, LONG n, void* stack)
                                ? p->strings[1] : "";
         unit_note(object, p->strings[0], nick);
     }
+    if (strncmp(obj_name, "UIUnitFlag_", 11) == 0)
+        unit_flag_drew(object, fn_name, p);
 
     if (shot_is_panel(obj_name)) {
         // Each argument arrives twice -- once as the parameter, once inside
@@ -678,6 +692,11 @@ static void capture_body(const char* tag, LONG n, void* stack)
             break;
         }
         int flag = p->nbools ? p->bools[0] : -1;
+
+        // Who the shot is at, looked up as the burst ends, since that is the
+        // one call made from inside Update and so the one with the soldier
+        // in reach.
+        if (strstr(fn_name, "UpdateLayout")) shot_target_now(stack);
 
         char say[SHOT_MAX_TEXT];
         if (shot_note(fn_name, a, b, flag, say, sizeof say)) {
@@ -1650,10 +1669,17 @@ static int tile_dash(int* cost_out, int* std_out, int* max_out, int* moves_out,
 // queries. A unit it cannot be asked about counts as unseen.
 #define UNIT_MAX 64
 
+// The flag also draws a cover shield and hit points, which is what the shot
+// readout says about a target; they are kept as the flag last drew them.
+// UIUnitFlag.OnInit sends SetHitPoints before SetNames, so an entry can exist
+// for a moment with no name, and unit_seen passes over it until it has one.
 typedef struct {
     void* flag;
     char  name[64];
     char  nick[64];
+    char  cover[16];    // RealizeCover's shield: "_highCover" ... "" unknown
+    int   flanked;      // the shield's flanked state, -1 unknown
+    int   hp, hp_max;   // as displayed, -1 when the flag shows none
 } UnitName;
 
 static UnitName  g_units[UNIT_MAX];
@@ -1673,24 +1699,34 @@ static void unit_forget(UnitName* u)
     u->nick[0] = 0;
 }
 
-static void unit_note(void* flag, const char* name, const char* nick)
+// The entry for a flag, made if there is none.
+static UnitName* unit_entry(void* flag)
 {
-    if (!flag) return;
+    if (!flag) return NULL;
     int i, free_slot = -1;
     for (i = 0; i < g_nunits && g_units[i].flag != flag; i++)
         if (!g_units[i].flag && free_slot < 0) free_slot = i;
-    if (i == g_nunits) {
-        // A mission's worth of flags is dropped as its units die, so the
-        // emptied slots are where the next mission's go. Without this a long
-        // session would fill the table with the dead and stop noticing the
-        // living.
-        if (free_slot >= 0) i = free_slot;
-        else if (g_nunits < UNIT_MAX) g_nunits++;
-        else return;
-    }
-    g_units[i].flag = flag;
-    strncpy_s(g_units[i].name, sizeof g_units[i].name, name, _TRUNCATE);
-    strncpy_s(g_units[i].nick, sizeof g_units[i].nick, nick, _TRUNCATE);
+    if (i < g_nunits) return &g_units[i];
+    // A mission's worth of flags is dropped as its units die, so the emptied
+    // slots are where the next mission's go. Without this a long session
+    // would fill the table with the dead and stop noticing the living.
+    if (free_slot >= 0) i = free_slot;
+    else if (g_nunits < UNIT_MAX) g_nunits++;
+    else return NULL;
+    UnitName* u = &g_units[i];
+    memset(u, 0, sizeof *u);
+    u->flag = flag;
+    u->flanked = -1;
+    u->hp = u->hp_max = -1;
+    return u;
+}
+
+static void unit_note(void* flag, const char* name, const char* nick)
+{
+    UnitName* u = unit_entry(flag);
+    if (!u) return;
+    strncpy_s(u->name, sizeof u->name, name, _TRUNCATE);
+    strncpy_s(u->nick, sizeof u->nick, nick, _TRUNCATE);
 }
 
 typedef struct {
@@ -1749,7 +1785,7 @@ static int unit_is_live(void* obj)
 static int unit_seen(UnitName* u, void* squad, UnitSeen* out)
 {
     const void* v;
-    if (!u->flag) return 0;
+    if (!u->flag || !u->name[0]) return 0;
     if (!field_ptr(u->flag, "m_kUnit", &g_flag_unit, sizeof(void*), &v)) {
         // A flag whose class has no m_kUnit is not a flag any more. Flags
         // are destroyed with their units -- eleven Chryssalids and zombies
@@ -1880,6 +1916,171 @@ static void units_on_tile(int tx, int ty, int have_floor, float floor,
                             used ? " " : "", label);
         if (w < 0) break;
         used += (size_t)w;
+    }
+}
+
+// ---- the target ------------------------------------------------------------
+//
+// What a flag draws besides its name, kept for the shot readout. Both calls
+// carry the displayed value in the ASValue array they build, and that is the
+// value taken -- not the parameters, which for hit points are the raw figure
+// before the game divides it down and before "show enemy health" hides it.
+//
+//     SetHitPoints(int _currentHP, int _maxHP)   array: current, max; -1, -1 hidden
+//     RealizeCover()                             array: "_highCover".., flanked
+//
+// Parameters come first in a frame's property chain and the array is a local,
+// so SetHitPoints reads as four numbers and the last two are the ones drawn.
+static void unit_flag_drew(void* flag, const char* fn, const Payload* p)
+{
+    if (strcmp(fn, "SetHitPoints") == 0) {
+        if (p->nnumbers < 4) return;
+        UnitName* u = unit_entry(flag);
+        if (!u) return;
+        u->hp = (int)p->numbers[2];
+        u->hp_max = (int)p->numbers[3];
+        return;
+    }
+    if (strcmp(fn, "RealizeCover") == 0) {
+        UnitName* u = unit_entry(flag);
+        if (!u) return;
+        u->cover[0] = 0;
+        for (int i = 0; i < p->nstrings; i++)
+            if (p->strings[i][0] == '_') {
+                strncpy_s(u->cover, sizeof u->cover, p->strings[i], _TRUNCATE);
+                break;
+            }
+        u->flanked = p->nabools ? p->abools[0] : -1;
+    }
+}
+
+// The flag whose unit is `unit`, or NULL. Pointers are compared and nothing
+// is called, so a unit that has since gone costs a failed match, not a fault.
+static UnitName* unit_by_unit(const void* unit)
+{
+    for (int i = 0; i < g_nunits; i++) {
+        UnitName* u = &g_units[i];
+        const void* v;
+        if (!u->flag || !u->name[0]) continue;
+        if (!field_ptr(u->flag, "m_kUnit", &g_flag_unit, sizeof(void*), &v)) {
+            unit_forget(u);     // see unit_seen: not a flag any more
+            continue;
+        }
+        if (*(void* const*)v == unit) return u;
+    }
+    return NULL;
+}
+
+// Who the shot being announced is aimed at, handed to shot.c.
+//
+// UpdateLayout is called from UITacticalHUD_InfoPanel.Update(XGUnit kUnit,
+// XGAbility kAbility) and from nowhere else, in either build, so the frame
+// above it holds the soldier as its first parameter. From there it is fields
+// all the way: the soldier's m_kCurrAction is the targeting action
+// (XGAction_Targeting in EW, XGAction_Fire in EU, the same field names in
+// both), whose m_kTargetedEnemy is what Tab cycles through
+// m_arrInteractionList_ConstrainedByAbilities. By the time Tab re-runs Update
+// the new target is already set: NextTarget assigns it, then
+// UITacticalHUD.SelectNextTarget rebuilds the ability menu, which is what
+// calls Update.
+//
+// The parameter is taken by position, not by name, for the reason the traps
+// section of the handoff gives.
+static FieldSlot g_curr_action, g_targeted, g_target_list;
+static void*     g_shot_node;           // Update, once confirmed
+static uint32_t  g_shot_unit_off;       // its first parameter
+static int       g_shot_node_logged;
+static char      g_shot_target_logged[SHOT_MAX_TEXT];
+
+static void shot_target_now(void* stack)
+{
+    shot_set_target("");
+    if (!readable((uint8_t*)stack + FFRAME_PREVIOUS, sizeof(void*))) return;
+    void* frame = *(void**)((uint8_t*)stack + FFRAME_PREVIOUS);
+    if (!frame || !readable(frame, FFRAME_PREVIOUS + sizeof(void*))) return;
+    void* node = *(void**)((uint8_t*)frame + FFRAME_NODE);
+    uint8_t* locals = *(uint8_t**)((uint8_t*)frame + FFRAME_LOCALS);
+    if (!node || !locals) return;
+
+    if (node != g_shot_node) {
+        char name[128];
+        uint32_t off = 0;
+        int found = 0;
+        if (object_name(node, name, sizeof name) && strcmp(name, "Update") == 0) {
+            void* prop = NULL;
+            if (readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
+                prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
+            for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
+                if (!readable(prop, 0x68)) break;
+                uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
+                if ((flags & CPF_PARM) && !(flags & CPF_RETURNPARM)) {
+                    off = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
+                    found = off < 0x1000;
+                    break;
+                }
+                prop = *(void**)((uint8_t*)prop + UFIELD_NEXT);
+            }
+        }
+        if (!found) {
+            if (!g_shot_node_logged) {
+                g_shot_node_logged = 1;
+                logf_("shot: the frame above UpdateLayout is %s, not Update(kUnit, ..) "
+                      "-- the target will not be named\n",
+                      object_name(node, name, sizeof name) ? name : "unreadable");
+            }
+            return;
+        }
+        g_shot_node = node;
+        g_shot_unit_off = off;
+        logf_("shot: soldier is Update's first parameter, +0x%X\n", off);
+    }
+
+    if (!readable(locals + g_shot_unit_off, sizeof(void*))) return;
+    void* unit = *(void**)(locals + g_shot_unit_off);
+    const void* v;
+    if (!unit || !unit_is_live(unit) ||
+        !field_ptr(unit, "m_kCurrAction", &g_curr_action, sizeof(void*), &v))
+        return;
+    void* action = *(void* const*)v;
+    if (!action || !unit_is_live(action) ||
+        !field_ptr(action, "m_kTargetedEnemy", &g_targeted, sizeof(void*), &v))
+        return;
+    void* target = *(void* const*)v;
+    if (!target) return;
+
+    UnitName* u = unit_by_unit(target);
+    if (!u) return;
+
+    ShotTarget t;
+    char label[160];
+    unit_label(u, label, sizeof label);
+    t.name = label;
+    t.cover = u->cover;
+    t.flanked = u->flanked;
+    t.hp = u->hp;
+    t.hp_max = u->hp_max;
+    t.index = -1;
+    t.count = 0;
+    if (field_ptr(action, "m_arrInteractionList_ConstrainedByAbilities",
+                  &g_target_list, sizeof(FArray), &v)) {
+        const FArray* a = (const FArray*)v;
+        if (a->Num > 0 && a->Num <= SEEN_MAX &&
+            readable(a->Data, (size_t)a->Num * sizeof(void*))) {
+            void* const* e = (void* const*)a->Data;
+            for (int k = 0; k < a->Num; k++)
+                if (e[k] == target) { t.index = k; break; }
+            if (t.index >= 0) t.count = a->Num;
+        }
+    }
+
+    char text[SHOT_MAX_TEXT];
+    shot_describe_target(&t, text, sizeof text);
+    shot_set_target(text);
+    if (strcmp(text, g_shot_target_logged) != 0) {
+        strncpy_s(g_shot_target_logged, sizeof g_shot_target_logged, text, _TRUNCATE);
+        logf_("shot: target \"%s\" (cover %s, flanked %d, hp %d/%d, %d of %d)\n",
+              text, u->cover[0] ? u->cover : "?", u->flanked, u->hp, u->hp_max,
+              t.index + 1, t.count);
     }
 }
 

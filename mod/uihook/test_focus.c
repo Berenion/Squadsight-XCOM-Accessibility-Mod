@@ -761,6 +761,80 @@ int main(void)
         check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 0,
               "an empty panel stays quiet");
 
+        // The target, described from its flag.
+        {
+            ShotTarget t = { "Sectoid", "_lowCover", 1, 3, 4, 1, 3 };
+            shot_describe_target(&t, say, sizeof say);
+            check(strcmp(say, "Sectoid, 2 of 3. Low cover, flanked. 3 of 4 HP") == 0,
+                  "a target reads name, place, cover and health");
+
+            ShotTarget lone = { "Floater", "_none", 0, -1, -1, 0, 1 };
+            shot_describe_target(&lone, say, sizeof say);
+            check(strcmp(say, "Floater. No cover") == 0,
+                  "a lone target has no place, and hidden health is unsaid");
+
+            ShotTarget odd = { "Muton", "_none", 1, 6, 6, 0, 2 };
+            shot_describe_target(&odd, say, sizeof say);
+            check(strcmp(say, "Muton, 1 of 2. No cover. 6 of 6 HP") == 0,
+                  "flanked is never said without cover to qualify");
+
+            ShotTarget bunker = { "Thin Man", "_megaCover", -1, 3, 3, 2, 3 };
+            shot_describe_target(&bunker, say, sizeof say);
+            check(strstr(say, "Hunkered down") != NULL, "the hunkered shield is named");
+
+            ShotTarget unknown = { "Zombie", "", -1, -1, -1, -1, 0 };
+            shot_describe_target(&unknown, say, sizeof say);
+            check(strcmp(say, "Zombie") == 0, "nothing unknown is guessed");
+
+            ShotTarget nameless = { "", "_lowCover", 0, 3, 3, 0, 2 };
+            shot_describe_target(&nameless, say, sizeof say);
+            check(say[0] == 0, "an unnamed target says nothing at all");
+        }
+
+        // Tab between two targets at the same odds: the shot is identical,
+        // and without the target it was dropped as a repeat.
+        shot_reset();
+        shot_set_target("Sectoid, 1 of 2. High cover");
+        shot_note("SetIsAvailable", "", "", 1, say, sizeof say);
+        shot_note("SetShotName", "Standard Shot", "", -1, say, sizeof say);
+        shot_note("SetShotChance", "to hit", "65%", -1, say, sizeof say);
+        shot_note("SetWeaponStats", "Assault Rifle", "", -1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1 &&
+              strcmp(say, "Sectoid, 1 of 2. High cover. Standard Shot. 65% to hit. "
+                          "Assault Rifle") == 0,
+              "the target leads the shot");
+        shot_set_target("Sectoid, 2 of 2. High cover");
+        shot_note("SetShotName", "Standard Shot", "", -1, say, sizeof say);
+        shot_note("SetShotChance", "to hit", "65%", -1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1 &&
+              strcmp(say, "Sectoid, 2 of 2. High cover. Standard Shot. 65% to hit") == 0,
+              "a new target at the same odds is still announced");
+
+        // Another ability against the same target: the target is not news.
+        shot_note("SetShotName", "Suppression", "", -1, say, sizeof say);
+        shot_note("SetShotChance", "", "", -1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1 &&
+              strcmp(say, "Suppression") == 0,
+              "the same target is not repeated for a new ability");
+
+        // An ability with no target says only itself, and returning to the
+        // target afterwards names it again.
+        shot_set_target("");
+        shot_note("SetShotName", "Hunker Down", "", -1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1 &&
+              strcmp(say, "Hunker Down") == 0, "no target, nothing about one");
+        shot_set_target("Sectoid, 2 of 2. High cover");
+        shot_note("SetShotName", "Standard Shot", "", -1, say, sizeof say);
+        shot_note("SetShotChance", "to hit", "65%", -1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1 &&
+              strncmp(say, "Sectoid", 7) == 0, "back on a target, it is named");
+
+        // The target's health changing after a shot is news.
+        shot_set_target("Sectoid, 2 of 2. High cover. 1 of 3 HP");
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1 &&
+              strstr(say, "1 of 3 HP") != NULL, "a wounded target is said again");
+        shot_set_target("");
+
         // Bounds, with a name far longer than any the game has.
         shot_reset();
         {
