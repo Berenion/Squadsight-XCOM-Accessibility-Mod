@@ -1399,6 +1399,9 @@ typedef int (__fastcall* TileCoverFn)(void* self, void* edx, float x, float y,
 typedef int (__fastcall* TileTestFn)(void* self, void* edx, int x, int y, int z);
 typedef int (__fastcall* UnitTestFn)(void* self, void* edx);
 typedef int (__fastcall* CursorFloorFn)(void* self, void* edx, float x, float y, float z);
+// IsPositionOnFloor / IsPositionOnFloorAndValidDestination(const out Vector):
+// an `out` Vector goes by pointer, not as three floats.
+typedef int (__fastcall* PositionTestFn)(void* self, void* edx, const float* pos);
 
 // A value no measurement will be, so an out-parameter the native never wrote
 // is not mistaken for an answer.
@@ -1430,6 +1433,8 @@ typedef int (__fastcall* FiringRangeFn)(void* self, void* edx,
 
 static int       g_tile_slot_cover = -1, g_tile_slot_smoke = -1, g_tile_slot_poison = -1;
 static int       g_tile_slot_occupied = -1; // XComWorldData.IsTileOccupied
+static int       g_tile_slot_onfloor = -1;  // XComWorldData.IsPositionOnFloor
+static int       g_tile_slot_standable = -1; // ...OnFloorAndValidDestination
 static int       g_unit_slot_visible = -1;  // XGUnitNativeBase.IsAliveAndVisible
 static int       g_cursor_slot_floor = -1;  // XCom3DCursor.WorldZToCursorFloor
 static int       g_world_slot_seetile = -1; // XComWorldData.CanSeeActorToTile
@@ -2273,13 +2278,74 @@ static int nav_step_say(const char* body)
     return 1;
 }
 
+// Why a tile no path reaches is refused, from the game's own tile flags (see
+// tile.h). The floor is not known -- that is what failed -- so every layer the
+// height probe tried is asked about: the ground's layer and three either side,
+// which is PROBE_HEIGHTS' span. `say` stays "No path." whenever the game
+// cannot be asked.
+#define REFUSAL_LAYERS 3
+
+static void tile_refusal_probe(int tx, int ty, float ground, char* say, size_t say_sz)
+{
+    _snprintf_s(say, say_sz, _TRUNCATE, "%s", tile_refusal_text(TILE_REFUSE_NO_PATH));
+    void* world = cursor_world();
+    CursorGrid g;
+    if (!world || !cursor_grid(&g)) return;
+    PositionTestFn on_floor = (PositionTestFn)tile_vfn(world, g_tile_slot_onfloor);
+    PositionTestFn standable = (PositionTestFn)tile_vfn(world, g_tile_slot_standable);
+    TileTestFn occupied = (TileTestFn)tile_vfn(world, g_tile_slot_occupied);
+    if (!on_floor || !standable) return;
+
+    // The layer is found as tile_report finds it, from the floor plus 4.
+    int mid = cursor_tile_axis(ground + 4.0f, g.min_z, 64.0f);
+    TileLayerFlags layers[2 * REFUSAL_LAYERS + 1];
+    char seen[(2 * REFUSAL_LAYERS + 1) * 16] = "";
+    size_t used = 0;
+    int n = 0;
+    for (int tz = mid - REFUSAL_LAYERS; tz <= mid + REFUSAL_LAYERS; tz++) {
+        if (tz < 0 || (g.num_z > 0 && tz >= g.num_z)) continue;
+        // The middle of the layer: the natives make a tile of it themselves,
+        // and the middle is as far as can be from either edge's rounding.
+        float pos[3] = {
+            g.min_x + ((float)tx + 0.5f) * CURSOR_TILE,
+            g.min_y + ((float)ty + 0.5f) * CURSOR_TILE,
+            g.min_z + ((float)tz + 0.5f) * 64.0f,
+        };
+        TileLayerFlags* l = &layers[n++];
+        l->floor = on_floor(world, NULL, pos) != 0;
+        l->destination = standable(world, NULL, pos) != 0;
+        l->occupied = occupied ? occupied(world, NULL, tx, ty, tz) != 0 : 0;
+        l->below = tz < mid;
+        // "7:FD-" -- floor, destination, occupied, per layer, for the log.
+        int w = _snprintf_s(seen + used, sizeof seen - used, _TRUNCATE, "%s%d:%c%c%c",
+                            used ? " " : "", tz, l->floor ? 'F' : '-',
+                            l->destination ? 'D' : '-', l->occupied ? 'O' : '-');
+        if (w > 0) used += (size_t)w;
+    }
+    _snprintf_s(say, say_sz, _TRUNCATE, "%s", tile_refusal_text(tile_refusal(layers, n)));
+    logf_("nav: %d, %d refused, ground %.1f (layer %d), layers %s -> \"%s\"\n",
+          tx, ty, ground, mid, seen, say);
+}
+
 // A tile no path reaches. A unit standing on it is the likeliest reason, and
 // worth more than the verdict: when one was found on arrival, its name is the
-// whole answer.
+// whole answer. Otherwise the tile's flags say why.
 static void nav_say_no_path(int tx, int ty)
 {
     logf_("nav: %d, %d unreachable%s\n", tx, ty, g_step_who[0] ? " -- occupied" : "");
-    nav_step_say(g_step_who[0] ? "" : "No path.");
+    if (g_step_who[0]) {
+        nav_step_say("");
+        return;
+    }
+    if (!g_step_pending) return;    // already said: nothing to ask the game for
+    char why[48];
+    Fault f;
+    __try { tile_refusal_probe(tx, ty, navh_ground(), why, sizeof why); }
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        fault_log("nav: refusal", &f, NULL);
+        _snprintf_s(why, sizeof why, _TRUNCATE, "%s", tile_refusal_text(TILE_REFUSE_NO_PATH));
+    }
+    nav_step_say(why);
 }
 
 // ---- the radar -------------------------------------------------------------
@@ -2359,6 +2425,9 @@ static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
         { "XComWorldDataexecTileContainsSmoke",      &g_tile_slot_smoke,    NULL },
         { "XComWorldDataexecTileContainsPoison",     &g_tile_slot_poison,   NULL },
         { "XComWorldDataexecIsTileOccupied",         &g_tile_slot_occupied, NULL },
+        { "XComWorldDataexecIsPositionOnFloor",      &g_tile_slot_onfloor,  NULL },
+        { "XComWorldDataexecIsPositionOnFloorAndValidDestination",
+                                              &g_tile_slot_standable, NULL },
         { "XComWorldDataexecCanSeeActorToTile",      &g_world_slot_seetile, NULL },
         { "XGUnitNativeBaseexecIsFlankingCoverPoint", &g_unit_slot_flanking,
                                               &g_unit_fn_flanking },

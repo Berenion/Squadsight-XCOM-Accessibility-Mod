@@ -107,6 +107,48 @@ typedef struct {
 // mirror image of the numpad's. So the game's East is spoken as west.
 void tile_describe(const TileReport* r, char* out, size_t out_sz);
 
+// ---- why a move is refused -----------------------------------------------
+//
+// "No path." was said for every tile the pathfinder refused, which is four
+// different things to a player: a wall, a drop, a car roof, and a place that
+// is fine but cannot be got to. The game keeps the difference in one flags
+// word per tile, and three natives read it -- nothing else, no side effects,
+// the same in EU and EW (checked in both exes):
+//
+//   IsPositionOnFloor                     flags & 0x2000             a floor
+//   IsPositionOnFloorAndValidDestination  flags & 0x402000 == both   a floor a
+//                                                                    move may end on
+//   IsTileOccupied                        flags & 0x8000             solid stuff
+//
+// 0x400000 is the level designer's say: XComLevelActor and XComFracLevelActor
+// carry `bIsValidDestination`, so a car roof can be walked over and never
+// stopped on. The first two take a position and turn it into a tile
+// themselves (GetTileCoordinatesFromPosition), so any height inside a layer
+// asks about that layer; XComTacticalHUD.IsPositionInPathableTile is the
+// game's own use of the second.
+//
+// A refused tile's floor height is not known -- that is why it was refused --
+// so each layer the height probe tried is asked about, and the answer is the
+// best thing any of them offers.
+typedef struct {
+    int floor;          // IsPositionOnFloor
+    int destination;    // IsPositionOnFloorAndValidDestination
+    int occupied;       // IsTileOccupied
+    int below;          // under the ground's layer: solid there is not in the way
+} TileLayerFlags;
+
+typedef enum {
+    TILE_REFUSE_NO_PATH,    // somewhere to stop is there: the route is what fails
+    TILE_REFUSE_NO_STOP,    // a floor, but not one a move may end on
+    TILE_REFUSE_BLOCKED,    // no floor, and solid stuff where one would stand
+    TILE_REFUSE_NO_FLOOR,   // nothing to stand on at all
+} TileRefusal;
+
+TileRefusal tile_refusal(const TileLayerFlags* layers, int n);
+
+// "No path." / "Cannot stop here." / "Blocked." / "No floor."
+const char* tile_refusal_text(TileRefusal r);
+
 // "6 north, 3 east" -- an offset in tiles, in the numpad's directions (dx
 // east, dy north). "here" for none.
 void tile_offset_text(int dx, int dy, char* out, size_t out_sz);

@@ -1099,6 +1099,49 @@ int main(void)
         check(tile_vtable_slot(no_args, sizeof no_args) == 0x4C8,
               "`this` from esi counts too");
 
+        // EW's execIsPositionOnFloor from its argument's notify to its end,
+        // copied out of the exe (0x00C3B9FC): `this` was saved in edi, the
+        // Vector goes by pointer in ebx, and P_FINISH sits between.
+        static const unsigned char on_floor[] = {
+            0x8B, 0x01, 0x8B, 0x15, 0x44, 0x9D, 0xC4, 0x01, 0x8B, 0x80, 0xD0, 0x00,
+            0x00, 0x00, 0x52, 0xFF, 0xD0, 0xA1, 0x5C, 0x9D, 0xC4, 0x01, 0x8B, 0xD8,
+            0x85, 0xC0, 0x75, 0x04, 0x8D, 0x5C, 0x24, 0x0C, 0xFF, 0x46, 0x18, 0x8B,
+            0x46, 0x18, 0x80, 0x38, 0x41, 0x75, 0x10, 0x8B, 0x4E, 0x14, 0x6A, 0x00,
+            0x40, 0x56, 0x89, 0x46, 0x18, 0xFF, 0x15, 0x74, 0xFE, 0xC6, 0x01,
+            0x8B, 0x17,                             // mov edx, [edi]
+            0x8B, 0x82, 0x6C, 0x01, 0x00, 0x00,     // mov eax, [edx+0x16C]
+            0x53,                                   // push ebx
+            0x8B, 0xCF,                             // mov ecx, edi
+            0xFF, 0xD0,                             // call eax
+            0x8B, 0x4C, 0x24, 0x20, 0x5F, 0x5E, 0x89, 0x01, 0x5B, 0x83, 0xC4, 0x0C,
+            0xC2, 0x08, 0x00,
+        };
+        check(tile_vtable_slot(on_floor, sizeof on_floor) == 0x16C,
+              "IsPositionOnFloor's slot, with `this` from edi");
+
+        // Why a refused tile is refused, from its layers' flags.
+        {
+            TileLayerFlags l[3];
+            memset(l, 0, sizeof l);
+            check(tile_refusal(l, 3) == TILE_REFUSE_NO_FLOOR, "nothing anywhere: no floor");
+            l[0].below = l[0].occupied = 1;
+            check(tile_refusal(l, 3) == TILE_REFUSE_NO_FLOOR,
+                  "solid only under the ground is a drop, not a wall (the map's west edge)");
+            l[2].occupied = 1;
+            check(tile_refusal(l, 3) == TILE_REFUSE_BLOCKED, "solid and no floor: blocked");
+            l[1].floor = 1;
+            check(tile_refusal(l, 3) == TILE_REFUSE_NO_STOP,
+                  "a floor no move may end on outranks the solid layer");
+            l[0].floor = l[0].destination = 1;
+            check(tile_refusal(l, 3) == TILE_REFUSE_NO_PATH,
+                  "somewhere to stop: the route is what failed");
+            check(tile_refusal(l, 0) == TILE_REFUSE_NO_PATH,
+                  "no layers asked is no evidence");
+            check(strcmp(tile_refusal_text(TILE_REFUSE_NO_STOP), "Cannot stop here.") == 0 &&
+                  strcmp(tile_refusal_text(TILE_REFUSE_NO_PATH), "No path.") == 0,
+                  "the refusals' words");
+        }
+
         char where[64];
         tile_offset_text(3, -2, where, sizeof where);
         check(strcmp(where, "2 south, 3 east") == 0, "an offset says north-south first");

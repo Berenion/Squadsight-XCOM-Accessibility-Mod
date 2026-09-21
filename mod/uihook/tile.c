@@ -160,6 +160,36 @@ void tile_describe(const TileReport* r, char* out, size_t out_sz)
     while (used > 0 && out[used - 1] == ' ') out[--used] = 0;
 }
 
+TileRefusal tile_refusal(const TileLayerFlags* layers, int n)
+{
+    int floor = 0, occupied = 0;
+    for (int i = 0; i < n; i++) {
+        // A layer a move may end on outranks everything: the tile is fine,
+        // and what fails is getting there.
+        if (layers[i].destination) return TILE_REFUSE_NO_PATH;
+        floor |= layers[i].floor;
+        // Solid stuff under the ground's layer is what a drop lands on, not
+        // something in the way: at the map's west edge in the first run the
+        // layers under the soldier were full and the three above empty, and
+        // "Blocked." was said of a tile with nothing at all at head height.
+        if (!layers[i].below) occupied |= layers[i].occupied;
+    }
+    if (floor) return TILE_REFUSE_NO_STOP;
+    if (occupied) return TILE_REFUSE_BLOCKED;
+    // No layer at all is no evidence, and says only what was said before.
+    return n > 0 ? TILE_REFUSE_NO_FLOOR : TILE_REFUSE_NO_PATH;
+}
+
+const char* tile_refusal_text(TileRefusal r)
+{
+    switch (r) {
+    case TILE_REFUSE_NO_STOP:  return "Cannot stop here.";
+    case TILE_REFUSE_BLOCKED:  return "Blocked.";
+    case TILE_REFUSE_NO_FLOOR: return "No floor.";
+    default:                   return "No path.";
+    }
+}
+
 int tile_turns(int cost, int this_turn, int standard)
 {
     if (cost < 0 || this_turn <= 0 || standard <= 0) return 0;
