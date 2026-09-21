@@ -40,6 +40,7 @@ typedef enum {
     SCAN_ALL,
     SCAN_SQUAD,
     SCAN_ENEMIES,
+    SCAN_TARGETS,           // what the soldier can shoot, best shot first
     SCAN_CIVILIANS,
     SCAN_DOORS,
     SCAN_OBJECTIVES,
@@ -60,6 +61,13 @@ typedef struct {
     int          tx, ty, tz;        // tile x and y; tz is a floor, not a row
     float        world[3];          // where it actually is, for the cursor
     ScanCategory kind;              // the one category it belongs to
+    // Said after the name: "45%, low cover, 8 of 8 HP". Kept apart from the
+    // name because the name is what the selection is held by, and a hit
+    // chance that moves with the soldier must not lose the selection.
+    char         detail[96];
+    // Sorts ahead of distance, higher first; 0 for everything sorted by
+    // distance alone. The targets use it for best shot first.
+    int          rank;
 } ScanItem;
 
 // "Everything", "Squad", "Enemies", ... -- as the category is spoken.
@@ -77,7 +85,7 @@ void scan_begin(int from_tx, int from_ty, int from_tz);
 // the one being shown. Returns 1 when it was kept.
 int  scan_add(const ScanItem* item);
 
-// Sorts nearest first and restores the selection, by name and tile, to the
+// Sorts nearest first -- by rank first, for items that carry one -- and restores the selection, by name and tile, to the
 // item that was selected before -- so cycling does not jump because something
 // moved a tile. Returns how many items the scan holds.
 int  scan_end(void);
@@ -112,7 +120,8 @@ void scan_forget(void);
 
 // ---- what is said ----------------------------------------------------------
 
-// "Door, 4 north, 7 east, one floor up." The offset is from where the scan
+// "Door, 4 north, 7 east, one floor up." -- or, with a detail, "Muton, 45%,
+// low cover, 3 north." The offset is from where the scan
 // began; the storey is left out when it is the same one.
 void scan_describe(const ScanItem* item, int from_tx, int from_ty, int from_tz,
                    char* out, size_t out_sz);

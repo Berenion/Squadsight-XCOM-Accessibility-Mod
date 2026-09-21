@@ -1359,6 +1359,83 @@ int main(void)
         check(scan_selected(&it) == 0, "forgetting drops the selection");
     }
 
+    printf("\nthe target list\n");
+    {
+        ScanItem it;
+        char say[SCAN_MAX_TEXT];
+
+        scan_forget();
+        while (scan_floor() != SCAN_ALL_FLOORS) scan_cycle_floor(1, 4);
+        while (scan_category() != SCAN_TARGETS) scan_cycle_category(1);
+        scan_category_text(SCAN_TARGETS, SCAN_ALL_FLOORS, 3, say, sizeof say);
+        check(strcmp(say, "Targets, 3 found.") == 0, "the category is named");
+        scan_empty_text(SCAN_TARGETS, say, sizeof say);
+        check(strcmp(say, "No targets.") == 0, "and says so when empty");
+
+        // Best shot first, whatever the distance; no shot at all goes last,
+        // and among those the nearer first.
+        scan_begin(10, 10, 0);
+        memset(&it, 0, sizeof it);
+        it.kind = SCAN_TARGETS;
+        strcpy_s(it.name, sizeof it.name, "Muton");
+        it.tx = 11; it.ty = 10; it.rank = 31; scan_add(&it);     // 30%, near
+        strcpy_s(it.name, sizeof it.name, "Sectoid");
+        it.tx = 20; it.ty = 10; it.rank = 66; scan_add(&it);     // 65%, far
+        strcpy_s(it.name, sizeof it.name, "Floater");
+        it.tx = 18; it.ty = 10; it.rank = 0;  scan_add(&it);     // no shot
+        strcpy_s(it.name, sizeof it.name, "Drone");
+        it.tx = 12; it.ty = 10; it.rank = 0;  scan_add(&it);     // no shot, nearer
+        check(scan_end() == 4, "four targets");
+        scan_cycle(1);
+        scan_selected(&it);
+        check(strcmp(it.name, "Sectoid") == 0, "the best shot comes first, though farthest");
+        scan_cycle(1);
+        scan_selected(&it);
+        check(strcmp(it.name, "Muton") == 0, "then the next best");
+        scan_cycle(1);
+        scan_selected(&it);
+        check(strcmp(it.name, "Drone") == 0, "then no shot, nearest first");
+
+        // The selection survives the chance changing: it is held by name.
+        scan_begin(10, 10, 0);
+        memset(&it, 0, sizeof it);
+        it.kind = SCAN_TARGETS;
+        strcpy_s(it.name, sizeof it.name, "Drone");
+        it.tx = 12; it.ty = 10; it.rank = 90; scan_add(&it);
+        strcpy_s(it.name, sizeof it.name, "Muton");
+        it.tx = 11; it.ty = 10; it.rank = 31; scan_add(&it);
+        scan_end();
+        scan_selected(&it);
+        check(strcmp(it.name, "Drone") == 0, "a re-ranked selection is kept");
+
+        // The detail goes between the name and where it is.
+        memset(&it, 0, sizeof it);
+        strcpy_s(it.name, sizeof it.name, "Muton");
+        strcpy_s(it.detail, sizeof it.detail, "45%, low cover");
+        it.tx = 13; it.ty = 12;
+        scan_describe(&it, 10, 10, 0, say, sizeof say);
+        check(strcmp(say, "Muton, 45%, low cover, 2 north, 3 east.") == 0,
+              "name, detail, then the offset");
+        it.detail[0] = 0;
+        scan_describe(&it, 10, 10, 0, say, sizeof say);
+        check(strcmp(say, "Muton, 2 north, 3 east.") == 0, "no detail, as before");
+
+        ShotTarget t = { "Muton", "_lowCover", 1, 6, 8, -1, 0 };
+        shot_list_detail(&t, 45, 0, say, sizeof say);
+        check(strcmp(say, "45%, low cover, flanked, 6 of 8 HP") == 0,
+              "a target reads chance, cover, flanked and health");
+        ShotTarget far_one = { "Sectoid", "_highCover", 0, -1, -1, -1, 0 };
+        shot_list_detail(&far_one, 12, 1, say, sizeof say);
+        check(strcmp(say, "12%, high cover, squadsight") == 0,
+              "squadsight is said, hidden health is not");
+        ShotTarget open_one = { "Zombie", "_none", 1, 3, 3, -1, 0 };
+        shot_list_detail(&open_one, -1, 0, say, sizeof say);
+        check(strcmp(say, "no cover, 3 of 3 HP") == 0,
+              "no shot means no chance, and no flanked without cover");
+        scan_forget();
+        while (scan_category() != SCAN_ALL) scan_cycle_category(1);
+    }
+
     printf("\nspeech debounce\n");
     char dir[MAX_PATH];
     GetModuleFileNameA(NULL, dir, MAX_PATH);

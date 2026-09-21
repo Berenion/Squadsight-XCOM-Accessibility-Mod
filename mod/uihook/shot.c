@@ -124,6 +124,43 @@ void shot_describe_target(const ShotTarget* t, char* out, size_t out_sz)
     }
 }
 
+// Like join, with a comma: the list's pieces are one phrase, not sentences.
+static void join_comma(char* out, size_t out_sz, const char* piece)
+{
+    if (!piece || !*piece) return;
+    size_t used = strlen(out);
+    _snprintf_s(out + used, out_sz - used, _TRUNCATE, "%s%s", used ? ", " : "", piece);
+}
+
+void shot_list_detail(const ShotTarget* t, int chance, int squadsight,
+                      char* out, size_t out_sz)
+{
+    if (!out || out_sz == 0) return;
+    out[0] = 0;
+    if (!t) return;
+    char piece[64];
+
+    if (chance >= 0) {
+        _snprintf_s(piece, sizeof piece, _TRUNCATE, "%d%%", chance);
+        join_comma(out, out_sz, piece);
+    }
+    const char* cover = cover_words(t->cover);
+    if (cover) {
+        // Lower case inside a phrase; the words table is written for the
+        // start of a sentence.
+        set(piece, sizeof piece, cover);
+        piece[0] = (char)(piece[0] | 0x20);
+        join_comma(out, out_sz, piece);
+        if (t->flanked == 1 && strcmp(t->cover, "_none") != 0)
+            join_comma(out, out_sz, "flanked");
+    }
+    if (t->hp >= 0 && t->hp_max > 0) {
+        _snprintf_s(piece, sizeof piece, _TRUNCATE, "%d of %d HP", t->hp, t->hp_max);
+        join_comma(out, out_sz, piece);
+    }
+    if (squadsight) join_comma(out, out_sz, "squadsight");
+}
+
 int shot_note(const char* fn, const char* a, const char* b, int flag,
               char* out, size_t out_sz)
 {

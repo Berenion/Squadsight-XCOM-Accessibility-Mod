@@ -583,6 +583,7 @@ static __declspec(thread) char tls_where[256];
 static void unit_note(void* flag, const char* name, const char* nick);
 static void unit_flag_drew(void* flag, const char* fn, const Payload* p);
 static void shot_target_now(void* stack);
+static void strip_note(void* strip, const char* fn, const Payload* p);
 
 static void capture_body(const char* tag, LONG n, void* stack)
 {
@@ -675,6 +676,8 @@ static void capture_body(const char* tag, LONG n, void* stack)
     }
     if (strncmp(obj_name, "UIUnitFlag_", 11) == 0)
         unit_flag_drew(object, fn_name, p);
+    if (strncmp(obj_name, "UISightlineHUD_SightlineContainer", 33) == 0)
+        strip_note(object, fn_name, p);
 
     if (shot_is_panel(obj_name)) {
         // Each argument arrives twice -- once as the parameter, once inside
@@ -1680,6 +1683,7 @@ typedef struct {
     char  cover[16];    // RealizeCover's shield: "_highCover" ... "" unknown
     int   flanked;      // the shield's flanked state, -1 unknown
     int   hp, hp_max;   // as displayed, -1 when the flag shows none
+    int   strip_flanked; // the target strip's mark: flanked by the soldier, -1 unknown
 } UnitName;
 
 static UnitName  g_units[UNIT_MAX];
@@ -1717,6 +1721,7 @@ static UnitName* unit_entry(void* flag)
     memset(u, 0, sizeof *u);
     u->flag = flag;
     u->flanked = -1;
+    u->strip_flanked = -1;
     u->hp = u->hp_max = -1;
     return u;
 }
@@ -2082,6 +2087,43 @@ static void shot_target_now(void* stack)
               text, u->cover[0] ? u->cover : "?", u->flanked, u->hp, u->hp_max,
               t.index + 1, t.count);
     }
+}
+
+// The target strip: the row of enemy icons, UISightlineHUD_SightlineContainer.
+// Its m_arrEnemies is the list it draws, in the order it draws them -- the
+// soldier's visible enemies, or everything in squadsight range for a sniper
+// with the upgrade, less the critically wounded -- and each icon is marked by
+// index with AS_SetFlanked(TargetIndex, isFlanked), which is
+// IsFlankedBy(the active soldier). The mark is kept on the enemy's flag entry
+// rather than by index, because the indices are re-dealt on every change.
+static void*     g_strip;
+static FieldSlot g_strip_enemies;
+
+// The strip's list, or 0 when it cannot be read.
+static int strip_enemies(void* const** out)
+{
+    const void* v;
+    if (!g_strip || !unit_is_live(g_strip) ||
+        !field_ptr(g_strip, "m_arrEnemies", &g_strip_enemies, sizeof(FArray), &v))
+        return 0;
+    const FArray* a = (const FArray*)v;
+    if (a->Num <= 0 || a->Num > SEEN_MAX ||
+        !readable(a->Data, (size_t)a->Num * sizeof(void*)))
+        return 0;
+    *out = (void* const*)a->Data;
+    return a->Num;
+}
+
+static void strip_note(void* strip, const char* fn, const Payload* p)
+{
+    g_strip = strip;
+    if (!strstr(fn, "SetFlanked") || p->nnumbers < 1 || p->nbools < 1) return;
+    void* const* e;
+    int n = strip_enemies(&e);
+    int id = (int)p->numbers[0];
+    if (id < 0 || id >= n) return;
+    UnitName* u = unit_by_unit(e[id]);
+    if (u) u->strip_flanked = p->bools[0];
 }
 
 // ---- would a soldier be seen here, and would the cover hold ----------------
@@ -3136,6 +3178,131 @@ static void scan_add_units(void)
     }
 }
 
+// ---- the targets -----------------------------------------------------------
+//
+// What the soldier can shoot: the target strip's own list (strip_enemies),
+// best shot first. Each is said with what the screen offers about it -- the
+// hit chance its icon shows under the mouse, the cover shield and hit points
+// on its flag, and the strip's flanked and squadsight marks.
+//
+// The hit chance is the one the strip itself shows. Hovering an icon
+// (UISightlineHUD_SightlineContainer.OnMouseEvent, case 392) walks the
+// soldier's m_aAbilities for the standard shot (iType 7, eAbility_ShotStandard)
+// whose primary target is that enemy and puts its GetUIHitChance on the icon;
+// for a standard shot that is GetHitChance, which is m_iHitChance. So the
+// same walk is made here with field reads: the ability's m_aTargets[0]
+// .m_kTarget stands for GetPrimaryTarget (native, and a standard shot has one
+// target), and nothing is called.
+static FieldSlot g_nabilities, g_abilities, g_ab_targets, g_ab_chance;
+static uint32_t  g_itype_off;           // XGAbility.iType, the same in every subclass
+static int       g_itype_have;
+
+#define ABILITY_SHOT_STANDARD 7
+
+static int soldier_chance_at(void* soldier, const void* enemy)
+{
+    const void* v;
+    if (!field_ptr(soldier, "m_iNumAbilities", &g_nabilities, 4, &v)) return -1;
+    int n = *(const int32_t*)v;
+    if (n <= 0 || n > 64) return -1;
+    if (!field_ptr(soldier, "m_aAbilities", &g_abilities, 64 * sizeof(void*), &v))
+        return -1;
+    void* abilities[64];
+    memcpy(abilities, v, (size_t)n * sizeof(void*));
+    for (int i = 0; i < n; i++) {
+        uint8_t* a = (uint8_t*)abilities[i];
+        if (!a || !unit_is_live(a)) continue;
+        // One lookup for every ability class: iType is XGAbility's, so it
+        // sits at the same offset in all of them, and asking each class in
+        // turn would make the field cache walk a class chain per ability.
+        if (!g_itype_have) {
+            if (!object_field_offset(a, "iType", &g_itype_off)) return -1;
+            g_itype_have = 1;
+        }
+        if (!readable(a + g_itype_off, 4) ||
+            *(const int32_t*)(a + g_itype_off) != ABILITY_SHOT_STANDARD)
+            continue;
+        if (!field_ptr(a, "m_aTargets", &g_ab_targets, sizeof(void*), &v) ||
+            *(void* const*)v != enemy)
+            continue;
+        if (!field_ptr(a, "m_iHitChance", &g_ab_chance, 4, &v)) continue;
+        return *(const int32_t*)v;
+    }
+    return -1;
+}
+
+// The soldier the strip is drawn for: the active unit, which is the one the
+// cursor is chained to.
+static FieldSlot g_active_unit;
+
+static void* soldier_unit(void)
+{
+    void* pawn = NULL;
+    const void* v;
+    if (!cursor_chained_pawn(&pawn) || !pawn ||
+        !field_ptr(pawn, "m_kGameUnit", &g_active_unit, sizeof(void*), &v))
+        return NULL;
+    void* unit = *(void* const*)v;
+    return unit && unit_is_live(unit) ? unit : NULL;
+}
+
+static void scan_add_targets(void)
+{
+    void* const* list;
+    int n = strip_enemies(&list);
+    if (n <= 0) return;
+    void* enemies[SEEN_MAX];
+    memcpy(enemies, list, (size_t)n * sizeof(void*));
+
+    // The soldier's own sight, for squadsight: the strip marks an enemy that
+    // is on it but not in the soldier's m_arrVisibleEnemies.
+    void* soldier = soldier_unit();
+    void* own[SEEN_MAX];
+    int nown = -1;
+    const void* v;
+    if (soldier && field_ptr(soldier, "m_arrVisibleEnemies", &g_visen, sizeof(FArray), &v)) {
+        const FArray* a = (const FArray*)v;
+        if (a->Num == 0) nown = 0;
+        else if (a->Num > 0 && a->Num <= SEEN_MAX &&
+                 readable(a->Data, (size_t)a->Num * sizeof(void*))) {
+            memcpy(own, a->Data, (size_t)a->Num * sizeof(void*));
+            nown = a->Num;
+        }
+    }
+
+    for (int i = 0; i < n; i++) {
+        void* e = enemies[i];
+        if (!e || !unit_is_live(e)) continue;
+        UnitName* u = unit_by_unit(e);
+        if (!u) continue;
+        void* pawn = unit_pawn(e);
+        if (!pawn || !unit_is_live(pawn) ||
+            !field_ptr(pawn, "Location", &g_pawn_loc, 3 * sizeof(float), &v))
+            continue;
+        float loc[3];
+        memcpy(loc, v, sizeof loc);
+
+        ScanItem it;
+        memset(&it, 0, sizeof it);
+        it.kind = SCAN_TARGETS;
+        unit_label(u, it.name, sizeof it.name);
+
+        int chance = soldier ? soldier_chance_at(soldier, e) : -1;
+        int squadsight = 0;
+        if (nown >= 0) {
+            squadsight = 1;
+            for (int k = 0; k < nown; k++)
+                if (own[k] == e) { squadsight = 0; break; }
+        }
+        ShotTarget t = { it.name, u->cover, u->strip_flanked, u->hp, u->hp_max, -1, 0 };
+        shot_list_detail(&t, chance, squadsight, it.detail, sizeof it.detail);
+        // Best shot first; an enemy with no shot at it goes last, nearest
+        // first among themselves.
+        it.rank = chance >= 0 ? chance + 1 : 0;
+        if (scan_item_at(&it, loc, NAV_CURSOR_LIFT)) scan_add(&it);
+    }
+}
+
 // ---- the level actors, kept between key presses ----------------------------
 //
 // A full walk of the object table is 175,000 entries and tens of milliseconds
@@ -3578,6 +3745,9 @@ static int scan_rebuild(void)
     ScanCategory c = scan_category();
     if (c == SCAN_ALL || c == SCAN_SQUAD || c == SCAN_ENEMIES || c == SCAN_CIVILIANS)
         scan_add_units();
+    // Its own category only: "Everything" already has these enemies once,
+    // under Enemies.
+    if (c == SCAN_TARGETS) scan_add_targets();
     if (c == SCAN_ALL || c == SCAN_DOORS || c == SCAN_OBJECTIVES || c == SCAN_INTERACT)
         scan_add_world();
     // Three field reads and no walk, so it costs nothing outside a tutorial

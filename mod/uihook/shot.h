@@ -50,6 +50,14 @@ typedef struct {
 // left out rather than guessed.
 void shot_describe_target(const ShotTarget* t, char* out, size_t out_sz);
 
+// One enemy on the target strip, for the scanner's Targets list: "45%, low
+// cover, flanked, 8 of 8 HP, squadsight". The name is said by the scanner, so
+// it is not repeated here. `chance` is -1 when the soldier has no shot at it,
+// and is then left out; `flanked` here is the strip's own mark, flanked by
+// this soldier. Only what the strip and the enemy's flag draw.
+void shot_list_detail(const ShotTarget* t, int chance, int squadsight,
+                      char* out, size_t out_sz);
+
 // The target described for the burst in progress, "" for none. Read by the
 // call that ends the burst, so it must be set before that call.
 void shot_set_target(const char* text);

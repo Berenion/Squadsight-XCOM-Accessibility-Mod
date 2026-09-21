@@ -27,6 +27,7 @@ const char* scan_category_name(ScanCategory c)
     case SCAN_ALL:        return "Everything";
     case SCAN_SQUAD:      return "Squad";
     case SCAN_ENEMIES:    return "Enemies";
+    case SCAN_TARGETS:    return "Targets";
     case SCAN_CIVILIANS:  return "Civilians";
     case SCAN_DOORS:      return "Doors";
     case SCAN_OBJECTIVES: return "Objectives";
@@ -79,6 +80,13 @@ static int dist2(const ScanItem* it)
     return dx * dx + dy * dy + 4 * dz * dz;
 }
 
+// Whether `a` goes after `b`: the higher rank first, then the nearer.
+static int after(const ScanItem* a, const ScanItem* b)
+{
+    if (a->rank != b->rank) return a->rank < b->rank;
+    return dist2(a) > dist2(b);
+}
+
 int scan_end(void)
 {
     // Insertion sort: the lists are short (a mission's doors and units, not a
@@ -86,9 +94,8 @@ int scan_end(void)
     // two doors the same distance away are always cycled the same way round.
     for (int i = 1; i < g_n; i++) {
         ScanItem k = g_items[i];
-        int dk = dist2(&k);
         int j = i - 1;
-        while (j >= 0 && dist2(&g_items[j]) > dk) {
+        while (j >= 0 && after(&g_items[j], &k)) {
             g_items[j + 1] = g_items[j];
             j--;
         }
@@ -209,8 +216,9 @@ void scan_describe(const ScanItem* item, int from_tx, int from_ty, int from_tz,
     char storey[48];
     floor_offset_text(item->tz - from_tz, storey, sizeof storey);
 
-    _snprintf_s(out, out_sz, _TRUNCATE, "%s, %s%s%s.", item->name, where,
-                storey[0] ? ", " : "", storey);
+    _snprintf_s(out, out_sz, _TRUNCATE, "%s, %s%s%s%s%s.", item->name,
+                item->detail[0] ? item->detail : "", item->detail[0] ? ", " : "",
+                where, storey[0] ? ", " : "", storey);
 }
 
 void scan_category_text(ScanCategory c, int floor, int count,
