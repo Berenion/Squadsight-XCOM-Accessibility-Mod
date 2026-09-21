@@ -102,6 +102,17 @@ int objects_each(const void* const* classes, int n, ObjectVisitFn fn, void* ctx)
 int objects_each_from(const void* const* classes, int n, int from, int* next,
                       ObjectVisitFn fn, void* ctx);
 
+// Whether `obj` is still a live object in the table at all, asked without
+// knowing its index: the object is asked where it thinks it sits and the
+// table is asked to agree.
+//
+// For a pointer that came from somewhere other than a walk -- a unit out of
+// another unit's m_arrVisibleEnemies, say -- and is about to be handed to one
+// of the game's own natives. A freed object's slot is nulled, so this catches
+// it; a slot already handed to something else it does not, which is what the
+// caller's own test of the thing (IsAliveAndVisible for a unit) is for.
+int objects_live(void* obj);
+
 // Whether `obj` is still the live object at table slot `idx`, and still of
 // one of `classes[0..n-1]` or below one.
 //

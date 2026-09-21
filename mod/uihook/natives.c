@@ -96,3 +96,24 @@ void* natives_find(const NativeEntry* tbl, int n, const char* name)
         if (strcmp(tbl[i].name, name) == 0) return tbl[i].func;
     return NULL;
 }
+
+// The same lookup, without having to know whether the class is an Actor.
+//
+// The exported name carries the C++ prefix -- `AXGUnitNativeBase...` for a
+// class below Actor, `UXComWorldData...` for one below Object -- and the
+// decompiles do not settle it: their `// Export` comments say
+// `UXGUnitNativeBase::execIsAliveAndVisible` for a class whose real export is
+// `A`. Getting it wrong costs a live run to notice, because a native that is
+// not found looks exactly like a native that is not there. Both are tried.
+void* natives_find_class(const NativeEntry* tbl, int n, const char* name)
+{
+    char buf[192];
+    static const char kPrefix[] = { 'A', 'U' };
+    for (int p = 0; p < 2; p++) {
+        buf[0] = kPrefix[p];
+        strncpy_s(buf + 1, sizeof buf - 1, name, _TRUNCATE);
+        void* f = natives_find(tbl, n, buf);
+        if (f) return f;
+    }
+    return NULL;
+}

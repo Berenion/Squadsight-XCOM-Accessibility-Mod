@@ -3,6 +3,39 @@
 #include "tile.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
+
+const unsigned char* tile_direct_target(const unsigned char* code, size_t n,
+                                        const unsigned char* lo,
+                                        const unsigned char* hi)
+{
+    const unsigned char* found = NULL;
+    int this_loaded = 0;
+    for (size_t i = 0; i + 5 <= n; i++) {
+        if (code[i] == 0xC2 && i + 2 < n && code[i + 1] == 8 && code[i + 2] == 0)
+            break;                                  // ret 8: the thunk's end
+
+        // `mov ecx, ebx/ebp/esi/edi` -- the saved `this` going back into the
+        // register the call will take it in. The same discriminator
+        // tile_vtable_slot uses, and for the same reason: a thunk makes other
+        // calls, and those load ecx from memory or with a constant (the
+        // `mov ecx, 10` before the struct copy's rep movsd).
+        if (code[i] == 0x8B && (code[i + 1] == 0xCB || code[i + 1] == 0xCD ||
+                                code[i + 1] == 0xCE || code[i + 1] == 0xCF)) {
+            this_loaded = 1;
+            continue;
+        }
+        if (code[i] != 0xE8 || !this_loaded) continue;
+
+        int32_t rel = (int32_t)((uint32_t)code[i + 1] | (uint32_t)code[i + 2] << 8 |
+                                (uint32_t)code[i + 3] << 16 | (uint32_t)code[i + 4] << 24);
+        const unsigned char* target = code + i + 5 + rel;
+        if (target < lo || target >= hi) continue;  // not in the game's image
+        found = target;                             // the last one wins
+        this_loaded = 0;
+    }
+    return found;
+}
 
 int tile_vtable_slot(const unsigned char* code, size_t n)
 {
@@ -101,6 +134,23 @@ void tile_describe(const TileReport* r, char* out, size_t out_sz)
         cover_sentence("Low cover", low, out, out_sz, &used);
     } else {
         append(out, out_sz, &used, "No cover. ");
+    }
+
+    // Exposure comes straight after the cover, because it is what says
+    // whether that cover is worth anything. Nothing at all when no enemy has
+    // been seen: there is no one for the tile to be exposed to, and a player
+    // stepping around an empty map does not want "Out of sight" on every
+    // tile. "Flanked" is said only where there IS cover -- flanking is cover
+    // being got around, and on open ground "Seen by 2" has said it already.
+    if (r->enemies_known > 0) {
+        if (r->seen_by <= 0) {
+            append(out, out_sz, &used, "Out of sight. ");
+        } else {
+            char t[48];
+            _snprintf_s(t, sizeof t, _TRUNCATE, "Seen by %d%s. ",
+                        r->seen_by, any && r->flanked ? ", flanked" : "");
+            append(out, out_sz, &used, t);
+        }
     }
 
     if (r->smoke)  append(out, out_sz, &used, "Smoke. ");

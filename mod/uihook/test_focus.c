@@ -954,6 +954,43 @@ int main(void)
         check(tile_vtable_slot(other_reg, sizeof other_reg) == -1,
               "a call through another register does not count");
 
+        // A `final` native's thunk has no vtable load at all: it calls the
+        // implementation outright. These bytes are the tail of EW's
+        // execIsFlankingCoverPoint as the 2026-09-21 log dumped it -- the
+        // 40-byte struct copied onto the stack by value, `this` back into
+        // ecx, then the call.
+        {
+            const unsigned char lo[0x100] = { 0 };
+            unsigned char thunk[] = {
+                0x83, 0xEC, 0x28,               // sub esp, 0x28   (the struct)
+                0x8B, 0xFC,                     // mov edi, esp
+                0xB9, 0x0A, 0x00, 0x00, 0x00,   // mov ecx, 10     (NOT a this load)
+                0xF3, 0xA5,                     // rep movsd
+                0x8B, 0xCB,                     // mov ecx, ebx    (this)
+                0xE8, 0x00, 0x00, 0x00, 0x00,   // call +0         (patched below)
+                0xC2, 0x08, 0x00,               // ret 8
+            };
+            // A call landing on lo[0x80], well inside the "image" below.
+            // The E8 sits at index 14, so its displacement is at 15 and the
+            // instruction after it begins at 19.
+            int32_t rel = (int32_t)((lo + 0x80) - (thunk + 19));
+            memcpy(thunk + 15, &rel, 4);
+
+            check(tile_direct_target(thunk, sizeof thunk, lo, lo + 0x100) == lo + 0x80,
+                  "a final native's thunk gives up its direct call");
+            check(tile_vtable_slot(thunk, sizeof thunk) == -1,
+                  "and has no vtable slot to find, which is the whole point");
+            check(tile_direct_target(thunk, sizeof thunk, lo + 0x90, lo + 0x100) == NULL,
+                  "a target outside the image is not the implementation");
+
+            // Without the `this` load it is one of the thunk's own calls --
+            // the argument decoding -- and not the one wanted.
+            thunk[12] = 0x90;
+            thunk[13] = 0x90;
+            check(tile_direct_target(thunk, sizeof thunk, lo, lo + 0x100) == NULL,
+                  "a call with no this in ecx is the argument decoding");
+        }
+
         TileReport r;
         char say[TILE_MAX_TEXT];
 
@@ -991,6 +1028,46 @@ int main(void)
         tile_describe(&r, say, sizeof say);
         check(strcmp(say, "Dash. No cover. Smoke. Poison.") == 0,
               "dash first, hazards last");
+
+        // Exposure. Silent with nobody seen, because "Out of sight" on every
+        // tile of an empty map is the clause heard most often and wanted
+        // least -- and because it would not be true, only unmeasured.
+        memset(&r, 0, sizeof r);
+        r.cover_flags = TILE_COVER_N;
+        r.seen_by = 2;
+        r.flanked = 1;
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "High cover north.") == 0,
+              "no enemy seen yet: nothing is said about exposure");
+
+        r.enemies_known = 3;
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "High cover north. Seen by 2, flanked.") == 0,
+              "exposure follows the cover it qualifies");
+
+        r.flanked = 0;
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "High cover north. Seen by 2.") == 0,
+              "cover that holds says only who can see");
+
+        r.seen_by = 0;
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "High cover north. Out of sight.") == 0,
+              "measured against someone and seen by none is worth saying");
+
+        // On open ground being seen IS the whole story; "flanked" is cover
+        // being got around, and there is none to get around.
+        memset(&r, 0, sizeof r);
+        r.enemies_known = 1;
+        r.seen_by = 1;
+        r.flanked = 1;
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "No cover. Seen by 1.") == 0,
+              "no cover: flanked is not said");
+
+        // The checks below carry `r` on from here, so the exposure is put
+        // back before they read it.
+        r.enemies_known = r.seen_by = r.flanked = 0;
 
         char tiny[8];
         tile_describe(&r, tiny, sizeof tiny);

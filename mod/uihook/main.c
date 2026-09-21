@@ -1400,10 +1400,42 @@ typedef int (__fastcall* TileTestFn)(void* self, void* edx, int x, int y, int z)
 typedef int (__fastcall* UnitTestFn)(void* self, void* edx);
 typedef int (__fastcall* CursorFloorFn)(void* self, void* edx, float x, float y, float z);
 
+// A value no measurement will be, so an out-parameter the native never wrote
+// is not mistaken for an answer.
+#define SENTINEL_FLOAT 1.0e9f
+
+// XComWorldData.CanSeeActorToTile(Actor FromActor, int X, int Y, int Z,
+//                                 optional bool bUseLineChecks)
+// The actor is the enemy's PAWN, as XGPlayer.IsEnemyUnitVisibleFromTile
+// passes it. An optional script parameter is still a real C++ one.
+typedef int (__fastcall* SeeTileFn)(void* self, void* edx, void* from_actor,
+                                    int x, int y, int z, int line_checks);
+
+// XGUnitNativeBase.IsFlankingCoverPoint(XComCoverPoint kCover) -- `self` is
+// the ENEMY, and the cover point goes by value as GetCoverPoint's Vector
+// does. One argument, so nothing can be knocked out of place behind it.
+typedef int (__fastcall* FlankCoverFn)(void* self, void* edx, TileCoverPoint cover);
+
+// XGUnitNativeBase.IsPointWithinFiringRange(out float fHeightBonusModifier,
+//     out float fDistSq, XGUnitNativeBase kTarget, Vector vTargetPoint,
+//     Vector vShooterLocation, optional XGWeapon kWeapon,
+//     optional float fOverrideRange)
+// Two Vectors by value, six floats in declaration order.
+typedef int (__fastcall* FiringRangeFn)(void* self, void* edx,
+                                        float* height_bonus, float* dist_sq,
+                                        void* target,
+                                        float tx, float ty, float tz,
+                                        float sx, float sy, float sz,
+                                        void* weapon, float override_range);
+
 static int       g_tile_slot_cover = -1, g_tile_slot_smoke = -1, g_tile_slot_poison = -1;
 static int       g_tile_slot_occupied = -1; // XComWorldData.IsTileOccupied
 static int       g_unit_slot_visible = -1;  // XGUnitNativeBase.IsAliveAndVisible
 static int       g_cursor_slot_floor = -1;  // XCom3DCursor.WorldZToCursorFloor
+static int       g_world_slot_seetile = -1; // XComWorldData.CanSeeActorToTile
+static int       g_unit_slot_flanking = -1; // XGUnitNativeBase.IsFlankingCoverPoint
+static void*     g_unit_fn_flanking;        // ...which is final, so not virtual
+static int       g_unit_slot_range = -1;    // XGUnitNativeBase.IsPointWithinFiringRange
 static uint8_t*  g_image_lo;            // the game's image, to check a vtable entry
 static uint8_t*  g_image_hi;            // points into it before calling it
 static void*     g_path_pawn;           // the pathing pawn that built the last path
@@ -1696,6 +1728,19 @@ static void* squad_player(void)
 // session never found UBoolProperty::BitMask ("no BitMask -- bools read as a
 // whole dword"), and that bool shares its dword with m_bIsDead, m_bIsSelected
 // and the rest, so any of them set read as friendly.
+// Liveness, where not knowing is not a reason to go quiet.
+//
+// objects_live can only answer once GObjObjects has been found. Without it
+// the mod has no way to ask, and refusing every unit would cost the whole
+// units readout -- who is on a tile, the radar, the squad list -- to guard
+// against a fault a build with no table cannot be protected from anyway. So
+// an unknown table means carry on, exactly as the mod did before this guard
+// existed. The table has been found on every run so far.
+static int unit_is_live(void* obj)
+{
+    return !objects_ready() || objects_live(obj);
+}
+
 static int unit_seen(UnitName* u, void* squad, UnitSeen* out)
 {
     const void* v;
@@ -1713,11 +1758,22 @@ static int unit_seen(UnitName* u, void* squad, UnitSeen* out)
         return 0;
     }
     void* unit = *(void* const*)v;
+
+    // ⛔ A live flag is not a live unit, and this is a CALL into the game.
+    // tile_vfn only proves the vtable entry points into the image, which a
+    // RECYCLED object's does perfectly well -- so without this the mod can
+    // call a real function of the wrong class on a wrong `this`. The
+    // 2026-09-21 logs show it twice, as "tile: units faulted" one step after
+    // a flag was dropped, with the game gone shortly after both times.
+    // objects_live asks the object table instead of trusting the pointer.
+    if (!unit_is_live(unit)) return 0;
+
     UnitTestFn visible = (UnitTestFn)tile_vfn(unit, g_unit_slot_visible);
     if (!visible || !visible(unit, NULL)) return 0;
     if (!field_ptr(unit, "m_kPawn", &g_unit_pawn, sizeof(void*), &v))
         return 0;
     void* pawn = *(void* const*)v;
+    if (!unit_is_live(pawn)) return 0;
     if (!field_ptr(pawn, "Location", &g_pawn_loc, 3 * sizeof(float), &v))
         return 0;
     out->who = u;
@@ -1822,6 +1878,154 @@ static void units_on_tile(int tx, int ty, int have_floor, float floor,
     }
 }
 
+// ---- would a soldier be seen here, and would the cover hold ----------------
+//
+// Measured against the enemies the squad has ALREADY seen, and no others.
+// The game will answer the wider question -- XGPlayer.IsEnemyUnitVisibleFromTile
+// walks a whole player's squad, tile and alternate height both -- but every
+// caller of it is the AI or a pod reveal, and nothing draws it: EU/EW puts no
+// eye marker over a hovered tile the way XCOM 2 does. Counting aliens nobody
+// has met would hand the player a fact the screen never shows.
+//
+// Within that restriction it is parity, and the flanking half is parity
+// outright: XGAction_Path.Update calls XComActionIconManager.AddFlankingIcons
+// every frame while the cursor moves, and IsLocationFlanking takes its
+// enemies from GetAllVisibleTargets -- the same restriction, made by the game
+// for the same reason.
+static void* unit_pawn(void* unit)
+{
+    const void* v;
+    if (!field_ptr(unit, "m_kPawn", &g_unit_pawn, sizeof(void*), &v)) return NULL;
+    return *(void* const*)v;
+}
+
+// Flanking is the ENEMY's question, asked of the cover point: the game's own
+// XComActionIconManager.IsLocationFlanked -- the thing that turns a cover
+// icon red -- walks the visible enemies and asks each
+// Enemy.IsFlankingCoverPoint(CoverPoint). The first attempt here went through
+// XGPlayer.TestUnitCoverExposure instead, which is the AI's cover scorer, and
+// it never once said flanked over a mission's worth of tiles.
+//
+// ⛔ The range gate is the game's and is not optional. IsLocationFlanked
+// skips an enemy for which
+//
+//     Enemy.IsPointWithinFiringRange(.., Enemy, CoverPoint.CoverLocation,
+//                                    Enemy.GetLocation())
+//
+// is false, and that is what makes flanking mean something against MELEE.
+// Cover is protection from being shot; a Chryssalid or a zombie does not
+// shoot, so a pack of them across the map turns no cover icon red and must
+// turn no readout red either. Without this gate the mod would say "flanked"
+// about an enemy the screen shows as no threat to the cover at all.
+//
+// fDistSq is the check on the whole call. It comes back as the squared
+// distance the native measured, and the two positions that went in are ours,
+// so it can be compared with the distance we can work out ourselves. A match
+// proves the Vectors landed where they were wanted, which nothing about a
+// bool return could. It also catches the cover point arriving empty, which
+// was the standing suspicion after the first run.
+#define EXPOSE_LOG_MAX 12
+static int g_expose_ok = 1;
+static int g_expose_logged;
+
+static float dist_sq_between(const float* a, const float* b)
+{
+    float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+    return dx * dx + dy * dy + dz * dz;
+}
+
+static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
+                          int has_cover, TileReport* r)
+{
+    r->enemies_known = 0;
+    r->seen_by = 0;
+    r->flanked = 0;
+
+    void* world = cursor_world();
+    void* squad = squad_player();
+    if (!world || !squad) return;
+
+    SeeTileFn see = (SeeTileFn)tile_vfn(world, g_world_slot_seetile);
+    if (!see) return;
+
+    static SeenSet sight;
+    squad_sight(squad, &sight);
+    if (!sight.n) return;
+    r->enemies_known = sight.n;
+
+    for (int i = 0; i < sight.n; i++) {
+        void* unit = sight.unit[i];
+
+        // ⛔ Nothing had ever DEREFERENCED these before. squad_sight builds
+        // the set out of each soldier's m_arrVisibleEnemies and the radar
+        // only ever compared the pointers, so a dead unit in it cost nothing;
+        // handing one to the game's own natives cost a crash. The 2026-09-21
+        // log has both halves of it one step apart -- "tile: units faulted",
+        // then "tile: report faulted (0xc0000005) reading 00000000" inside
+        // XComEW.exe -- as the one enemy in sight went down.
+        //
+        // Two guards, because they catch different things. objects_live asks
+        // the object table whether the pointer is still a live object, which
+        // catches a freed one; IsAliveAndVisible is the game's own test of
+        // the unit, and is the check XComActionIconManager.IsLocationFlanked
+        // opens with (`Enemy.IsAliveAndWell()`) and that this port dropped.
+        if (!unit_is_live(unit)) continue;
+        UnitTestFn alive = (UnitTestFn)tile_vfn(unit, g_unit_slot_visible);
+        if (!alive || !alive(unit, NULL)) continue;
+
+        void* pawn = unit_pawn(unit);
+        if (!pawn || !unit_is_live(pawn)) continue;
+        if (!see(world, NULL, pawn, tx, ty, tz, 0)) continue;
+        r->seen_by++;
+
+        if (!has_cover || r->flanked || !g_expose_ok) continue;
+
+        // Not virtual, so there is no vtable to go through -- the address is
+        // fixed and `this` still travels in ecx.
+        FlankCoverFn flanking = g_unit_fn_flanking
+            ? (FlankCoverFn)g_unit_fn_flanking
+            : (FlankCoverFn)tile_vfn(unit, g_unit_slot_flanking);
+        FiringRangeFn in_range = (FiringRangeFn)tile_vfn(unit, g_unit_slot_range);
+        if (!flanking || !in_range) continue;
+
+        const void* v;
+        if (!field_ptr(pawn, "Location", &g_pawn_loc, 3 * sizeof(float), &v)) continue;
+        const float* eloc = (const float*)v;
+        const float* cov = cp->cover_location;
+
+        float height_bonus = 0.0f, dist_sq = SENTINEL_FLOAT;
+        int reaches = in_range(unit, NULL, &height_bonus, &dist_sq, unit,
+                               cov[0], cov[1], cov[2],
+                               eloc[0], eloc[1], eloc[2], NULL, 0.0f);
+        float want = dist_sq_between(cov, eloc);
+        int past = reaches ? flanking(unit, NULL, *cp) : 0;
+
+        if (g_expose_logged < EXPOSE_LOG_MAX) {
+            g_expose_logged++;
+            logf_("exposure: cover %d,%d,%d flags 0x%05X at (%.0f, %.0f, %.0f); "
+                  "enemy at (%.0f, %.0f, %.0f); in range %d, dist^2 %.0f "
+                  "(ours %.0f), height bonus %.2f -> flanking %d\n",
+                  cp->x, cp->y, cp->z, (unsigned)cp->flags,
+                  cov[0], cov[1], cov[2], eloc[0], eloc[1], eloc[2],
+                  reaches, dist_sq, want, height_bonus, past);
+        }
+
+        // A squared distance the native disagrees with by more than a few
+        // per cent means the Vectors did not go over the way it reads them,
+        // and every answer built on them is noise. Said once, then dropped.
+        if (dist_sq == SENTINEL_FLOAT || dist_sq < 0.0f ||
+            (want > 1.0f && (dist_sq < want * 0.9f || dist_sq > want * 1.1f))) {
+            g_expose_ok = 0;
+            logf_("exposure: the native measured dist^2 %.0f where the two "
+                  "positions give %.0f -- the call is not landing; flanking "
+                  "dropped for this session\n", dist_sq, want);
+            continue;
+        }
+
+        if (past) r->flanked = 1;
+    }
+}
+
 // Describes tile (tx, ty) with its floor at `floor`. Returns 0 when the game
 // could not be asked, leaving `say` empty. `with_dash` is off where the last
 // path is not this tile's; `with_who` off where the units were said already.
@@ -1854,6 +2058,7 @@ static int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     r.cover_flags = has_cover ? cp.flags : 0;
     r.smoke = smoke ? smoke(world, NULL, tx, ty, tz) != 0 : 0;
     r.poison = poison ? poison(world, NULL, tx, ty, tz) != 0 : 0;
+    tile_exposure(tx, ty, tz, &cp, has_cover, &r);
     int cost = -1, std = -1, maxc = -1, moves = -1, turns = 0;
     int reach = with_dash ? tile_dash(&cost, &std, &maxc, &moves, &turns) : -1;
     r.dash = reach == 1;
@@ -1869,9 +2074,10 @@ static int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     // asked about -- and on the layer this file worked out for smoke.
     logf_("tile: %d, %d floor %.1f (layer %d): cover %s flags 0x%05X at %d, %d, %d; "
           "path cost %d, standard move %d, max %d, moves made %d, turns %d, smoke %d, "
-          "poison %d -> \"%s\"\n",
+          "poison %d, seen by %d of %d known%s -> \"%s\"\n",
           tx, ty, floor, tz, has_cover ? "yes" : "no", (unsigned)cp.flags,
-          cp.x, cp.y, cp.z, cost, std, maxc, moves, turns, r.smoke, r.poison, say);
+          cp.x, cp.y, cp.z, cost, std, maxc, moves, turns, r.smoke, r.poison,
+          r.seen_by, r.enemies_known, r.flanked ? ", flanked" : "", say);
     return 1;
 }
 
@@ -2145,19 +2351,61 @@ static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
     g_image_lo = (uint8_t*)mod;
     g_image_hi = (uint8_t*)mod + nt->OptionalHeader.SizeOfImage;
 
-    static const struct { const char* name; int* slot; } want[] = {
-        { "UXComWorldDataexecGetCoverPoint",         &g_tile_slot_cover },
-        { "UXComWorldDataexecTileContainsSmoke",     &g_tile_slot_smoke },
-        { "UXComWorldDataexecTileContainsPoison",    &g_tile_slot_poison },
-        { "UXComWorldDataexecIsTileOccupied",        &g_tile_slot_occupied },
-        { "AXGUnitNativeBaseexecIsAliveAndVisible",  &g_unit_slot_visible },
-        { "AXCom3DCursorexecWorldZToCursorFloor",    &g_cursor_slot_floor },
+    // Named without the C++ class prefix: natives_find_class tries both, so
+    // an Actor that the decompile's `// Export` comment calls a UObject --
+    // XGUnitNativeBase is one -- cannot cost a live run to notice.
+    static const struct { const char* name; int* slot; void** direct; } want[] = {
+        { "XComWorldDataexecGetCoverPoint",          &g_tile_slot_cover,    NULL },
+        { "XComWorldDataexecTileContainsSmoke",      &g_tile_slot_smoke,    NULL },
+        { "XComWorldDataexecTileContainsPoison",     &g_tile_slot_poison,   NULL },
+        { "XComWorldDataexecIsTileOccupied",         &g_tile_slot_occupied, NULL },
+        { "XComWorldDataexecCanSeeActorToTile",      &g_world_slot_seetile, NULL },
+        { "XGUnitNativeBaseexecIsFlankingCoverPoint", &g_unit_slot_flanking,
+                                              &g_unit_fn_flanking },
+        { "XGUnitNativeBaseexecIsPointWithinFiringRange", &g_unit_slot_range, NULL },
+        { "XGUnitNativeBaseexecIsAliveAndVisible",   &g_unit_slot_visible,  NULL },
+        { "XCom3DCursorexecWorldZToCursorFloor",     &g_cursor_slot_floor,  NULL },
     };
     for (int i = 0; i < (int)(sizeof want / sizeof want[0]); i++) {
-        const uint8_t* code = (const uint8_t*)natives_find(tbl, n, want[i].name);
-        *want[i].slot = code && readable(code, 0x180) ? tile_vtable_slot(code, 0x180) : -1;
-        if (*want[i].slot < 0) logf_("  %-38s vtable slot NOT FOUND\n", want[i].name);
-        else                   logf_("  %-38s vtable +0x%X\n", want[i].name, *want[i].slot);
+        const uint8_t* code = (const uint8_t*)natives_find_class(tbl, n, want[i].name);
+
+        // The window was 0x180, which is long enough for a thunk that decodes
+        // three ints and not obviously for one that decodes seven arguments
+        // including two Vectors by value. Widening it cannot cost anything:
+        // the scan stops at the thunk's own `ret 8` whatever the window says.
+        size_t win = 0x400;
+        if (code && !readable(code, win)) win = 0x180;
+        *want[i].slot = code && readable(code, win) ? tile_vtable_slot(code, win) : -1;
+
+        if (*want[i].slot >= 0) {
+            logf_("  %-38s vtable +0x%X\n", want[i].name, *want[i].slot);
+            continue;
+        }
+
+        // No slot to find: the thunk may be calling the implementation
+        // outright, which is what a `final` script function compiles to.
+        const uint8_t* direct = code && readable(code, win)
+            ? tile_direct_target(code, win, g_image_lo, g_image_hi) : NULL;
+        if (direct && want[i].direct) {
+            *want[i].direct = (void*)direct;
+            logf_("  %-38s direct %p (rva %08X) -- not virtual\n",
+                  want[i].name, direct, (unsigned)(direct - g_image_lo));
+            continue;
+        }
+        logf_("  %-38s vtable slot NOT FOUND\n", want[i].name);
+
+        // Two things produce that, and they want different answers: a thunk
+        // longer than the window, and a native the compiler called DIRECTLY
+        // because the script declared it `final` -- a final function is not
+        // virtual, so there is no slot to find and never will be. Guessing
+        // between them costs a run each; the bytes say which in one.
+        if (!code || !readable(code, 0x80)) continue;
+        for (int off = 0; off < 0x80; off += 32) {
+            char hex[3 * 32 + 1];
+            for (int b = 0; b < 32; b++)
+                _snprintf_s(hex + b * 3, 4, _TRUNCATE, "%02X ", code[off + b]);
+            logf_("      +%03X  %s\n", off, hex);
+        }
     }
 }
 

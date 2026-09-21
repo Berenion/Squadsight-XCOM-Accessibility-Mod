@@ -456,6 +456,25 @@ int objects_each(const void* const* classes, int n, ObjectVisitFn fn, void* ctx)
     return objects_each_from(classes, n, 0, NULL, fn, ctx);
 }
 
+int objects_live(void* obj)
+{
+    if (!g_objs || !obj || !g_index_off) return 0;
+    if (!readable(g_objs, sizeof *g_objs)) return 0;
+
+    void** data = (void**)g_objs->Data;
+    int total = g_objs->Num;
+    if (!data || total <= 0) return 0;
+    if (!region_ok(obj, 0x60)) return 0;
+
+    // The object is asked where it thinks it sits and the table is asked to
+    // agree -- the same invariant the probe was built on. A freed object's
+    // slot is nulled, so a pointer kept from a moment ago fails here.
+    int32_t idx = *(const int32_t*)((const uint8_t*)obj + g_index_off);
+    if (idx < 0 || idx >= total) return 0;
+    if (!region_ok(&data[idx], sizeof(void*))) return 0;
+    return data[idx] == obj;
+}
+
 int objects_still(void* obj, int idx, const void* const* classes, int n)
 {
     if (!g_objs || !obj || idx < 0 || !classes || n <= 0) return 0;
