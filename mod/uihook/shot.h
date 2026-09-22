@@ -75,6 +75,18 @@ int shot_is_panel(const char* obj_name);
 int shot_note(const char* fn, const char* a, const char* b, int flag,
               char* out, size_t out_sz);
 
+// Forgets what was last announced, so the next burst is spoken even if it is
+// the same shot. Called when targeting is lowered (a cancel, or the shot
+// taken): picking the same ability again is a new decision, not a repeat.
+// The weapon is kept, since it has not changed.
+void shot_forget_said(void);
+
+// While the numpad moves a free aim, each step is followed by its odds alone:
+// "0% to hit", not "Free Aiming: Fire Rocket. 0% to hit. Rocket Launcher".
+// The name is still said for a shot with no odds, since then it is all there
+// is. The weapon is left out.
+void shot_set_brief(int on);
+
 // Forgets the shot being accumulated.  Used by the offline checks, and when
 // the tactical HUD goes away.
 void shot_reset(void);

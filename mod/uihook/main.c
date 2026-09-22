@@ -52,6 +52,7 @@
 #include "objects.h"
 #include "help.h"
 #include "shot.h"
+#include "abar.h"
 #include "cursor.h"
 #include "nav.h"
 #include "tile.h"
@@ -568,6 +569,73 @@ static void read_array(const FArray* a, Payload* out)
     }
 }
 
+// ---- the ability bar -------------------------------------------------------
+//
+// PopulateFlash's arrUpdateAbilitiesData is a command stream (abar.h), and
+// read_array flattens it into strings and numbers, which loses both the
+// order across types and the nulls that mark where each slot begins. So the
+// frame is walked again here for the one array, and it is handed over whole.
+//
+// The array is found by what it is -- the frame's ArrayProperty whose every
+// element carries a valid ASValue type -- not by its name.
+#define ABAR_STREAM_MAX 512
+#define ABAR_TEXT       64
+
+static void*     g_abar_obj;            // the container the bar was kept for
+static int       g_abar_logged_fail;
+
+static int abar_from_frame(void* stack)
+{
+    void* node = *(void**)((uint8_t*)stack + FFRAME_NODE);
+    uint8_t* locals = *(uint8_t**)((uint8_t*)stack + FFRAME_LOCALS);
+    if (!node || !locals) return -1;
+
+    static AbarValue vals[ABAR_STREAM_MAX];
+    static char      text[ABAR_STREAM_MAX][ABAR_TEXT];
+
+    void* prop = NULL;
+    if (readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
+        prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
+    for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
+        if (!readable(prop, 0x68)) break;
+        uint32_t off = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
+        void* next   = *(void**)((uint8_t*)prop + UFIELD_NEXT);
+        char cls[64];
+        if (off < 0x1000 && object_class_name(prop, cls, sizeof cls) &&
+            strcmp(cls, "ArrayProperty") == 0) {
+            const FArray* a = (const FArray*)(locals + off);
+            if (readable(a, sizeof *a) && a->Num > 0 && a->Num <= ABAR_STREAM_MAX &&
+                a->Max >= a->Num &&
+                readable(a->Data, (size_t)a->Num * ASVALUE_STRIDE)) {
+                const uint8_t* base = (const uint8_t*)a->Data;
+                int ok = 1;
+                for (int i = 0; i < a->Num && ok; i++) {
+                    const uint8_t* e = base + (size_t)i * ASVALUE_STRIDE;
+                    AbarValue* v = &vals[i];
+                    v->type = *(const int32_t*)(e + ASVALUE_TYPE);
+                    v->n = 0; v->b = 0; v->s = NULL;
+                    switch (v->type) {
+                    case ABAR_NULL: break;
+                    case ABAR_NUMBER: v->n = *(const float*)(e + ASVALUE_N); break;
+                    case ABAR_BOOL:   v->b = *(const int32_t*)(e + ASVALUE_B) != 0; break;
+                    case ABAR_STRING:
+                        // An empty FString is a real value here ("" hotkey);
+                        // read_fstring refuses it, so it stands as "".
+                        if (!read_fstring((const FString*)(e + ASVALUE_S), text[i], ABAR_TEXT))
+                            text[i][0] = 0;
+                        v->s = text[i];
+                        break;
+                    default: ok = 0;
+                    }
+                }
+                if (ok) return abar_feed(vals, a->Num);
+            }
+        }
+        prop = next;
+    }
+    return -1;
+}
+
 // Remembers which (object, function) last spoke, so that a screen publishing
 // one row per call can be told apart from a genuine announcement.
 static void*     g_last_obj;
@@ -583,6 +651,27 @@ static __declspec(thread) char tls_where[256];
 static void unit_note(void* flag, const char* name, const char* nick);
 static void unit_flag_drew(void* flag, const char* fn, const Payload* p);
 static void shot_target_now(void* stack);
+
+// Aiming a cursor-moving ability (a rocket, a grenade) rather than choosing a
+// move. The game's aim point is the battle cursor's feet
+// (ActiveUnit_Firing_WithMoveCharacteristics.PostProcessCheckGameLogic ->
+// SetTargetLoc(CURSOR.GetCursorFeetLocation())), and Mouse_CheckForFreeAim
+// places the cursor through CursorSetLocation, the same chain movement uses.
+// So navigation drives the aim the same way it drives a move, with three
+// differences: it starts from the aim rather than the soldier; the tile goes
+// in at ProcessChainedDistance, the range leash, rather than after it, so the
+// game still clamps the aim to the ability's range; and a step is announced
+// when the aim lands, since no path is ever built to judge it by.
+static int       g_nav_aim;
+static float     g_aim_floor;           // the floor the aim stands on (aim_floor)
+static int soldier_aiming(void);
+static void nav_stop(const char* why);
+
+// The aiming reticle's last message, and when it was said. See capture_body.
+#define RETICLE_REPEAT_MS 3000
+static char      g_reticle_said[128];
+static ULONGLONG g_reticle_said_at;
+
 static void strip_note(void* strip, const char* fn, const Payload* p);
 
 static void capture_body(const char* tag, LONG n, void* stack)
@@ -679,6 +768,63 @@ static void capture_body(const char* tag, LONG n, void* stack)
     if (strncmp(obj_name, "UISightlineHUD_SightlineContainer", 33) == 0)
         strip_note(object, fn_name, p);
 
+    // The ability bar, kept for numpad . to read. Nothing is said as it
+    // passes: it is rebuilt on every soldier switch, move and target change.
+    if (strncmp(obj_name, "UITacticalHUD_AbilityContainer", 30) == 0) {
+        if (object != g_abar_obj) {
+            abar_reset();
+            g_abar_obj = object;
+        }
+        if (strstr(fn_name, "SetNumActiveAbilities") && p->nnumbers > 0) {
+            abar_set_count((int)p->numbers[0]);
+        } else if (strcmp(fn_name, "PopulateFlash") == 0) {
+            int got = abar_from_frame(stack);
+            if (got < 0 && !g_abar_logged_fail) {
+                g_abar_logged_fail = 1;
+                logf_("[%ld] abar: PopulateFlash's stream did not parse -- the bar "
+                      "will be out of date\n", n);
+            } else if (got >= 0) {
+                char bar[1024];
+                abar_describe(bar, sizeof bar);
+                logf_("[%ld] abar: %d slot%s updated -> \"%s\"\n", n, got,
+                      got == 1 ? "" : "s", bar);
+            }
+            return;
+        }
+    }
+
+    // Targeting lowered, by Escape or by the shot being taken. Without this,
+    // picking the same ability again after a cancel was dropped as a repeat
+    // and said nothing.
+    // UITacticalHUD is the only class with this function, in both builds.
+    if (strcmp(fn_name, "LowerTargetSystem") == 0) {
+        shot_forget_said();
+        g_reticle_said[0] = 0;
+        // An aim has nothing left to point once targeting is down.
+        if (g_nav_aim) nav_stop("targeting lowered");
+    }
+
+    // The aiming reticle's message: "Shot is blocked." is the one warning the
+    // game gives before a free-aimed shot goes into a wall, and it is drawn
+    // nowhere else. UITargetingReticle.UpdateShotData sends it when the
+    // blocked state changes, and OnInit sends an empty one while the reticle
+    // builds, so an empty message is not "clear" and is not spoken. The same
+    // message is said again only after a pause, so the re-send that follows
+    // OnInit is not heard twice.
+    if (strncmp(obj_name, "UITargetingReticle", 18) == 0 &&
+        strcmp(fn_name, "SetCursorMessage") == 0) {
+        const char* msg = p->nstrings ? p->strings[0] : "";
+        ULONGLONG t = GetTickCount64();
+        if (*msg && (strcmp(msg, g_reticle_said) != 0 ||
+                     t - g_reticle_said_at > RETICLE_REPEAT_MS)) {
+            strncpy_s(g_reticle_said, sizeof g_reticle_said, msg, _TRUNCATE);
+            g_reticle_said_at = t;
+            logf_("[%ld] %s %s.%s  RETICLE \"%s\"\n", n, tag, obj_name, fn_name, msg);
+            if (g_speak && !muted()) speech_say(msg);
+            return;
+        }
+    }
+
     if (shot_is_panel(obj_name)) {
         // Each argument arrives twice -- once as the parameter, once inside
         // the ASValue array built from it -- so the first occurrences are
@@ -702,10 +848,17 @@ static void capture_body(const char* tag, LONG n, void* stack)
         if (strstr(fn_name, "UpdateLayout")) shot_target_now(stack);
 
         char say[SHOT_MAX_TEXT];
+        shot_set_brief(g_nav_aim);
         if (shot_note(fn_name, a, b, flag, say, sizeof say)) {
             logf_("[%ld] %s %s.%s  SHOT \"%s\"\n", n, tag, obj_name, fn_name, say);
-            speech_cancel_pending();
-            if (g_speak && !muted()) speech_say_now(say);
+            // While the numpad moves an aim, the chance follows the step that
+            // moved it, and must not cut its coordinates off.
+            if (g_nav_aim) {
+                if (g_speak && !muted()) speech_say(say);
+            } else {
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_now(say);
+            }
         } else if (*a) {
             logf_("[%ld] %s %s.%s  SHOT held \"%s\"%s%s\n", n, tag, obj_name,
                   fn_name, a, *b ? " / " : "", b);
@@ -1457,6 +1610,13 @@ static int       g_tile_slot_cover = -1, g_tile_slot_smoke = -1, g_tile_slot_poi
 static int       g_tile_slot_occupied = -1; // XComWorldData.IsTileOccupied
 static int       g_tile_slot_onfloor = -1;  // XComWorldData.IsPositionOnFloor
 static int       g_tile_slot_standable = -1; // ...OnFloorAndValidDestination
+static int       g_tile_slot_floorz = -1;   // XComWorldData.GetFloorZForPosition
+// float GetFloorZForPosition(const out Vector Position, optional bool
+// bUnlimitedSearch): the out Vector goes by pointer, as for IsPositionOnFloor,
+// and a float comes back in st(0) whatever the convention. When it finds no
+// floor it hands back the height it was given (XGUnit.IsAttemptingToHover
+// relies on that).
+typedef float (__fastcall* FloorZFn)(void* self, void* edx, const float* pos, int unlimited);
 static int       g_unit_slot_visible = -1;  // XGUnitNativeBase.IsAliveAndVisible
 static int       g_cursor_slot_floor = -1;  // XCom3DCursor.WorldZToCursorFloor
 static int       g_world_slot_seetile = -1; // XComWorldData.CanSeeActorToTile
@@ -2051,7 +2211,10 @@ static void shot_target_now(void* stack)
         !field_ptr(action, "m_kTargetedEnemy", &g_targeted, sizeof(void*), &v))
         return;
     void* target = *(void* const*)v;
-    if (!target) return;
+    // Hunker Down, Reload and Overwatch aim at the soldier using them, and
+    // naming the soldier back to the player says nothing. Stabilize and
+    // Revive aim at somebody else, who is worth naming.
+    if (!target || target == unit) return;
 
     UnitName* u = unit_by_unit(target);
     if (!u) return;
@@ -2570,6 +2733,68 @@ static void tile_refusal_probe(int tx, int ty, float ground, char* say, size_t s
           tx, ty, ground, mid, seen, say);
 }
 
+// The floor an aim lands on at a tile. The aim is the cursor's feet, and
+// nav_aim_substitute puts in a height as well as the tile -- only X and Y went
+// in at first, and every aim of the 2026-09-22 run sat at 259.2, the height of
+// the soldier on the roof who was lent to it, three storeys above the
+// Chryssalid it was fired at. So the height is the tile's own floor: the first
+// layer at or below the aim's current floor that the game marks as floor
+// (IsPositionOnFloor), which steps off a roof onto the ground and stays on a
+// roof walked along; failing that, the nearest above, a few layers up.
+//
+// The layer only says a floor is somewhere inside it: 64 units. The exact
+// height is then asked of GetFloorZForPosition from the layer's top, which
+// searches down and finds it (floors were found from 64 above in the height
+// probe, never from 247). The layer's bottom stands in if that cannot be
+// called: 0 lies in layer -1..63 on the map with Min.Z -193. `from` is
+// returned when the game cannot be asked or finds nothing.
+#define AIM_FLOOR_UP 3
+
+static float aim_floor_exact(void* world, float* pos, float bottom)
+{
+    FloorZFn floorz = (FloorZFn)tile_vfn(world, g_tile_slot_floorz);
+    if (!floorz) return bottom;
+    pos[2] = bottom + 64.0f;
+    float z = floorz(world, NULL, pos, 0);
+    // The height it was given back means none found; anything outside the
+    // layer is a different floor from the one the flags found.
+    if (z == pos[2] || !(z >= bottom - 1.0f && z <= bottom + 64.0f)) return bottom;
+    return z;
+}
+
+static float aim_floor(const CursorGrid* g, int tx, int ty, float from)
+{
+    void* world = cursor_world();
+    if (!world) return from;
+    PositionTestFn on_floor = (PositionTestFn)tile_vfn(world, g_tile_slot_onfloor);
+    if (!on_floor) return from;
+    int start = cursor_tile_axis(from + 4.0f, g->min_z, 64.0f);
+    float pos[3] = {
+        g->min_x + ((float)tx + 0.5f) * CURSOR_TILE,
+        g->min_y + ((float)ty + 0.5f) * CURSOR_TILE,
+        0.0f,
+    };
+    Fault f;
+    __try {
+        for (int tz = start; tz >= 0; tz--) {
+            if (g->num_z > 0 && tz >= g->num_z) continue;
+            pos[2] = g->min_z + ((float)tz + 0.5f) * 64.0f;
+            if (on_floor(world, NULL, pos))
+                return aim_floor_exact(world, pos, g->min_z + (float)tz * 64.0f);
+        }
+        for (int tz = start + 1; tz <= start + AIM_FLOOR_UP; tz++) {
+            if (tz < 0 || (g->num_z > 0 && tz >= g->num_z)) break;
+            pos[2] = g->min_z + ((float)tz + 0.5f) * 64.0f;
+            if (on_floor(world, NULL, pos))
+                return aim_floor_exact(world, pos, g->min_z + (float)tz * 64.0f);
+        }
+    }
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        fault_log("nav: aim floor", &f, NULL);
+    }
+    return from;
+}
+
 // A tile no path reaches. A unit standing on it is the likeliest reason, and
 // worth more than the verdict: when one was found on arrival, its name is the
 // whole answer. Otherwise the tile's flags say why.
@@ -2669,6 +2894,7 @@ static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
         { "XComWorldDataexecTileContainsPoison",     &g_tile_slot_poison,   NULL },
         { "XComWorldDataexecIsTileOccupied",         &g_tile_slot_occupied, NULL },
         { "XComWorldDataexecIsPositionOnFloor",      &g_tile_slot_onfloor,  NULL },
+        { "XComWorldDataexecGetFloorZForPosition",   &g_tile_slot_floorz,   NULL },
         { "XComWorldDataexecIsPositionOnFloorAndValidDestination",
                                               &g_tile_slot_standable, NULL },
         { "XComWorldDataexecCanSeeActorToTile",      &g_world_slot_seetile, NULL },
@@ -2734,6 +2960,7 @@ static void nav_stop(const char* why)
     // just put it -- the walls are still there, and the player has not
     // stopped needing to hear them.
     g_nav_live = 0;
+    g_nav_aim = 0;
     g_nav_parked = 0;
     g_tile_due = 0;
     g_step_pending = 0;
@@ -2846,6 +3073,9 @@ static void nav_arrive(int tx, int ty)
     g_step_pending = 1;
     g_step_deadline = GetTickCount64() + STEP_FALLBACK_MS;
     g_path_calls = 0;
+    // An aim is announced when it lands (nav_aim_landed): no path is built
+    // to it, and the soldier's own tile is nothing special to a rocket.
+    if (g_nav_aim) return;
     // With no verdict coming for the soldier's own tile, its cover is
     // described on a timer instead, once the floor search has settled.
     if (mine) {
@@ -2871,8 +3101,18 @@ static void nav_press(int digit, int gliding)
         return;
     }
 
-    // Until a step has been taken, "here" is the soldier, not the mouse.
-    if (!nav_active()) {
+    // Moving and aiming place the cursor for different reasons, so a
+    // navigation begun for one is not carried into the other.
+    int aiming = soldier_aiming();
+    if (nav_active() && aiming != g_nav_aim)
+        nav_stop(aiming ? "aiming began" : "aiming ended");
+
+    // Until a step has been taken, "here" is the soldier, not the mouse --
+    // except while aiming, where the cursor IS the aim, and the aim is what
+    // the player is moving.
+    if (!nav_active() && aiming) {
+        logf_("nav: aiming -- starting from the aim on %d, %d (z %.1f)\n", tx, ty, z);
+    } else if (!nav_active()) {
         int sx, sy;
         float sz;
         if (soldier_tile(&g, &sx, &sy, &sz) &&
@@ -2945,7 +3185,10 @@ static void nav_press(int digit, int gliding)
         g_nav_parked = 0;
         navh_set_ground(z - NAV_CURSOR_LIFT);
         navh_begin_tile();
-        logf_("nav: begins on %d, %d, ground estimate %.1f\n", tx, ty, navh_ground());
+        g_nav_aim = aiming;
+        g_aim_floor = z - NAV_CURSOR_LIFT;
+        logf_("nav: begins on %d, %d, ground estimate %.1f%s\n", tx, ty, navh_ground(),
+              aiming ? ", aiming" : "");
     }
 
     char say[NAV_MAX_TEXT + TILE_MAX_TEXT];
@@ -2973,9 +3216,22 @@ static void nav_press(int digit, int gliding)
     }
 
     // The middle of the tile; the height comes from navh_query_z each frame.
+    // An aim is asked at one height instead: the floor search is driven by
+    // path verdicts, aiming builds no paths, and the cursor snaps itself to
+    // the floor as it moves (XCom3DCursor's CursorSnapToFloor).
     g_nav_world[0] = g.min_x + ((float)tx + 0.5f) * CURSOR_TILE;
     g_nav_world[1] = g.min_y + ((float)ty + 0.5f) * CURSOR_TILE;
-    g_nav_world[2] = navh_query_z();
+    if (g_nav_aim) {
+        float was = g_aim_floor;
+        g_aim_floor = aim_floor(&g, tx, ty, g_aim_floor);
+        if (g_aim_floor != was)
+            logf_("nav: aim floor %.1f -> %.1f at %d, %d\n", was, g_aim_floor, tx, ty);
+    }
+    // The floor itself, not the cursor's height above it: getValidLocation
+    // adds the cursor's collision height to what it is given, as it does for
+    // a move, whose pick point is the ground. Given floor + lift, the aim sat
+    // 63 units up on flat ground in the run of 2026-09-22.
+    g_nav_world[2] = g_nav_aim ? g_aim_floor : navh_query_z();
     g_nav_live = 1;
     g_nav_key_at = GetTickCount64();
 
@@ -3244,6 +3500,23 @@ static void* soldier_unit(void)
         return NULL;
     void* unit = *(void* const*)v;
     return unit && unit_is_live(unit) ? unit : NULL;
+}
+
+// Whether the soldier is aiming: their current action is the targeting one
+// (XGAction_Targeting in EW; EU aims inside XGAction_Fire, as shot_target_now
+// notes). Told by the action object's name, since its class is what differs.
+static int soldier_aiming(void)
+{
+    void* unit = soldier_unit();
+    const void* v;
+    if (!unit || !field_ptr(unit, "m_kCurrAction", &g_curr_action, sizeof(void*), &v))
+        return 0;
+    void* action = *(void* const*)v;
+    char name[128];
+    if (!action || !unit_is_live(action) || !object_name(action, name, sizeof name))
+        return 0;
+    return strncmp(name, "XGAction_Targeting", 18) == 0 ||
+           strncmp(name, "XGAction_Fire", 13) == 0;
 }
 
 static void scan_add_targets(void)
@@ -3830,11 +4103,16 @@ static void scan_focus(int tx, int ty, float ground, const char* what)
     g_nav_parked = 0;
     navh_set_ground(ground);
     navh_begin_tile();
+    // While aiming, Home puts the aim on the selection -- at the floor under
+    // it, which for a unit on a roof is the roof. It is also the one way to
+    // lift an aim onto a higher floor: numpad steps only ever go down to one.
+    g_nav_aim = soldier_aiming();
+    if (g_nav_aim) g_aim_floor = aim_floor(&g, tx, ty, ground);
     nav_arrive(tx, ty);
 
     g_nav_world[0] = g.min_x + ((float)tx + 0.5f) * CURSOR_TILE;
     g_nav_world[1] = g.min_y + ((float)ty + 0.5f) * CURSOR_TILE;
-    g_nav_world[2] = navh_query_z();
+    g_nav_world[2] = g_nav_aim ? g_aim_floor : navh_query_z();
     g_nav_live = 1;
     g_nav_key_at = GetTickCount64();
     logf_("scan: cursor to %s on %d, %d, ground %.1f\n", what, tx, ty, ground);
@@ -3941,6 +4219,244 @@ static void scan_poll(void)
     }
 }
 
+// ---- the ability menu ------------------------------------------------------
+//
+// Numpad . opens the ability bar as a menu: numpad 8 / 2 or the Up / Down
+// arrows walk it, numpad 5 says the entry again, numpad . or Escape closes
+// it. Each entry is the key and name, the status, and the ability's own
+// tooltip -- XGAbility.strHelp, what GetHelpText returns and the info panel
+// shows while aiming (SetHelp). It is read off the container's
+// m_arrAbilities, the same array PopulateFlash drew slot by slot.
+//
+// Decimal is bound to nothing in a mission -- DefaultInput.ini names it only
+// in the edit-box alias lists, as it does * and /. The arrows and Escape are
+// bound (Arrow_Up .. InputEvent 500-503, Escape 510), so while the menu is
+// open they are kept from the game in hook_moviecheck, the same way End is.
+static FieldSlot g_bar_abilities, g_ability_help;
+
+static void abar_help(int index, char* out, size_t out_sz)
+{
+    out[0] = 0;
+    const void* v;
+    if (!g_abar_obj || !unit_is_live(g_abar_obj) ||
+        !field_ptr(g_abar_obj, "m_arrAbilities", &g_bar_abilities, sizeof(FArray), &v))
+        return;
+    const FArray* a = (const FArray*)v;
+    if (index < 0 || index >= a->Num || a->Num > 64 ||
+        !readable(a->Data, (size_t)a->Num * sizeof(void*)))
+        return;
+    void* ability = ((void* const*)a->Data)[index];
+    if (!ability || !unit_is_live(ability) ||
+        !field_ptr(ability, "strHelp", &g_ability_help, sizeof(FString), &v))
+        return;
+    if (read_fstring((const FString*)v, out, out_sz)) strip_markup(out);
+}
+
+static void abar_say_entry(void)
+{
+    char help[512], say[1024];
+    int i = abar_menu_index();
+    abar_help(i, help, sizeof help);
+    if (!abar_entry(i, help, say, sizeof say))
+        strncpy_s(say, sizeof say, "No abilities.", _TRUNCATE);
+    logf_("abar: %d of %d \"%s\"\n", i + 1, abar_count(), say);
+    speech_cancel_pending();
+    speech_say_now(say);
+}
+
+// The menu's keys, as last seen: numpad ., numpad 8, numpad 2, numpad 5, Up,
+// Down, Escape, Enter, Space.
+#define MENU_KEYS 9
+static const int g_menu_vk[MENU_KEYS] = {
+    VK_DECIMAL, VK_NUMPAD8, VK_NUMPAD2, VK_NUMPAD5, VK_UP, VK_DOWN, VK_ESCAPE,
+    VK_RETURN, VK_SPACE
+};
+static int g_menu_was[MENU_KEYS];
+
+// Enter uses the ability: it becomes the ability's own number key.
+//
+// In a mission Enter and Space both raise InputEvent(513) (Spacebar_Key_Press;
+// Enter's binding in [XComGame.XComTacticalInput] is the same command), and
+// the number keys 1-0 raise 612-621, which
+// UITacticalHUD_AbilityContainer.OnUnrealCommand turns into
+// DirectPickAbility(0..9) -- on the key's RELEASE, since it returns early for
+// anything without mask 32. So nothing is synthesised: the Enter keystroke's
+// own two events are rewritten in InputEvent's frame, press and release, from
+// 513 to 612 + index, and the game does exactly what that number key does.
+//
+// The rewrite has to happen before InputEvent looks at Cmd at all, and in EW
+// that is earlier than IsAnyMoviePlaying. EW's InputEvent opens with
+// PreProcessEventMatching, which drops a release unless m_arrEventTrackers
+// holds a press of the same Cmd, and it closes with ActivateTracker(Cmd), which
+// records the press under whatever Cmd has become by then. Rewritten at
+// IsAnyMoviePlaying, the press was recorded as the number key, Enter's release
+// was dropped before the hook ever saw it, and the number key stayed "held":
+// InputRepeatTimer sent it again every 0.1 s for the rest of the session. That
+// was the stream of 614-616 the pause menu received with nobody pressing
+// anything. So the rewrite is done at GetEngine, the first native InputEvent
+// calls, in both builds (the copy-protection check); EU matches after
+// IsAnyMoviePlaying, but the earlier point is right for it too.
+// That means the same thing a second press of a number key means:
+// the first selects the ability and raises targeting, and picking the one
+// already selected fires it (DirectPickAbility -> OnAccept).
+//
+// An ability past the tenth has no number key and so cannot be picked this
+// way; the menu says so.
+#define INPUT_CMD_ENTER     513
+#define INPUT_CMD_ABILITY_1 612
+#define ABILITY_KEYS        10
+#define PICK_WAIT_MS        500
+static int       g_pick_index = -1;     // chosen by the poll, for the hook
+static ULONGLONG g_pick_until;
+static int       g_pick_release_to = -1; // Enter's release, still to rewrite
+
+// The game's side of the same keys: presses are taken while the menu is open,
+// and for a moment after it closes, because the frame that closes the menu may
+// run before the game's InputEvent for the key that closed it.
+//
+// Releases are never taken, because the game already drops them. A press
+// swallowed at IsAnyMoviePlaying returns before InputEvent's ActivateTracker,
+// so no tracker is made, and PreProcessEventMatching drops the release (EW
+// before this hook, EU after it). That is also why the Escape that closed the
+// menu cannot reach the game alone.
+#define MENU_GRACE_MS 150
+static ULONGLONG g_menu_grace_until;
+
+static void abar_menu_end(const char* why)
+{
+    abar_menu_close();
+    g_menu_grace_until = GetTickCount64() + MENU_GRACE_MS;
+    logf_("abar: menu closed (%s)\n", why);
+    speech_cancel_pending();
+    speech_say_now("Closed.");
+}
+
+// When the menu last had its keys read. The poll runs from the battle
+// cursor's per-frame native, so a mission that ends with the menu open stops
+// polling it -- and a menu nobody is polling must not go on taking the arrows
+// from whatever screen comes next.
+#define MENU_STALE_MS 500
+static ULONGLONG g_menu_polled_at;
+
+// Returns 1 while the menu is open, having handled its keys.
+static int abar_menu_poll(void)
+{
+    g_menu_polled_at = GetTickCount64();
+    int now[MENU_KEYS], pressed[MENU_KEYS];
+    for (int k = 0; k < MENU_KEYS; k++) {
+        now[k] = (GetAsyncKeyState(g_menu_vk[k]) & 0x8000) != 0;
+        pressed[k] = now[k] && !g_menu_was[k];
+        g_menu_was[k] = now[k];
+    }
+
+    if (!abar_menu_is_open()) {
+        if (!pressed[0]) return 0;
+        abar_menu_open();
+        logf_("abar: menu opened, %d abilities\n", abar_count());
+        if (abar_count() <= 0) {
+            abar_menu_close();
+            speech_cancel_pending();
+            speech_say_now("No abilities.");
+            return 0;
+        }
+        abar_say_entry();
+        return 1;
+    }
+
+    if (pressed[0]) { abar_menu_end("numpad ."); return 0; }
+    if (pressed[6]) { abar_menu_end("Escape"); return 0; }
+    if (pressed[7] || pressed[8]) {
+        int i = abar_menu_index();
+        if (i < 0 || i >= ABILITY_KEYS) {
+            logf_("abar: %d has no number key -- cannot be picked\n", i + 1);
+            speech_cancel_pending();
+            speech_say_now("No key for this ability.");
+            return 1;
+        }
+        // Handed to the hook, which rewrites this same keystroke. Silent: the
+        // shot readout names the ability as soon as the game selects it.
+        g_pick_index = i;
+        g_pick_until = GetTickCount64() + PICK_WAIT_MS;
+        abar_menu_close();
+        g_menu_grace_until = GetTickCount64() + MENU_GRACE_MS;
+        logf_("abar: Enter picks ability %d\n", i + 1);
+        return 0;
+    }
+    if (pressed[1] || pressed[4]) { abar_menu_step(-1); abar_say_entry(); }
+    else if (pressed[2] || pressed[5]) { abar_menu_step(1); abar_say_entry(); }
+    else if (pressed[3]) abar_say_entry();
+    return 1;
+}
+
+// Whether InputEvent(cmd, mask) belongs to the menu and is to be kept from
+// the game. Called from hook_moviecheck.
+static int abar_menu_swallow(int cmd, int mask)
+{
+    // Enter is here for an ability with no number key; one that has a key was
+    // already rewritten at GetEngine and arrives as that key.
+    if (!((cmd >= 500 && cmd <= 503) || cmd == 510 || cmd == INPUT_CMD_ENTER))
+        return 0;
+    if (!(mask & 1)) return 0;
+    ULONGLONG t = GetTickCount64();
+    if (abar_menu_is_open() && t - g_menu_polled_at > MENU_STALE_MS) {
+        abar_menu_close();
+        logf_("abar: menu closed (no longer polled -- the mission ended)\n");
+    }
+    if (!abar_menu_is_open() && t >= g_menu_grace_until) return 0;
+    return 1;
+}
+
+static int input_event_cmd(void* stack, int* mask_out);
+static int32_t* input_event_cmd_slot(void* stack);
+
+// Whether the GetEngine hook has anything to do. It runs on every call to
+// GetEngine, from everywhere, so this is the whole cost of the hook almost
+// all of the time.
+static int abar_pick_pending(void)
+{
+    return abar_menu_is_open() || g_pick_release_to >= 0 ||
+           (g_pick_index >= 0 && GetTickCount64() < g_pick_until);
+}
+
+// Rewrites Enter's InputEvent into the chosen ability's number key. Called
+// from GetEngine, whose caller is InputEvent when this does anything at all.
+static void abar_menu_pick(void* stack)
+{
+    int mask = 0;
+    if (input_event_cmd(stack, &mask) != INPUT_CMD_ENTER) return;
+    int32_t* slot = input_event_cmd_slot(stack);
+    if (!slot || !writable(slot, sizeof *slot)) return;
+
+    if (mask & 32) {
+        if (g_pick_release_to < 0) return;
+        *slot = g_pick_release_to;
+        logf_("abar: Enter's release -> InputEvent %d, the ability's number key\n",
+              g_pick_release_to);
+        g_pick_release_to = -1;
+        return;
+    }
+    if (!(mask & 1)) return;
+
+    // The press. The poll may have seen the key first and closed the menu,
+    // leaving its choice in g_pick_index; or this may come first, with the
+    // menu still open. A press that picks nothing also ends any release still
+    // owed, so a release that never came cannot hijack this keystroke's.
+    int i = -1;
+    if (abar_menu_is_open()) i = abar_menu_index();
+    else if (g_pick_index >= 0 && GetTickCount64() < g_pick_until) i = g_pick_index;
+    if (i < 0 || i >= ABILITY_KEYS) { g_pick_release_to = -1; return; }
+
+    *slot = INPUT_CMD_ABILITY_1 + i;
+    g_pick_release_to = *slot;
+    g_pick_index = -1;
+    if (abar_menu_is_open()) {
+        abar_menu_close();
+        g_menu_grace_until = GetTickCount64() + MENU_GRACE_MS;
+        logf_("abar: Enter picks ability %d\n", i + 1);
+    }
+    logf_("abar: Enter -> InputEvent %d\n", *slot);
+}
+
 static void nav_poll(void)
 {
     // Practice owns the numpad while it is on (learn.h). Navigation stands
@@ -3993,7 +4509,7 @@ static void nav_poll(void)
                     speech_say_now(what);
                 }
             }
-        } else if (navh_poll(GetTickCount64()) == NAVH_NO_PATH) {
+        } else if (!g_nav_aim && navh_poll(GetTickCount64()) == NAVH_NO_PATH) {
             logf_("nav: %d, %d has no path on its floor %.1f\n",
                   g_nav_path_tile[0], g_nav_path_tile[1], navh_ground());
             nav_say_no_path(g_nav_path_tile[0], g_nav_path_tile[1]);
@@ -4030,6 +4546,14 @@ static void nav_poll(void)
         walls_quiet();
         return;
     }
+    // The ability menu holds the numpad while it is open, as practice does.
+    if (abar_menu_poll()) {
+        memset(g_numpad_down, 0, sizeof g_numpad_down);
+        g_glide_digit = 0;
+        g_glide_steps = 0;
+        return;
+    }
+
     ULONGLONG now = GetTickCount64();
     for (int d = 0; d <= 9; d++) {
         int down = (GetAsyncKeyState(VK_NUMPAD0 + d) & 0x8000) != 0;
@@ -4247,6 +4771,19 @@ static int nav_substitute(void* stack)
                                     depth ? " <- %s" : "%s", name);
         if (used >= sizeof chain) used = sizeof chain - 1;
         if (strcmp(name, "Mouse_CheckForPathing") == 0) { from_mouse = 1; break; }
+        if (strcmp(name, "Mouse_CheckForFreeAim") == 0) {
+            // The aim. Its tile was put in at ProcessChainedDistance, ahead
+            // of the range leash (nav_aim_substitute); writing it again here,
+            // after the leash, would undo the game's clamp. Reported as a
+            // placement so what the game made of it is heard.
+            static int aim_logged;
+            if (!g_nav_aim) return 0;
+            if (!aim_logged) {
+                aim_logged = 1;
+                logf_("nav: aim placement call chain %s\n", chain);
+            }
+            return 1;
+        }
         frame = *(void**)((uint8_t*)frame + FFRAME_PREVIOUS);
     }
 
@@ -4300,6 +4837,36 @@ static int nav_substitute(void* stack)
     return 0;
 }
 
+// Where an aim step landed. The game's range leash may have pulled it short of
+// the tile asked for; then the aim IS where it landed, and navigation follows
+// it there, so the next step goes on from where the aim really is and the
+// coordinates spoken are the ones a shot would go to.
+static void nav_aim_landed(const CursorGrid* g, int px, int py)
+{
+    int tx, ty;
+    if (!nav_target(&tx, &ty)) return;
+    // What the aim hits from here is heard after the coordinates, even when
+    // it is what the last tile had: the odds (brief, see shot_set_brief) and
+    // whether the shot is blocked. The game resends the blocked message only
+    // when it changes, so that one is said only if it does.
+    shot_forget_said();
+    g_reticle_said[0] = 0;
+    if (px == tx && py == ty) {
+        nav_step_say("");
+        return;
+    }
+    logf_("nav: aim for %d, %d held at %d, %d -- out of range\n", tx, ty, px, py);
+    nav_begin(px, py);
+    g_nav_world[0] = g->min_x + ((float)px + 0.5f) * CURSOR_TILE;
+    g_nav_world[1] = g->min_y + ((float)py + 0.5f) * CURSOR_TILE;
+    g_aim_floor = aim_floor(g, px, py, g_aim_floor);
+    g_nav_world[2] = g_aim_floor;
+    nav_describe(px, py, g_step_coords, sizeof g_step_coords);
+    // Who was found on arrival stands on the tile asked for, not this one.
+    g_step_who[0] = 0;
+    nav_step_say("Out of range.");
+}
+
 // What the game made of the target. Logged when the tile changes, so the log
 // shows each step landing -- or being moved somewhere else by the validation.
 static void nav_placed(const float* v)
@@ -4310,6 +4877,9 @@ static void nav_placed(const float* v)
     if (!cursor_grid(&g) || !readable(v, 3 * sizeof(float))) return;
     int px = cursor_tile_axis(v[0], g.min_x, CURSOR_TILE);
     int py = cursor_tile_axis(v[1], g.min_y, CURSOR_TILE);
+    // An aim is announced as it lands, and before the same-tile check below:
+    // a step pushed against the range limit lands where the last one did.
+    if (g_nav_aim && g_step_pending) nav_aim_landed(&g, px, py);
     if (px == g_nav_tile_logged[0] && py == g_nav_tile_logged[1]) return;
     g_nav_tile_logged[0] = px;
     g_nav_tile_logged[1] = py;
@@ -4400,6 +4970,14 @@ static void nav_lend_interface(void* hud)
     if (!writable(slot, 2 * sizeof(void*))) return;
 
     if (slot[0]) {                      // the mouse picked something itself
+        // Once: whether a real pick holds (object, object), which is what
+        // lending the soldier to an aim assumes (nav_aim_lend).
+        static int pair_logged;
+        if (!pair_logged) {
+            pair_logged = 1;
+            logf_("nav: a real pick holds %p, %p (%s)\n", slot[0], slot[1],
+                  slot[0] == slot[1] ? "the same object twice" : "two different pointers");
+        }
         g_pick_iface_seen[0] = slot[0];
         g_pick_iface_seen[1] = slot[1];
         g_pick_iface_cursor = cursor_object();
@@ -4515,7 +5093,7 @@ static int nav_aim_pick(void* stack)
     if (!writable(v, 3 * sizeof(float))) return 0;
     v[0] = g_nav_world[0];
     v[1] = g_nav_world[1];
-    v[2] = navh_query_z();
+    v[2] = g_nav_aim ? g_nav_world[2] : navh_query_z();
     g_nav_world[2] = v[2];
     // Last, because it decides whether the game will take any of the above.
     nav_lend_interface(hud);
@@ -4574,7 +5152,7 @@ static void __fastcall hook_floorz(void* self, void* edx, void* stack, void* res
 
     __try {
         float z = *(float*)result;
-        if (aimed) {
+        if (aimed && !g_nav_aim) {
             navh_floor_result(g_nav_world[2], z);
             nav_log_phase();
         }
@@ -4770,6 +5348,33 @@ static int input_event_cmd(void* stack, int* mask_out)
     return vals[0];
 }
 
+// Where InputEvent's Cmd lives in its frame -- the first int parameter, as
+// input_event_cmd reads it -- so it can be rewritten before InputEvent goes
+// on to act on it.
+static int32_t* input_event_cmd_slot(void* stack)
+{
+    if (!readable(stack, 0x20)) return NULL;
+    void* node = *(void**)((uint8_t*)stack + FFRAME_NODE);
+    uint8_t* locals = *(uint8_t**)((uint8_t*)stack + FFRAME_LOCALS);
+    char name[128];
+    if (!locals || !object_name(node, name, sizeof name) ||
+        strcmp(name, "InputEvent") != 0)
+        return NULL;
+    void* prop = NULL;
+    if (readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
+        prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
+    for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
+        if (!readable(prop, 0x68)) return NULL;
+        uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
+        uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
+        if ((flags & CPF_PARM) && !(flags & CPF_RETURNPARM) &&
+            props_kind(prop) == PROP_INT && off < 0x1000)
+            return (int32_t*)(locals + off);
+        prop = *(void**)((uint8_t*)prop + UFIELD_NEXT);
+    }
+    return NULL;
+}
+
 // End is the scanner's "how far, and which way" key, and it is also the
 // secondary binding for Backspace_Key_Press -- which is PerformEndTurn. So it
 // has to be taken away from the game, and InputEvent offers exactly one place
@@ -4838,8 +5443,11 @@ static void __fastcall hook_moviecheck(void* self, void* edx, void* stack, void*
     __try {
         nav_watch_input(stack);
         int mask = 0;
-        swallow = input_is_our_end(input_event_cmd(stack, &mask));
-        if (swallow && !g_end_swallowed) {
+        int cmd = input_event_cmd(stack, &mask);
+        swallow = input_is_our_end(cmd);
+        if (!swallow && abar_menu_swallow(cmd, mask))
+            swallow = 2;
+        if (swallow == 1 && !g_end_swallowed) {
             g_end_swallowed = 1;
             logf_("scan: End taken from the game (cmd %d, mask %d) -- "
                   "the turn does not end\n", INPUT_CMD_BACKSPACE, mask);
@@ -4859,6 +5467,194 @@ static void __fastcall hook_moviecheck(void* self, void* edx, void* stack, void*
             fault_log("scan: swallow End", &f, NULL);
         }
     }
+}
+
+// Engine.GetEngine: the first native InputEvent calls, which is the one point
+// early enough to rewrite Enter into an ability's number key (see
+// abar_menu_pick). Called from all over the script, so it does nothing unless
+// a pick is under way.
+static ExecFn g_orig_getengine;
+static void __fastcall hook_getengine(void* self, void* edx, void* stack, void* result)
+{
+    if (abar_pick_pending()) {
+        Fault f;
+        __try { abar_menu_pick(stack); }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("abar: pick", &f, NULL);
+        }
+    }
+    g_orig_getengine(self, edx, stack, result);
+}
+
+// The aim's tile, put in ahead of the range leash. CursorSetLocation opens
+//
+//     NewLoc = ProcessChainedDistance(NewLoc);
+//
+// in both builds, and the native reads NewLoc out of CursorSetLocation's frame
+// when it runs -- so the target written there is what the leash clamps, and
+// what comes back is where the game will let the aim go. Only while aiming,
+// and only for the placement Mouse_CheckForFreeAim makes.
+static int nav_aim_substitute(void* stack)
+{
+    // The frames above are CursorSetLocation again, then Mouse_CheckForFreeAim:
+    // the live cursor is XCom3DCursorMouseForCursorVolumes, whose
+    // CursorSetLocation calls its parent's, and it is the parent's that calls
+    // the leash. The log of 2026-09-22 printed "CursorSetLocation <-
+    // CursorSetLocation <- Mouse_CheckForFreeAim"; looking only one frame up
+    // found the first and never substituted.
+    if (!readable(stack, FFRAME_PREVIOUS + sizeof(void*))) return 0;
+    void* above = *(void**)((uint8_t*)stack + FFRAME_PREVIOUS);
+    char name[128];
+    int from_aim = 0;
+    for (int depth = 0; above && depth < 3; depth++) {
+        if (!readable(above, FFRAME_PREVIOUS + sizeof(void*)) ||
+            !object_name(*(void**)((uint8_t*)above + FFRAME_NODE), name, sizeof name))
+            return 0;
+        if (strcmp(name, "Mouse_CheckForFreeAim") == 0) { from_aim = 1; break; }
+        if (strcmp(name, "CursorSetLocation") != 0) return 0;
+        above = *(void**)((uint8_t*)above + FFRAME_PREVIOUS);
+    }
+    if (!from_aim) return 0;
+
+    void* node = *(void**)((uint8_t*)stack + FFRAME_NODE);
+    uint8_t* locals = *(uint8_t**)((uint8_t*)stack + FFRAME_LOCALS);
+    if (!locals || !readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
+        return 0;
+    void* prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
+    for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
+        if (!readable(prop, 0x68)) return 0;
+        uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
+        uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
+        if ((flags & CPF_PARM) && !(flags & CPF_RETURNPARM)) {
+            float* v = (float*)(locals + off);
+            if (off >= 0x1000 || !writable(v, 3 * sizeof(float))) return 0;
+            for (int i = 0; i < 3; i++)
+                if (!(v[i] > -1.0e6f && v[i] < 1.0e6f)) return 0;
+            v[0] = g_nav_world[0];
+            v[1] = g_nav_world[1];
+            v[2] = g_nav_world[2];      // the tile's floor (aim_floor)
+            return 1;
+        }
+        prop = *(void**)((uint8_t*)prop + UFIELD_NEXT);
+    }
+    return 0;
+}
+
+// The pick an aim has to be allowed. Mouse_CheckForFreeAim gives up unless
+//
+//     MouseTarget = GetMouseInterfaceTarget();   // HUD.CachedMouseInteractionInterface
+//     if(MouseTarget == none) return;
+//
+// and it asks that BEFORE GetAdjustedMousePickPoint, where nav_lend_interface
+// works for a move -- so with the mouse over nothing, every aim step went
+// nowhere (the first aim of 2026-09-22: five steps, no placement). The lend is
+// made one call earlier for an aim: ActiveUnit_Firing_WithMoveCharacteristics.
+// PostProcessCheckGameLogic calls the native Engine.GetCurrentWorldInfo (for
+// IsPaused) just before Mouse_CheckForFreeAim, and nothing between reads the
+// interface. hook_validpos takes it back, as it does for a move.
+//
+// The HUD is reached by name from the cursor: Pawn.Controller, then
+// Controller.myHUD. That works before any move has shown the mod the HUD.
+static void*     g_aim_frame_node;      // that PostProcessCheckGameLogic, once seen
+static void*     g_aim_frame_miss[16];  // other callers, so their names are not re-read
+static int       g_aim_frame_nmiss;
+static FieldSlot g_cursor_controller, g_controller_hud;
+
+static void* aim_hud(void)
+{
+    void* cursor = cursor_object();
+    const void* v;
+    if (!cursor || !field_ptr(cursor, "Controller", &g_cursor_controller, sizeof(void*), &v))
+        return NULL;
+    void* controller = *(void* const*)v;
+    if (!controller || !unit_is_live(controller) ||
+        !field_ptr(controller, "myHUD", &g_controller_hud, sizeof(void*), &v))
+        return NULL;
+    void* hud = *(void* const*)v;
+    return hud && unit_is_live(hud) ? hud : NULL;
+}
+
+static void nav_aim_lend(void* stack)
+{
+    if (!readable(stack, 0x20)) return;
+    void* node = *(void**)((uint8_t*)stack + FFRAME_NODE);
+    if (node != g_aim_frame_node) {
+        for (int i = 0; i < g_aim_frame_nmiss; i++)
+            if (g_aim_frame_miss[i] == node) return;
+        char name[128];
+        if (!object_name(node, name, sizeof name) ||
+            strcmp(name, "PostProcessCheckGameLogic") != 0) {
+            if (g_aim_frame_nmiss < (int)(sizeof g_aim_frame_miss / sizeof g_aim_frame_miss[0]))
+                g_aim_frame_miss[g_aim_frame_nmiss++] = node;
+            return;
+        }
+        // Only aiming's own: the moving state has one of the same name, but
+        // this is called only while an aim is being navigated.
+        g_aim_frame_node = node;
+    }
+    void* hud = aim_hud();
+    if (!hud) return;
+    if (!g_pick_iface_off &&
+        !object_field_offset(hud, "CachedMouseInteractionInterface", &g_pick_iface_off))
+        return;
+    nav_return_interface();
+    void** slot = (void**)((uint8_t*)hud + g_pick_iface_off);
+    if (!writable(slot, 2 * sizeof(void*))) return;
+    if (slot[0]) return;                // the mouse picks something itself
+
+    // Nothing under the mouse, and with a fresh map nothing remembered either
+    // (the run of 2026-09-22: "none to lend", parking the mouse did not help,
+    // the player had to move it by hand). So the soldier is lent: over a unit
+    // pawn, Mouse_CheckForFreeAim does CursorSetLocation(unit.GetLocation()),
+    // and nav_aim_substitute puts the aim's tile in place of that location at
+    // the leash. IMouseInteractionInterface is a script interface (no native
+    // keyword, no VfTable property), so the game reaches it through the object
+    // and the pair is (object, object); nav_lend_interface logs what a real
+    // pick holds, to confirm it.
+    void* pawn = NULL;
+    if (!cursor_chained_pawn(&pawn) || !pawn || !unit_is_live(pawn)) return;
+    slot[0] = pawn;
+    slot[1] = pawn;
+    g_pick_iface_seen[0] = pawn;
+    g_pick_iface_seen[1] = pawn;
+    g_pick_iface_cursor = cursor_object();
+    g_pick_iface_lent = slot;
+    if (g_pick_iface_state != 2) {
+        g_pick_iface_state = 2;
+        logf_("nav: the mouse picks nothing -- lending the soldier to the aim\n");
+    }
+}
+
+static ExecFn g_orig_worldinfo;
+static void __fastcall hook_worldinfo(void* self, void* edx, void* stack, void* result)
+{
+    if (g_nav_live && g_nav_aim) {
+        Fault f;
+        __try { nav_aim_lend(stack); }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("nav: aim lend", &f, NULL);
+        }
+    }
+    g_orig_worldinfo(self, edx, stack, result);
+}
+
+static ExecFn g_orig_chained;
+static void __fastcall hook_chained(void* self, void* edx, void* stack, void* result)
+{
+    if (g_nav_live && g_nav_aim) {
+        Fault f;
+        static int logged;
+        __try {
+            if (nav_aim_substitute(stack) && !logged) {
+                logged = 1;
+                logf_("nav: aim tile put in at the range leash\n");
+            }
+        }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("nav: aim substitute", &f, NULL);
+        }
+    }
+    g_orig_chained(self, edx, stack, result);
 }
 
 static ExecFn g_orig_validpos;
@@ -5041,6 +5837,12 @@ static DWORD WINAPI init(LPVOID param)
     int grid_armed = arm(tbl, n, mod, "UXComWorldDataexecGetWorldData",
                          (LPVOID)hook_worlddata, (LPVOID*)&g_orig_worlddata);
 
+    // Not hooks: the implementations behind the world-data natives, called to
+    // say what is on a tile. Read before the hooks below go in, because one of
+    // them, GetFloorZForPosition, is also hooked, and MinHook's jump over the
+    // start of its thunk would be in the way of reading it afterwards.
+    tile_arm(tbl, n, mod);
+
     // Where numpad navigation puts its target in front of the game: the
     // position, the ground under it, and a view of what a confirm did.
     int nav_armed = arm(tbl, n, mod, "UXComWorldDataexecGetClosestValidCursorPosition",
@@ -5049,14 +5851,19 @@ static DWORD WINAPI init(LPVOID param)
                      (LPVOID)hook_floorz, (LPVOID*)&g_orig_floorz);
     nav_armed &= arm(tbl, n, mod, "UXComEngineexecIsAnyMoviePlaying",
                      (LPVOID)hook_moviecheck, (LPVOID*)&g_orig_moviecheck);
+    // Enter in the ability menu. Its loss costs only that, so it is not
+    // counted against navigation.
+    arm(tbl, n, mod, "UEngineexecGetEngine",
+        (LPVOID)hook_getengine, (LPVOID*)&g_orig_getengine);
+    // Aiming from the numpad. Its loss costs only that.
+    arm(tbl, n, mod, "AXCom3DCursorexecProcessChainedDistance",
+        (LPVOID)hook_chained, (LPVOID*)&g_orig_chained);
+    arm(tbl, n, mod, "UEngineexecGetCurrentWorldInfo",
+        (LPVOID)hook_worldinfo, (LPVOID*)&g_orig_worldinfo);
     nav_armed &= arm(tbl, n, mod, "UXComInputBaseexecTestHitPointToFlash",
                      (LPVOID)hook_flashhit, (LPVOID*)&g_orig_flashhit);
     nav_armed &= arm(tbl, n, mod, "AXComPathingPawnexecComputePath2",
                      (LPVOID)hook_computepath, (LPVOID*)&g_orig_computepath);
-
-    // Not hooks: the implementations behind three world-data natives, called
-    // to say what is on a tile.
-    tile_arm(tbl, n, mod);
 
     free(tbl);
     if (!armed) { logf_("FATAL: nothing armed\n"); return 1; }

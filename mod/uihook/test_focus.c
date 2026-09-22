@@ -16,6 +16,7 @@
 #include "dialog.h"
 #include "help.h"
 #include "shot.h"
+#include "abar.h"
 #include "props.h"
 #include "input.h"
 #include "speech.h"
@@ -746,6 +747,35 @@ int main(void)
               "a shot with no odds still announces");
         check(strcmp(say, "Hunker Down") == 0, "and says only its name");
 
+        // Picked again after a cancel: the same shot, but a new decision.
+        shot_note("SetShotName", "Hunker Down", "", -1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 0,
+              "the same shot again is a repeat");
+        shot_forget_said();
+        shot_note("SetShotName", "Hunker Down", "", -1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1,
+              "after targeting is lowered it is said again");
+        check(strcmp(say, "Hunker Down") == 0, "without the weapon or a target");
+
+        // A free aim moved from the numpad: the odds alone, every step.
+        shot_reset();
+        shot_set_brief(1);
+        shot_note("SetIsAvailable", "", "", 1, say, sizeof say);
+        shot_note("SetShotName", "Free Aiming: Fire Rocket", "", -1, say, sizeof say);
+        shot_note("SetShotChance", "to hit", "0%", -1, say, sizeof say);
+        shot_note("SetWeaponStats", "Rocket Launcher", "", -1, say, sizeof say);
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1 &&
+              strcmp(say, "0% to hit") == 0, "a brief aim says only its odds");
+        shot_forget_said();
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1 &&
+              strcmp(say, "0% to hit") == 0, "and says them again after the next step");
+        shot_note("SetShotChance", "", "", -1, say, sizeof say);
+        shot_forget_said();
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1 &&
+              strcmp(say, "Free Aiming: Fire Rocket") == 0,
+              "with no odds it falls back to the name");
+        shot_set_brief(0);
+
         // Unavailable is the one thing a player must not discover by
         // pressing fire.
         shot_reset();
@@ -1357,6 +1387,127 @@ int main(void)
 
         scan_forget();
         check(scan_selected(&it) == 0, "forgetting drops the selection");
+    }
+
+    printf("\nthe ability bar\n");
+    {
+        #define S(x) { ABAR_STRING, 0, 0, x }
+        #define N(x) { ABAR_NUMBER, (float)(x), 0, NULL }
+        #define B(x) { ABAR_BOOL, 0, x, NULL }
+        #define Z    { ABAR_NULL, 0, 0, NULL }
+        char say[1024];
+
+        // The first stream after a soldier is chosen: every slot, every
+        // field -- in UpdateData's order, with the nulls that mean "none".
+        static const AbarValue first[] = {
+            Z, N(0), S("SetCooldown"), Z, S("SetIconLabel"), S("Standard"),
+                     S("SetAntennaText"), S("FIRE"), S("SetAvailable"), B(1),
+                     S("SetCharge"), Z, S("SetBGColorLabel"), S("cyan"),
+                     S("SetHotkeyLabel"), S("1"),
+            Z, N(1), S("SetCooldown"), S("T-2"), S("SetIconLabel"), S("PrecisionShot"),
+                     S("SetAntennaText"), S("HEADSHOT"),
+                     S("SetBGColorLabel"), S("yellow"), S("SetHotkeyLabel"), S("2"),
+            Z, N(2), S("SetIconLabel"), S("Overwatch"), S("SetAntennaText"), S("OVERWATCH"),
+                     S("SetAvailable"), B(1), S("SetHotkeyLabel"), S("3"),
+            Z, N(3), S("SetIconLabel"), S("RocketLauncher"),
+                     S("SetAntennaText"), S("FIRE ROCKET"), S("SetAvailable"), B(1),
+                     S("SetCharge"), S("x1"), S("SetHotkeyLabel"), S("4"),
+        };
+        abar_reset();
+        abar_set_count(4);
+        check(abar_feed(first, sizeof first / sizeof first[0]) == 4,
+              "a full stream touches every slot");
+        abar_describe(say, sizeof say);
+        check(strcmp(say, "1 Fire. 2 Headshot, cooldown 2 turns. 3 Overwatch. "
+                          "4 Fire Rocket, 1 charge.") == 0,
+              "the bar reads key, name, cooldown and charge");
+
+        // Later streams carry only what changed.
+        static const AbarValue cooled[] = {
+            Z, N(1), S("SetCooldown"), Z, S("SetAvailable"), B(1),
+        };
+        check(abar_feed(cooled, sizeof cooled / sizeof cooled[0]) == 1,
+              "a change touches one slot");
+        abar_describe(say, sizeof say);
+        check(strstr(say, "2 Headshot. 3") != NULL, "the cooldown is over");
+        check(strstr(say, "1 Fire.") != NULL, "and the rest is remembered");
+
+        static const AbarValue spent[] = {
+            Z, N(3), S("SetAvailable"), B(0), S("SetCharge"), Z,
+        };
+        abar_feed(spent, sizeof spent / sizeof spent[0]);
+        abar_describe(say, sizeof say);
+        check(strstr(say, "4 Fire Rocket, unavailable.") != NULL,
+              "an ability used up is unavailable, with no charges said");
+
+        // Fewer slots shown: the rest are kept but not read.
+        abar_set_count(2);
+        abar_describe(say, sizeof say);
+        check(strcmp(say, "1 Fire. 2 Headshot.") == 0, "only the live slots are read");
+
+        // A stream that does not parse changes nothing.
+        static const AbarValue broken[] = {
+            Z, N(0), S("SetAntennaText"), S("OOPS"), S("SetAvailable"),
+        };
+        check(abar_feed(broken, sizeof broken / sizeof broken[0]) == -1,
+              "a truncated stream is refused");
+        static const AbarValue headless[] = { S("SetAntennaText"), S("OOPS") };
+        check(abar_feed(headless, 2) == -1, "a stream with no slot header is refused");
+        abar_describe(say, sizeof say);
+        check(strstr(say, "OOPS") == NULL && strstr(say, "Oops") == NULL,
+              "and nothing of it is kept");
+
+        // No name ever sent (gamepad mode sends none): the icon stands in.
+        static const AbarValue nameless[] = {
+            Z, N(0), S("SetIconLabel"), S("Reload"), S("SetAvailable"), B(1),
+        };
+        abar_reset();
+        abar_set_count(1);
+        abar_feed(nameless, sizeof nameless / sizeof nameless[0]);
+        abar_describe(say, sizeof say);
+        check(strcmp(say, "Reload.") == 0, "a slot with no name reads its icon, with no key");
+
+        // The menu over the bar.
+        abar_reset();
+        abar_set_count(4);
+        abar_feed(first, sizeof first / sizeof first[0]);
+        check(!abar_menu_is_open() && abar_menu_index() == -1, "the menu starts closed");
+        abar_menu_open();
+        check(abar_menu_index() == 0, "it opens on the first ability");
+        abar_menu_step(-1);
+        check(abar_menu_index() == 3, "up from the top wraps to the bottom");
+        abar_menu_step(1);
+        check(abar_menu_index() == 0, "and down from the bottom to the top");
+        abar_menu_step(1);
+        abar_entry(abar_menu_index(), "Fire a precise shot at the target.", say, sizeof say);
+        check(strcmp(say, "2 Headshot, cooldown 2 turns. Fire a precise shot at the target.") == 0,
+              "an entry is key, name, status, then the tooltip");
+        abar_entry(3, "", say, sizeof say);
+        check(strcmp(say, "4 Fire Rocket, 1 charge.") == 0, "no tooltip, no trailing text");
+        abar_entry(0, NULL, say, sizeof say);
+        check(strcmp(say, "1 Fire.") == 0, "a null tooltip is no tooltip");
+        check(abar_entry(9, "x", say, sizeof say) == 0, "a slot past the bar says nothing");
+
+        // The bar shrinking under an open menu keeps the position inside it.
+        abar_menu_step(1); abar_menu_step(1);
+        abar_set_count(2);
+        check(abar_menu_index() == 1, "a shrunk bar clamps the position");
+        abar_menu_close();
+        check(!abar_menu_is_open(), "it closes");
+        abar_menu_open();
+        abar_reset();
+        check(!abar_menu_is_open(), "a new bar closes the menu");
+
+        abar_reset();
+        check(abar_describe(say, sizeof say) == 0, "an empty bar has nothing to say");
+        abar_menu_open();
+        check(abar_menu_step(1) == 0 && abar_menu_index() == -1,
+              "an empty menu has nowhere to go");
+        abar_menu_close();
+        #undef S
+        #undef N
+        #undef B
+        #undef Z
     }
 
     printf("\nthe target list\n");

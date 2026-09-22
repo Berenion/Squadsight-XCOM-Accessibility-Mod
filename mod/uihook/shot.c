@@ -14,6 +14,7 @@ static struct {
     char said[SHOT_MAX_TEXT];     // what was last announced, verbatim
     char said_weapon[SHOT_MAX_TEXT];
     char said_target[SHOT_MAX_TEXT];
+    int  brief;                   // shot_set_brief
 } g = { 1 };    // available until told otherwise, as shot_reset leaves it;
                 // the DLL never calls shot_reset, so this is its start state
 
@@ -21,6 +22,17 @@ void shot_reset(void)
 {
     memset(&g, 0, sizeof g);
     g.available = 1;
+}
+
+void shot_set_brief(int on)
+{
+    g.brief = on;
+}
+
+void shot_forget_said(void)
+{
+    g.said[0] = 0;
+    g.said_target[0] = 0;
 }
 
 int shot_is_panel(const char* obj_name)
@@ -211,7 +223,9 @@ int shot_note(const char* fn, const char* a, const char* b, int flag,
         // pressing fire.
         join(core, sizeof core, "Unavailable");
     } else {
-        join(core, sizeof core, g.name);
+        // Brief: the ability was named when it was picked, and a step of the
+        // aim changes only the odds.
+        if (!g.brief || (!g.chance[0] && !g.crit[0])) join(core, sizeof core, g.name);
         join(core, sizeof core, g.chance);
         join(core, sizeof core, g.crit);
     }
@@ -220,7 +234,7 @@ int shot_note(const char* fn, const char* a, const char* b, int flag,
     // The weapon changes far less often than the shot, and reading it every
     // time would bury the number that matters. It is announced when it
     // changes -- which is exactly when switching ability changes the weapon.
-    int weapon_is_news = g.weapon[0] && strcmp(g.weapon, g.said_weapon) != 0;
+    int weapon_is_news = !g.brief && g.weapon[0] && strcmp(g.weapon, g.said_weapon) != 0;
 
     // The target the same way: said when it changes, which is what Tab does,
     // and not again while the player tries abilities against it. Losing the
