@@ -53,6 +53,7 @@
 #include "help.h"
 #include "shot.h"
 #include "combat.h"
+#include "history.h"
 #include "abar.h"
 #include "cursor.h"
 #include "nav.h"
@@ -652,6 +653,7 @@ static __declspec(thread) char tls_where[256];
 static void unit_note(void* flag, const char* name, const char* nick);
 static void unit_flag_drew(void* flag, const char* fn, const Payload* p);
 static void combat_message(LONG n, void* stack, const Payload* p);
+static void announce(const char* text);
 static void shot_target_now(void* stack);
 
 // Aiming a cursor-moving ability (a rocket, a grenade) rather than choosing a
@@ -775,12 +777,34 @@ static void capture_body(const char* tag, LONG n, void* stack)
         char say[80];
         if (combat_turn(fn_name, strs, ns, say, sizeof say)) {
             logf_("[%ld] %s %s.%s  TURN \"%s\"\n", n, tag, obj_name, fn_name, say);
-            if (g_speak && !muted()) speech_say(say);
+            announce(say);
         } else {
             logf_("[%ld] %s %s.%s  (turn banner)\n", n, tag, obj_name, fn_name);
         }
         return;
     }
+    // The message ticker along the top of the screen: "Sq. O'Reilly takes a
+    // reaction shot!", "Corporal Hudson has earned a promotion!". Everything
+    // goes through UIMessageMgr.Message, which has already decided whether
+    // the local player may see it, then UIMessageMgr_Container.Message, whose
+    // CreateMessageBox hands Flash (id, title, icon, pulse). The id is
+    // "default<n>" or the caller's own; the title is the text.
+    if (strncmp(obj_name, "UIMessageMgr_Container", 22) == 0 &&
+        strcmp(fn_name, "CreateMessageBox") == 0) {
+        const char* title = NULL;
+        for (int i = 1; i < p->nstrings; i++)
+            if (p->strings[i][0] && strcmp(p->strings[i], p->strings[0]) != 0 &&
+                !looks_like_asset(p->strings[i])) {
+                title = p->strings[i];
+                break;
+            }
+        if (title) {
+            logf_("[%ld] %s %s.%s  TICKER \"%s\"\n", n, tag, obj_name, fn_name, title);
+            announce(title);
+        }
+        return;
+    }
+
     // Floating combat text. See combat.h.
     if (strncmp(obj_name, "UIWorldMessageMgr", 17) == 0 &&
         (strcmp(fn_name, "CreateNewMessage") == 0 ||
@@ -2158,15 +2182,19 @@ static void unit_flag_drew(void* flag, const char* fn, const Payload* p)
                         hp[0] ? " " : "", hp);
             g_unnamed[0] = 0;
             logf_("combat: the damage was %s's -> \"%s\"\n", u->name, say);
-            if (g_speak && !muted()) speech_say(say);
+            announce(say);
             return;
         }
         if (u == g_hurt && u->hp != was && now - g_hurt_at <= COMBAT_HP_WAIT_MS) {
             g_hurt = NULL;
-            char say[64];
+            char say[64], label[160];
             if (combat_hp(u->hp, u->hp_max, say, sizeof say)) {
                 logf_("combat: %s now %d of %d -> \"%s\"\n", u->name, u->hp, u->hp_max, say);
                 if (g_speak && !muted()) speech_say(say);
+                // Kept with the hit it belongs to: "Chryssalid, 4 damage. 4 of
+                // 8 HP left." reads as one event in the list.
+                unit_label(u, label, sizeof label);
+                history_extend(label, say);
             }
         }
         return;
@@ -2277,18 +2305,28 @@ static void combat_message(LONG n, void* stack, const Payload* p)
         // Only a figure: without one ("Missed!" over nobody known) there is
         // no hit-point drop to wait for.
         if (isdigit((unsigned char)say[0])) {
-            if (g_unnamed[0] && g_speak && !muted()) speech_say(g_unnamed);
+            if (g_unnamed[0]) announce(g_unnamed);
             strncpy_s(g_unnamed, sizeof g_unnamed, say, _TRUNCATE);
             g_unnamed_at = now;
             return;
         }
     }
-    if (g_speak && !muted()) speech_say(say);
+    announce(say);
     if (damage && who) {
         g_hurt = who;
         g_hurt_flag = who->flag;
         g_hurt_at = now;
     }
+}
+
+// An event, said and kept (history.h): combat, whose turn it is, the ticker.
+// Queued, never interrupting, since events come in bursts. Kept even when the
+// mod is muted, so what was missed can still be read back.
+static void announce(const char* text)
+{
+    if (!text || !*text) return;
+    history_add(text);
+    if (g_speak && !muted()) speech_say(text);
 }
 
 // Whether a unit the game was showing is gone: its flag has been destroyed or
@@ -2312,7 +2350,7 @@ static void combat_poll(void)
     ULONGLONG now = GetTickCount64();
     if (g_unnamed[0] && now - g_unnamed_at > COMBAT_NAME_WAIT_MS) {
         logf_("combat: no flag took the damage -- \"%s\" said as it is\n", g_unnamed);
-        if (g_speak && !muted()) speech_say(g_unnamed);
+        announce(g_unnamed);
         g_unnamed[0] = 0;
     }
     if (g_hurt && now - g_hurt_at > COMBAT_HP_WAIT_MS) {
@@ -2331,7 +2369,7 @@ static void combat_poll(void)
             char say[96];
             _snprintf_s(say, sizeof say, _TRUNCATE, "%s down.", name);
             logf_("combat: no redraw after the hit, and %s is gone -> \"%s\"\n", name, say);
-            if (g_speak && !muted()) speech_say(say);
+            announce(say);
         }
     }
 }
@@ -4550,7 +4588,7 @@ static int abar_menu_poll(void)
     }
 
     if (!abar_menu_is_open()) {
-        if (!pressed[0]) return 0;
+        if (!pressed[0] || history_is_open()) return 0;
         abar_menu_open();
         logf_("abar: menu opened, %d abilities\n", abar_count());
         if (abar_count() <= 0) {
@@ -4598,11 +4636,12 @@ static int abar_menu_swallow(int cmd, int mask)
         return 0;
     if (!(mask & 1)) return 0;
     ULONGLONG t = GetTickCount64();
-    if (abar_menu_is_open() && t - g_menu_polled_at > MENU_STALE_MS) {
+    if ((abar_menu_is_open() || history_is_open()) && t - g_menu_polled_at > MENU_STALE_MS) {
         abar_menu_close();
+        history_close();
         logf_("abar: menu closed (no longer polled -- the mission ended)\n");
     }
-    if (!abar_menu_is_open() && t >= g_menu_grace_until) return 0;
+    if (!abar_menu_is_open() && !history_is_open() && t >= g_menu_grace_until) return 0;
     return 1;
 }
 
@@ -4655,6 +4694,59 @@ static void abar_menu_pick(void* stack)
         logf_("abar: Enter picks ability %d\n", i + 1);
     }
     logf_("abar: Enter -> InputEvent %d\n", *slot);
+}
+
+// Insert: the announcements, as a list (history.h). Opens on the newest; Up
+// and Down (numpad 8 / 2 or the arrows) walk it, numpad 5 says the entry
+// again, Insert or Escape closes it. The arrows and Escape are bound in a
+// mission, so while it is open hook_moviecheck keeps them from the game
+// through abar_menu_swallow, exactly as for the ability menu. Insert is not:
+// its only binding, Camera FreeCam, is removed with -Bindings in
+// [Engine.PlayerInput].
+#define REVIEW_KEYS 7
+static const int g_review_vk[REVIEW_KEYS] = {
+    VK_INSERT, VK_NUMPAD8, VK_NUMPAD2, VK_NUMPAD5, VK_UP, VK_DOWN, VK_ESCAPE
+};
+static int g_review_was[REVIEW_KEYS];
+
+static void review_end(const char* why)
+{
+    history_close();
+    g_menu_grace_until = GetTickCount64() + MENU_GRACE_MS;
+    logf_("review: closed (%s)\n", why);
+    speech_cancel_pending();
+    speech_say_now("Closed.");
+}
+
+// Returns 1 while the list is open, having handled its keys.
+static int review_poll(void)
+{
+    int now[REVIEW_KEYS], pressed[REVIEW_KEYS];
+    for (int k = 0; k < REVIEW_KEYS; k++) {
+        now[k] = (GetAsyncKeyState(g_review_vk[k]) & 0x8000) != 0;
+        pressed[k] = now[k] && !g_review_was[k];
+        g_review_was[k] = now[k];
+    }
+    char say[HISTORY_TEXT + 64];
+    if (!history_is_open()) {
+        if (!pressed[0]) return 0;
+        g_menu_polled_at = GetTickCount64();
+        int opened = history_open(say, sizeof say);
+        logf_("review: %s \"%s\"\n", opened ? "opened" : "nothing to open", say);
+        speech_cancel_pending();
+        speech_say_now(say);
+        return opened;
+    }
+    g_menu_polled_at = GetTickCount64();
+    if (pressed[0]) { review_end("Insert"); return 0; }
+    if (pressed[6]) { review_end("Escape"); return 0; }
+    if (pressed[1] || pressed[4]) history_step(-1, say, sizeof say);
+    else if (pressed[2] || pressed[5]) history_step(1, say, sizeof say);
+    else if (pressed[3]) history_current(say, sizeof say);
+    else return 1;
+    speech_cancel_pending();
+    speech_say_now(say);
+    return 1;
 }
 
 static void nav_poll(void)
@@ -4747,7 +4839,7 @@ static void nav_poll(void)
         return;
     }
     // The ability menu holds the numpad while it is open, as practice does.
-    if (abar_menu_poll()) {
+    if (abar_menu_poll() || review_poll()) {
         memset(g_numpad_down, 0, sizeof g_numpad_down);
         g_glide_digit = 0;
         g_glide_steps = 0;

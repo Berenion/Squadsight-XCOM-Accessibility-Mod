@@ -17,6 +17,7 @@
 #include "help.h"
 #include "shot.h"
 #include "combat.h"
+#include "history.h"
 #include "abar.h"
 #include "props.h"
 #include "input.h"
@@ -713,6 +714,54 @@ int main(void)
         combat_turn_reset();
         check(combat_turn("HideAlienTurn", NULL, 0, say, sizeof say) &&
               strcmp(say, "Your turn.") == 0, "with no texts yet, English stands in");
+    }
+
+    // The announcement list behind Insert.
+    printf("\nannouncement list\n");
+    {
+        char say[HISTORY_TEXT + 64];
+        history_reset();
+        check(!history_open(say, sizeof say) && strcmp(say, "No announcements yet.") == 0,
+              "nothing to open says so");
+        check(!history_is_open(), "and opens nothing");
+        history_add("Alien activity.");
+        history_add("Chryssalid, 4 damage.");
+        history_extend("Chryssalid", "4 of 8 HP left.");
+        check(history_count() == 2, "hit points join their hit");
+        history_add("Your turn.");
+        history_extend("Chryssalid", "2 of 8 HP left.");
+        check(history_count() == 4, "but not across another announcement");
+        check(history_open(say, sizeof say) &&
+              strcmp(say, "Announcements, 4. Chryssalid, 2 of 8 HP left.") == 0,
+              "opens on the newest, with the count");
+        history_step(1, say, sizeof say);
+        check(strcmp(say, "Newest. Chryssalid, 2 of 8 HP left.") == 0, "newer than newest says so");
+        history_step(-1, say, sizeof say);
+        check(strcmp(say, "Your turn.") == 0, "up is older");
+        history_step(-1, say, sizeof say);
+        check(strcmp(say, "Chryssalid, 4 damage. 4 of 8 HP left.") == 0, "the joined entry");
+        history_add("Muton, Missed!");
+        history_current(say, sizeof say);
+        check(strcmp(say, "Chryssalid, 4 damage. 4 of 8 HP left.") == 0,
+              "a new announcement does not move the cursor");
+        history_step(-1, say, sizeof say);
+        history_step(-1, say, sizeof say);
+        check(strcmp(say, "Oldest. Alien activity.") == 0, "older than oldest says so");
+        history_close();
+        check(!history_is_open(), "closes");
+
+        history_reset();
+        for (int i = 0; i < HISTORY_MAX + 5; i++) {
+            char line[32];
+            _snprintf_s(line, sizeof line, _TRUNCATE, "Event %d.", i);
+            history_add(line);
+        }
+        check(history_count() == HISTORY_MAX, "keeps the last HISTORY_MAX");
+        history_open(say, sizeof say);
+        for (int i = 0; i < HISTORY_MAX + 10; i++) history_step(-1, say, sizeof say);
+        check(strcmp(say, "Oldest. Event 5.") == 0, "the oldest kept is the right one");
+        history_close();
+        history_reset();
     }
 
     // The tactical shot readout. UITacticalHUD_InfoPanel.Update sends this
