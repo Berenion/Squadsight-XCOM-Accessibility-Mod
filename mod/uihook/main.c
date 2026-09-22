@@ -52,6 +52,7 @@
 #include "objects.h"
 #include "help.h"
 #include "shot.h"
+#include "combat.h"
 #include "abar.h"
 #include "cursor.h"
 #include "nav.h"
@@ -650,6 +651,7 @@ static __declspec(thread) char tls_where[256];
 
 static void unit_note(void* flag, const char* name, const char* nick);
 static void unit_flag_drew(void* flag, const char* fn, const Payload* p);
+static void combat_message(LONG n, void* stack, const Payload* p);
 static void shot_target_now(void* stack);
 
 // Aiming a cursor-moving ability (a rocket, a grenade) rather than choosing a
@@ -765,6 +767,13 @@ static void capture_body(const char* tag, LONG n, void* stack)
     }
     if (strncmp(obj_name, "UIUnitFlag_", 11) == 0)
         unit_flag_drew(object, fn_name, p);
+    // Floating combat text. See combat.h.
+    if (strncmp(obj_name, "UIWorldMessageMgr", 17) == 0 &&
+        (strcmp(fn_name, "CreateNewMessage") == 0 ||
+         strcmp(fn_name, "UpdateExistingMessageContents") == 0)) {
+        combat_message(n, stack, p);
+        return;
+    }
     if (strncmp(obj_name, "UISightlineHUD_SightlineContainer", 33) == 0)
         strip_note(object, fn_name, p);
 
@@ -2096,14 +2105,56 @@ static void units_on_tile(int tx, int ty, int have_floor, float floor,
 //
 // Parameters come first in a frame's property chain and the array is a local,
 // so SetHitPoints reads as four numbers and the last two are the ones drawn.
+// The unit a damage number just floated over, whose flag is redrawn with its
+// new hit points a moment later (UIUnitFlag.SetHitPoints, four calls after the
+// message in the run of 2026-09-22). Those are said as the damage's second
+// half: "Chryssalid, 6 damage." then "2 of 8 HP left."
+//
+// A damage number with nobody to name -- a Chryssalid's claws raise it from
+// XComWeaponComponent_Melee.CustomFire, where no frame's object is a unit --
+// is held for COMBAT_NAME_WAIT_MS and given to the first flag whose hit points
+// drop in that time: "Hudson, 6 damage. 4 of 10 HP left." Said as it is if
+// none does. And a named hit that no redraw follows may be the last one: the
+// flag of the dead is never redrawn. combat_poll asks the unit, and says
+// "down" if the game no longer counts it alive and visible.
+#define COMBAT_HP_WAIT_MS   2000
+#define COMBAT_NAME_WAIT_MS 1000
+static const UnitName* g_hurt;
+static void*           g_hurt_flag;     // g_hurt's flag, in case the slot is reused
+static ULONGLONG       g_hurt_at;
+static char            g_unnamed[COMBAT_MAX_TEXT];
+static ULONGLONG       g_unnamed_at;
+
 static void unit_flag_drew(void* flag, const char* fn, const Payload* p)
 {
     if (strcmp(fn, "SetHitPoints") == 0) {
         if (p->nnumbers < 4) return;
         UnitName* u = unit_entry(flag);
         if (!u) return;
+        int was = u->hp;
         u->hp = (int)p->numbers[2];
         u->hp_max = (int)p->numbers[3];
+        ULONGLONG now = GetTickCount64();
+        if (g_unnamed[0] && now - g_unnamed_at <= COMBAT_NAME_WAIT_MS && u->name[0] &&
+            u->hp >= 0 && was >= 0 && u->hp < was) {
+            char label[160], hp[64] = "", say[COMBAT_MAX_TEXT + 224];
+            unit_label(u, label, sizeof label);
+            combat_hp(u->hp, u->hp_max, hp, sizeof hp);
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s, %s%s%s", label, g_unnamed,
+                        hp[0] ? " " : "", hp);
+            g_unnamed[0] = 0;
+            logf_("combat: the damage was %s's -> \"%s\"\n", u->name, say);
+            if (g_speak && !muted()) speech_say(say);
+            return;
+        }
+        if (u == g_hurt && u->hp != was && now - g_hurt_at <= COMBAT_HP_WAIT_MS) {
+            g_hurt = NULL;
+            char say[64];
+            if (combat_hp(u->hp, u->hp_max, say, sizeof say)) {
+                logf_("combat: %s now %d of %d -> \"%s\"\n", u->name, u->hp, u->hp_max, say);
+                if (g_speak && !muted()) speech_say(say);
+            }
+        }
         return;
     }
     if (strcmp(fn, "RealizeCover") == 0) {
@@ -2134,6 +2185,141 @@ static UnitName* unit_by_unit(const void* unit)
         if (*(void* const*)v == unit) return u;
     }
     return NULL;
+}
+
+// One floating combat message, said. Which unit it floats over is found from
+// the calls that raised it, not from its position: DamageDisplay and the rest
+// are called from inside the unit's own functions (XGUnit.OnTakeDamage ->
+// UIWorldMessageMgr.DamageDisplay -> Message -> CreateNewMessage), so a frame
+// above has that XGUnit as its object. DamageDisplay in the chain is what
+// makes it a damage number.
+#define COMBAT_CHAIN_DEPTH 10
+#define COMBAT_REPEAT_MS   500
+
+static void combat_message(LONG n, void* stack, const Payload* p)
+{
+    // The text is whichever string is not the message's id. The pool is built
+    // at mission start with ids and no text ("worldMessageBox0".."7"), and
+    // the cursor's own help ("cursorHelp_Dashing", "Dashing!") is left to
+    // navigation, which already says "Dash".
+    const char* text = NULL;
+    for (int i = 0; i < p->nstrings; i++) {
+        const char* s = p->strings[i];
+        if (strncmp(s, "cursorHelp", 10) == 0) return;
+        if (!s[0] || strncmp(s, "worldMessageBox", 15) == 0 || looks_like_asset(s)) continue;
+        if (!text) text = s;
+    }
+    if (!text) return;
+
+    int damage = 0;
+    UnitName* who = NULL;
+    char chain[256] = "";
+    size_t used = 0;
+    void* frame = stack;
+    for (int depth = 0; frame && depth < COMBAT_CHAIN_DEPTH; depth++) {
+        if (!readable(frame, FFRAME_PREVIOUS + sizeof(void*))) break;
+        char name[128];
+        if (!object_name(*(void**)((uint8_t*)frame + FFRAME_NODE), name, sizeof name)) break;
+        if (used < sizeof chain) {
+            int w = _snprintf_s(chain + used, sizeof chain - used, _TRUNCATE,
+                                depth ? " <- %s" : "%s", name);
+            if (w > 0) used += (size_t)w;
+        }
+        if (strcmp(name, "DamageDisplay") == 0) damage = 1;
+        void* obj = *(void**)((uint8_t*)frame + FFRAME_OBJECT);
+        if (!who && obj) who = unit_by_unit(obj);
+        // "Missed!" comes from XGAction_Fire, not from a unit, and floats
+        // where the shot went; the action's target is who was missed.
+        if (!who && obj) {
+            static FieldSlot missed;
+            char oname[128];
+            const void* v;
+            if (object_name(obj, oname, sizeof oname) &&
+                strncmp(oname, "XGAction_Fire", 13) == 0 &&
+                field_ptr(obj, "m_kTargetedEnemy", &missed, sizeof(void*), &v) &&
+                *(void* const*)v)
+                who = unit_by_unit(*(void* const*)v);
+        }
+        frame = *(void**)((uint8_t*)frame + FFRAME_PREVIOUS);
+    }
+
+    char label[160] = "";
+    if (who) unit_label(who, label, sizeof label);
+    char say[COMBAT_MAX_TEXT];
+    if (!combat_describe(label, text, damage, say, sizeof say)) return;
+
+    // Message can be asked twice for one event (an update of a message that
+    // is already up); the same words twice in a moment are one event.
+    static char said[COMBAT_MAX_TEXT];
+    static ULONGLONG said_at;
+    ULONGLONG now = GetTickCount64();
+    if (strcmp(say, said) == 0 && now - said_at < COMBAT_REPEAT_MS) return;
+    strncpy_s(said, sizeof said, say, _TRUNCATE);
+    said_at = now;
+
+    logf_("[%ld] combat: \"%s\"  (%s)%s\n", n, say, chain,
+          damage && !who ? " -- held for the flag it lands on" : "");
+    if (damage && !who) {
+        // Only a figure: without one ("Missed!" over nobody known) there is
+        // no hit-point drop to wait for.
+        if (isdigit((unsigned char)say[0])) {
+            if (g_unnamed[0] && g_speak && !muted()) speech_say(g_unnamed);
+            strncpy_s(g_unnamed, sizeof g_unnamed, say, _TRUNCATE);
+            g_unnamed_at = now;
+            return;
+        }
+    }
+    if (g_speak && !muted()) speech_say(say);
+    if (damage && who) {
+        g_hurt = who;
+        g_hurt_flag = who->flag;
+        g_hurt_at = now;
+    }
+}
+
+// Whether a unit the game was showing is gone: its flag has been destroyed or
+// reused, the unit object is no longer live, or the game no longer counts it
+// alive and visible (IsAliveAndVisible, asked through its vtable as unit_seen
+// does).
+static int unit_gone(const UnitName* u, void* flag)
+{
+    const void* v;
+    if (u->flag != flag || !flag || !unit_is_live(flag)) return 1;
+    if (!field_ptr(flag, "m_kUnit", &g_flag_unit, sizeof(void*), &v)) return 1;
+    void* unit = *(void* const*)v;
+    if (!unit || !unit_is_live(unit)) return 1;
+    UnitTestFn visible = (UnitTestFn)tile_vfn(unit, g_unit_slot_visible);
+    return visible && !visible(unit, NULL);
+}
+
+// Every frame, from the cursor's per-frame native: the combat lines that wait.
+static void combat_poll(void)
+{
+    ULONGLONG now = GetTickCount64();
+    if (g_unnamed[0] && now - g_unnamed_at > COMBAT_NAME_WAIT_MS) {
+        logf_("combat: no flag took the damage -- \"%s\" said as it is\n", g_unnamed);
+        if (g_speak && !muted()) speech_say(g_unnamed);
+        g_unnamed[0] = 0;
+    }
+    if (g_hurt && now - g_hurt_at > COMBAT_HP_WAIT_MS) {
+        const UnitName* u = g_hurt;
+        void* flag = g_hurt_flag;
+        g_hurt = NULL;
+        char name[64];
+        strncpy_s(name, sizeof name, u->name, _TRUNCATE);
+        Fault f;
+        int gone = 0;
+        __try { gone = unit_gone(u, flag); }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("combat: gone", &f, NULL);
+        }
+        if (gone && name[0]) {
+            char say[96];
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s down.", name);
+            logf_("combat: no redraw after the hit, and %s is gone -> \"%s\"\n", name, say);
+            if (g_speak && !muted()) speech_say(say);
+        }
+    }
 }
 
 // Who the shot being announced is aimed at, handed to shot.c.
@@ -4644,6 +4830,7 @@ static void cursor_watch(void* self)
     // Every frame, not at the watch's four times a second: a key press lasts
     // a few frames, and a quarter-second poll would drop quick ones.
     if (cursor_resolved()) nav_poll();
+    combat_poll();
 
     ULONGLONG now = GetTickCount64();
     if (now - g_cursor_at < CURSOR_WATCH_MS) return;

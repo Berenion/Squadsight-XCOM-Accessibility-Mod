@@ -16,6 +16,7 @@
 #include "dialog.h"
 #include "help.h"
 #include "shot.h"
+#include "combat.h"
 #include "abar.h"
 #include "props.h"
 #include "input.h"
@@ -664,6 +665,30 @@ int main(void)
         check(help_menu_open("UINothingAtAll_0", say, sizeof say) == 0,
               "nothing to show");
         check(!help_menu_is_open(), "so nothing is opened");
+    }
+
+    // Floating combat text, as it arrives with the markup stripped.
+    printf("\ncombat narration\n");
+    {
+        char say[COMBAT_MAX_TEXT];
+        check(combat_describe("Chryssalid", "6", 1, say, sizeof say) &&
+              strcmp(say, "Chryssalid, 6 damage.") == 0, "a damage number");
+        check(combat_describe("Chryssalid", "6 CRITICAL!", 1, say, sizeof say) &&
+              strcmp(say, "Chryssalid, 6 damage, critical.") == 0, "a critical hit");
+        check(combat_describe("", "4", 1, say, sizeof say) &&
+              strcmp(say, "4 damage.") == 0, "damage over nobody known");
+        check(combat_describe("Kwan", "Panicked!", 0, say, sizeof say) &&
+              strcmp(say, "Kwan, Panicked!") == 0, "a status keeps its own ending");
+        check(combat_describe("Wright, Disco", "Shredded", 0, say, sizeof say) &&
+              strcmp(say, "Wright, Disco, Shredded.") == 0, "and gets one if it has none");
+        check(combat_describe("Kwan", "Immune!", 1, say, sizeof say) &&
+              strcmp(say, "Kwan, Immune!") == 0, "a damage call with no figure is said as text");
+        check(!combat_describe("Kwan", "   ", 0, say, sizeof say), "nothing to say");
+        check(combat_hp(2, 8, say, sizeof say) && strcmp(say, "2 of 8 HP left.") == 0,
+              "hit points after");
+        check(combat_hp(0, 8, say, sizeof say) && strcmp(say, "No HP left.") == 0,
+              "none left");
+        check(!combat_hp(-1, -1, say, sizeof say), "hidden enemy health says nothing");
     }
 
     // The tactical shot readout. UITacticalHUD_InfoPanel.Update sends this
