@@ -57,6 +57,7 @@
 #include "history.h"
 #include "soldier.h"
 #include "info.h"
+#include "sight.h"
 #include "abar.h"
 #include "cursor.h"
 #include "nav.h"
@@ -1734,6 +1735,7 @@ static int       g_tile_slot_floorz = -1;   // XComWorldData.GetFloorZForPositio
 // relies on that).
 typedef float (__fastcall* FloorZFn)(void* self, void* edx, const float* pos, int unlimited);
 static int       g_unit_slot_visible = -1;  // XGUnitNativeBase.IsAliveAndVisible
+static int       g_unit_slot_alive = -1;    // XGUnitNativeBase.IsAlive
 static int       g_cursor_slot_floor = -1;  // XCom3DCursor.WorldZToCursorFloor
 static int       g_world_slot_seetile = -1; // XComWorldData.CanSeeActorToTile
 static int       g_unit_slot_flanking = -1; // XGUnitNativeBase.IsFlankingCoverPoint
@@ -3305,6 +3307,7 @@ static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
                                               &g_unit_fn_flanking },
         { "XGUnitNativeBaseexecIsPointWithinFiringRange", &g_unit_slot_range, NULL },
         { "XGUnitNativeBaseexecIsAliveAndVisible",   &g_unit_slot_visible,  NULL },
+        { "XGUnitNativeBaseexecIsAlive",             &g_unit_slot_alive,    NULL },
         { "XCom3DCursorexecWorldZToCursorFloor",     &g_cursor_slot_floor,  NULL },
     };
     for (int i = 0; i < (int)(sizeof want / sizeof want[0]); i++) {
@@ -4200,6 +4203,97 @@ static int info_poll(void)
         g_info_fresh = 1;
         return 0;
     }
+}
+
+// ---- enemies coming into sight (sight.h) ------------------------------------
+//
+// The squad's sight, polled, and what changed said: "Sighted: Sectoid, 5
+// north, 3 east." It is the same union of m_arrVisibleEnemies the radar and
+// the tile readout use, measured from the soldier. The squad is taken only
+// from a human player (XGPlayer, or XGPlayer_MP): the cursor is chained to
+// whoever is acting, and in the aliens' turn their sight is the squad's
+// soldiers, which is nothing to announce. The last good one is kept through
+// that turn, and a different one -- a new mission, a load -- starts afresh.
+#define SIGHT_POLL_MS 200
+static ULONGLONG g_sight_at;
+static void*     g_sight_squad;
+
+static void* sight_squad(void)
+{
+    void* p = squad_player();
+    char cls[64];
+    if (p && unit_is_live(p) && object_class_name(p, cls, sizeof cls) &&
+        (strcmp(cls, "XGPlayer") == 0 || strcmp(cls, "XGPlayer_MP") == 0)) {
+        if (p != g_sight_squad) {
+            logf_("sight: the squad is %s %p%s\n", cls, p,
+                  g_sight_squad ? " -- a new one, starting afresh" : "");
+            sight_reset();
+            g_sight_squad = p;
+        }
+    }
+    if (g_sight_squad && !unit_is_live(g_sight_squad)) {
+        sight_reset();
+        g_sight_squad = NULL;
+    }
+    return g_sight_squad;
+}
+
+// Whether a unit that left the squad's sight is still alive. One that died
+// leaves it too, and "Chryssalid down." has already said so. Not knowing
+// counts as alive.
+static int sight_alive(void* unit)
+{
+    if (!unit || !unit_is_live(unit)) return 0;
+    UnitTestFn alive = (UnitTestFn)tile_vfn(unit, g_unit_slot_alive);
+    return alive ? alive(unit, NULL) != 0 : 1;
+}
+
+static void sight_poll(void)
+{
+    ULONGLONG now = GetTickCount64();
+    if (now - g_sight_at < SIGHT_POLL_MS) return;
+    g_sight_at = now;
+    void* squad = sight_squad();
+    if (!squad) return;
+
+    static SeenSet seen;
+    squad_sight(squad, &seen);
+    CursorGrid g;
+    int sx = 0, sy = 0;
+    float sz;
+    int have_pos = cursor_grid(&g) && soldier_tile(&g, &sx, &sy, &sz);
+
+    static SightUnit cur[SIGHT_MAX];
+    int n = 0;
+    for (int i = 0; i < g_nunits && n < SIGHT_MAX; i++) {
+        UnitSeen s;
+        if (!unit_seen(&g_units[i], squad, &s) || s.friendly || !seen_has(&seen, s.unit))
+            continue;
+        cur[n].unit = s.unit;
+        unit_label(&g_units[i], cur[n].label, sizeof cur[n].label);
+        cur[n].has_pos = have_pos;
+        cur[n].dx = have_pos ? cursor_tile_axis(s.loc[0], g.min_x, CURSOR_TILE) - sx : 0;
+        cur[n].dy = have_pos ? cursor_tile_axis(s.loc[1], g.min_y, CURSOR_TILE) - sy : 0;
+        n++;
+    }
+
+    static SightEvent ev[SIGHT_MAX];
+    int k = sight_step(now, cur, n, ev, SIGHT_MAX);
+    if (!k) return;
+    // The dead are dropped from what is said, not from what is kept.
+    int m = 0;
+    for (int i = 0; i < k; i++) {
+        if (ev[i].kind == SIGHT_GONE && !sight_alive(ev[i].u.unit)) {
+            logf_("sight: %s left sight dead -- not said\n", ev[i].u.label);
+            continue;
+        }
+        ev[m++] = ev[i];
+    }
+    static char say[SIGHT_TEXT];
+    sight_text(ev, m, say, sizeof say);
+    if (!say[0]) return;
+    logf_("sight: %d in sight -> \"%s\"\n", n, say);
+    announce(say);
 }
 
 static int soldier_aiming(void)
@@ -5560,6 +5654,13 @@ static void cursor_watch(void* self)
         __try { soldier_poll(); }
         __except (fault_note(GetExceptionInformation(), &f)) {
             fault_log("soldier: poll", &f, NULL);
+        }
+    }
+    {
+        Fault f;
+        __try { sight_poll(); }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("sight: poll", &f, NULL);
         }
     }
     {

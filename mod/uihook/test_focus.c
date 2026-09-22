@@ -20,6 +20,7 @@
 #include "history.h"
 #include "soldier.h"
 #include "info.h"
+#include "sight.h"
 #include "abar.h"
 #include "props.h"
 #include "input.h"
@@ -756,6 +757,59 @@ int main(void)
         soldier_clear(&s);
         soldier_brief(&s, say, sizeof say);
         check(say[0] == 0, "nobody selected says nothing");
+    }
+
+    // Enemies coming into and going out of sight (sight.h).
+    printf("\nenemies in sight\n");
+    {
+        static SightUnit cur[4];
+        static SightEvent ev[8];
+        char say[SIGHT_TEXT];
+        int a = 1, b = 2;           // two units, by address only
+        memset(cur, 0, sizeof cur);
+        cur[0].unit = &a; strcpy_s(cur[0].label, sizeof cur[0].label, "Sectoid"); cur[0].dx = 3; cur[0].dy = 5; cur[0].has_pos = 1;
+        cur[1].unit = &b; strcpy_s(cur[1].label, sizeof cur[1].label, "Sectoid"); cur[1].dx = 3; cur[1].dy = 6; cur[1].has_pos = 1;
+
+        sight_reset();
+        check(sight_step(1000, cur, 2, ev, 8) == 0, "a new sighting waits to settle");
+        check(sight_step(1000 + SIGHT_SETTLE_MS - 1, cur, 2, ev, 8) == 0, "until the settle time");
+        int k = sight_step(1000 + SIGHT_SETTLE_MS, cur, 2, ev, 8);
+        sight_text(ev, k, say, sizeof say);
+        check(k == 2 && strcmp(say, "Sighted: Sectoid, 5 north, 3 east. "
+                                    "Sectoid, 6 north, 3 east.") == 0,
+              "a pod sighted, as one announcement, nearest first");
+        check(sight_step(2000, cur, 2, ev, 8) == 0, "and not again while they stay");
+
+        // One slips out of view for a moment and back: nothing said.
+        sight_step(3000, cur, 1, ev, 8);
+        check(sight_step(3000 + SIGHT_SETTLE_MS / 2, cur, 2, ev, 8) == 0,
+              "a flicker at the edge of view says nothing");
+        check(sight_step(3000 + 2 * SIGHT_SETTLE_MS, cur, 2, ev, 8) == 0, "even later");
+
+        // Gone for good, then back.
+        sight_step(5000, cur, 1, ev, 8);
+        k = sight_step(5000 + SIGHT_SETTLE_MS, cur, 1, ev, 8);
+        sight_text(ev, k, say, sizeof say);
+        check(k == 1 && ev[0].kind == SIGHT_GONE && strcmp(say, "Out of sight: Sectoid.") == 0,
+              "out of sight, by name alone");
+        cur[1].dx = -2; cur[1].dy = 0;
+        sight_step(7000, cur, 2, ev, 8);
+        k = sight_step(7000 + SIGHT_SETTLE_MS, cur, 2, ev, 8);
+        sight_text(ev, k, say, sizeof say);
+        check(k == 1 && ev[0].kind == SIGHT_AGAIN &&
+              strcmp(say, "In sight again: Sectoid, 2 west.") == 0,
+              "back in sight, where it is now");
+
+        // No soldier to measure from: names alone.
+        sight_reset();
+        cur[0].has_pos = 0;
+        sight_step(9000, cur, 1, ev, 8);
+        k = sight_step(9000 + SIGHT_SETTLE_MS, cur, 1, ev, 8);
+        sight_text(ev, k, say, sizeof say);
+        check(strcmp(say, "Sighted: Sectoid.") == 0, "without a position, the name alone");
+        sight_text(ev, 0, say, sizeof say);
+        check(say[0] == 0, "nothing to say says nothing");
+        sight_reset();
     }
 
     // Someone in the column of the tile stepped onto, on another floor
