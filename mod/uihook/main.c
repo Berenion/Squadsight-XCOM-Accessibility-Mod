@@ -767,6 +767,20 @@ static void capture_body(const char* tag, LONG n, void* stack)
     }
     if (strncmp(obj_name, "UIUnitFlag_", 11) == 0)
         unit_flag_drew(object, fn_name, p);
+    // Whose turn it is. See combat_turn in combat.h.
+    if (strncmp(obj_name, "UITurnOverlay", 13) == 0) {
+        const char* strs[8];
+        int ns = 0;
+        for (int i = 0; i < p->nstrings && ns < 8; i++) strs[ns++] = p->strings[i];
+        char say[80];
+        if (combat_turn(fn_name, strs, ns, say, sizeof say)) {
+            logf_("[%ld] %s %s.%s  TURN \"%s\"\n", n, tag, obj_name, fn_name, say);
+            if (g_speak && !muted()) speech_say(say);
+        } else {
+            logf_("[%ld] %s %s.%s  (turn banner)\n", n, tag, obj_name, fn_name);
+        }
+        return;
+    }
     // Floating combat text. See combat.h.
     if (strncmp(obj_name, "UIWorldMessageMgr", 17) == 0 &&
         (strcmp(fn_name, "CreateNewMessage") == 0 ||

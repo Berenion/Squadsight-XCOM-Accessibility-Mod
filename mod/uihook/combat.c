@@ -53,6 +53,72 @@ int combat_describe(const char* who, const char* text, int damage,
     return 1;
 }
 
+// ---- the turn --------------------------------------------------------------
+
+enum { TURN_UNKNOWN, TURN_XCOM, TURN_ALIEN, TURN_OTHER };
+
+static struct {
+    int  whose;
+    char text[4][64];           // indexed by the enum; the banner's own words
+} t;
+
+void combat_turn_reset(void)
+{
+    memset(&t, 0, sizeof t);
+}
+
+// "ALIEN ACTIVITY" -> "Alien activity.": capitals would be spelt out.
+static void sentence(const char* in, char* out, size_t out_sz)
+{
+    size_t n = 0;
+    for (; in[n] && n + 2 < out_sz; n++)
+        out[n] = (char)(n == 0 ? toupper((unsigned char)in[n])
+                               : tolower((unsigned char)in[n]));
+    out[n] = 0;
+    if (n && out[n - 1] != '.' && out[n - 1] != '!' && n + 1 < out_sz) {
+        out[n] = '.';
+        out[n + 1] = 0;
+    }
+}
+
+int combat_turn(const char* fn, const char* const* strings, int nstrings,
+                char* out, size_t out_sz)
+{
+    out[0] = 0;
+    if (!fn) return 0;
+    if (strcmp(fn, "SetDisplayText") == 0) {
+        // (alien, xcom, other), in that order, each a separate argument; an
+        // empty one does not arrive at all, so only a full set is taken.
+        // Sent from the banner's OnInit, once a mission: a new mission starts
+        // with nobody's turn known, or one that ended on the aliens' turn
+        // would swallow the next mission's first "Alien activity".
+        t.whose = TURN_UNKNOWN;
+        if (nstrings >= 3) {
+            strncpy_s(t.text[TURN_ALIEN], sizeof t.text[0], strings[0], _TRUNCATE);
+            strncpy_s(t.text[TURN_XCOM], sizeof t.text[0], strings[1], _TRUNCATE);
+            strncpy_s(t.text[TURN_OTHER], sizeof t.text[0], strings[2], _TRUNCATE);
+        }
+        return 0;
+    }
+
+    int now;
+    if (strcmp(fn, "ShowAlienTurn") == 0 || strcmp(fn, "PulseAlienTurn") == 0)
+        now = TURN_ALIEN;
+    else if (strcmp(fn, "HideAlienTurn") == 0 || strcmp(fn, "HideOtherTurn") == 0 ||
+             strcmp(fn, "PulseXComTurn") == 0 || strcmp(fn, "ShowXComTurn") == 0)
+        now = TURN_XCOM;
+    else if (strcmp(fn, "PulseOtherTurn") == 0 || strcmp(fn, "ShowOtherTurn") == 0)
+        now = TURN_OTHER;
+    else
+        return 0;               // HideXComTurn is only the pulse fading
+    if (now == t.whose) return 0;
+    t.whose = now;
+
+    static const char* fallback[] = { "", "Your turn", "Alien activity", "Opponent's turn" };
+    sentence(t.text[now][0] ? t.text[now] : fallback[now], out, out_sz);
+    return out[0] != 0;
+}
+
 int combat_hp(int hp, int hp_max, char* out, size_t out_sz)
 {
     out[0] = 0;

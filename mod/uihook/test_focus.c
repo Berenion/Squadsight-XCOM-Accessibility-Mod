@@ -689,6 +689,30 @@ int main(void)
         check(combat_hp(0, 8, say, sizeof say) && strcmp(say, "No HP left.") == 0,
               "none left");
         check(!combat_hp(-1, -1, say, sizeof say), "hidden enemy health says nothing");
+
+        // The turn banner, in the order a mission sends it.
+        const char* texts[] = { "ALIEN ACTIVITY", "YOUR TURN", "EXALT TURN",
+                                "ALIEN ACTIVITY", "YOUR TURN", "EXALT TURN" };
+        combat_turn_reset();
+        check(!combat_turn("SetDisplayText", texts, 6, say, sizeof say),
+              "the banner's texts say nothing on arrival");
+        check(!combat_turn("OnInit", NULL, 0, say, sizeof say), "nor does its init");
+        check(combat_turn("ShowAlienTurn", NULL, 0, say, sizeof say) &&
+              strcmp(say, "Alien activity.") == 0, "the aliens' turn, in the game's words");
+        check(!combat_turn("PulseAlienTurn", NULL, 0, say, sizeof say),
+              "said once, not again for the pulse");
+        check(combat_turn("HideAlienTurn", NULL, 0, say, sizeof say) &&
+              strcmp(say, "Your turn.") == 0, "the banner going away is the player's turn");
+        check(!combat_turn("HideXComTurn", NULL, 0, say, sizeof say),
+              "the multiplayer pulse fading is not a turn");
+        check(combat_turn("PulseOtherTurn", NULL, 0, say, sizeof say) &&
+              strcmp(say, "Exalt turn.") == 0, "another side's turn");
+        check(!combat_turn("SetDisplayText", texts, 6, say, sizeof say) &&
+              combat_turn("ShowAlienTurn", NULL, 0, say, sizeof say),
+              "a new mission's first alien turn is said even after one ended on it");
+        combat_turn_reset();
+        check(combat_turn("HideAlienTurn", NULL, 0, say, sizeof say) &&
+              strcmp(say, "Your turn.") == 0, "with no texts yet, English stands in");
     }
 
     // The tactical shot readout. UITacticalHUD_InfoPanel.Update sends this

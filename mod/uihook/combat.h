@@ -26,6 +26,27 @@
 int combat_describe(const char* who, const char* text, int damage,
                     char* out, size_t out_sz);
 
+// Whose turn it is, from the turn banner (UITurnOverlay).
+//
+// XComPresentationLayer.UIEndTurn is the one place a turn changes hands on
+// screen. An alien turn runs ShowAlienTurn, which pulses "ALIEN ACTIVITY"
+// and darkens the screen's edges. The player's turn runs HideAlienTurn, which
+// takes both away again; only multiplayer pulses "YOUR TURN". Another player's
+// turn runs PulseOtherTurn. Each of those reaches Flash by the name of the
+// function, and the banner's three texts arrive once, at load, in
+// SetDisplayText(alien, xcom, other), which is where the words come from, so
+// a translated game says them in its own language.
+//
+// Feed every UITurnOverlay call here. `strings` are the call's strings in
+// order. Returns 1 when `out` holds something to say: "Alien activity.",
+// "Your turn.", "Exalt turn." -- said once per change of hands.
+int combat_turn(const char* fn, const char* const* strings, int nstrings,
+                char* out, size_t out_sz);
+
+// Forgets whose turn it was and the banner's texts. For the offline checks,
+// and a new mission.
+void combat_turn_reset(void);
+
 // The hit points a damaged unit's flag shows afterwards: "2 of 8 HP left." or
 // "No HP left." Returns 0 when the flag shows none (-1: "show enemy health"
 // is off, which is the screen saying nothing).
