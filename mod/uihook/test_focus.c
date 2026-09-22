@@ -19,6 +19,7 @@
 #include "combat.h"
 #include "history.h"
 #include "soldier.h"
+#include "info.h"
 #include "abar.h"
 #include "props.h"
 #include "input.h"
@@ -755,6 +756,125 @@ int main(void)
         soldier_clear(&s);
         soldier_brief(&s, say, sizeof say);
         check(say[0] == 0, "nobody selected says nothing");
+    }
+
+    // The unit information screen behind F1, from its calls by position.
+    printf("\nunit information\n");
+    {
+        char say[INFO_TEXT * 2];
+        const char* stats[] = { "Health: 11", "Will: 50", "Offense: 69", "Defense: 0" };
+
+        // The names as the first run logged them (2026-09-22).
+        check(info_call("UIUnitGermanMode_ShotInfo_0", "AS_SetShotInfo") == INFO_SHOT,
+              "the script wrapper's name is the call");
+        check(info_call("UIUnitGermanMode_ShotInfo_1", "AS_AddCritItem") == INFO_CRIT_MOD &&
+              info_call("UIUnitGermanMode_ShotInfo_1", "AS_AddRegularItem") == INFO_HIT_MOD,
+              "hit and crit modifiers told apart");
+        check(info_call("UIUnitGermanMode_PerkList_5", "AS_AddPerk") == INFO_PERK &&
+              info_call("UIUnitGermanMode_PerkList_2", "AS_SetTitle") == INFO_TITLE,
+              "the perk lists");
+        check(info_call("UIUnitGermanMode_10", "AS_SetSoldierInformation") == INFO_SOLDIER &&
+              info_call("UIUnitGermanMode_0", "AS_SetAlienInformation") == INFO_ALIEN &&
+              info_call("UIUnitGermanMode_4", "AS_SetUnitStats") == INFO_STATS,
+              "the header, two digits of instance too");
+        check(info_call("UIUnitGermanMode_0", "SetUnitStats") == INFO_STATS,
+              "the bare Flash name as well");
+        check(info_call("UIUnitGermanMode_0", "AS_SetUnitAllegiance") == INFO_NONE &&
+              info_call("UIUnitGermanMode_0", "AS_SetButtonHelp") == INFO_NONE &&
+              info_call("UIUnitGermanMode_0", "AS_ScrollUp") == INFO_NONE,
+              "allegiance, the close button and scrolling are not content");
+        check(info_call("UIUnitGermanMode_PerkList_0", "AS_SetShotInfo") == INFO_NONE &&
+              info_call("UITacticalHUD_InfoPanel_0", "AS_SetShotInfo") == INFO_NONE,
+              "a name on the wrong object is not");
+
+        // The first run's Chryssalid, in the order it arrived (2026-09-22):
+        // the shot, then the lists last first, then the header.
+        info_reset();
+        info_shot("", "", "", "", "");
+        info_modifier(0, "Aim", "+68%");
+        info_modifier(0, "Height", "+20%");
+        info_modifier(0, "Enemy Defense", "-10%");
+        info_modifier(1, "Enemy Exposed", "+50%");
+        info_modifier(1, "Hardened", "-60%");
+        info_shot("FIRE", "78%", "Chance to Hit:", "0%", "Chance to Crit:");
+        info_list_title(2, "PENALTIES");
+        info_list_add(2, "Elevated Ground", "An enemy unit has elevated position and can see this unit.");
+        info_list_title(1, "BONUSES");
+        info_list_add(1, "Hardened", "Hardened units receive extra protection against critical hits.");
+        info_list_title(0, "ABILITIES");
+        info_list_add(0, "Stun Immune", "");
+        info_list_add(0, "Leap", "");
+        info_alien("Chryssalid");
+        {
+            char said[INFO_TEXT * 2];
+            info_summary(said, sizeof said);
+            check(strcmp(said, "Target information. Chryssalid. Fire. Chance to Hit: 78%. "
+                               "Aim +68%, Height +20%, Enemy Defense -10%. Chance to Crit: 0%. "
+                               "Enemy Exposed +50%, Hardened -60%. Abilities, 2. Bonuses, 1. "
+                               "Penalties, 1.") == 0,
+                  "the first run's Chryssalid, as it would now be said");
+        }
+
+        info_reset();
+        check(!info_has_content(), "empty after a reset");
+        info_soldier("URSULA WRIGHT", "'Disco'", "heavy", "rank3", 1);
+        info_stats(stats, 4);
+        info_list_title(0, "ABILITIES");
+        info_list_add(0, "Bullet Swarm", "Firing does not end the turn.");
+        info_list_add(0, "Light Plasma Rifle", "");
+        info_list_title(1, "BONUSES");
+        info_list_title(2, "PENALTIES");
+        info_summary(say, sizeof say);
+        check(strcmp(say, "Target information. Ursula Wright, 'Disco'. Sergeant, heavy. "
+                          "Promotion available. Health: 11. Will: 50. Offense: 69. "
+                          "Defense: 0. Abilities, 2.") == 0,
+              "the soldier, with no shot and empty lists left out");
+        check(info_line_count() == 5, "five lines: who, stats, a heading, two items");
+
+        info_open();
+        info_step(-1, say, sizeof say);
+        check(strncmp(say, "Top. Ursula Wright", 18) == 0, "up from the start is the top");
+        info_step(1, say, sizeof say);
+        check(strcmp(say, "Health: 11. Will: 50. Offense: 69. Defense: 0.") == 0, "stats");
+        info_step(1, say, sizeof say);
+        info_step(1, say, sizeof say);
+        check(strcmp(say, "Bullet Swarm: Firing does not end the turn.") == 0,
+              "an ability with its description");
+        info_step(1, say, sizeof say);
+        info_step(1, say, sizeof say);
+        check(strcmp(say, "End. Light Plasma Rifle") == 0, "the end, and no colon for no description");
+        info_current(say, sizeof say);
+        check(strcmp(say, "Light Plasma Rifle") == 0, "the line again");
+        info_close();
+        check(!info_is_open(), "closes");
+
+        // Aiming at a Muton: the shot panel clears, lists its modifiers, then
+        // sends the totals. The equal hit and crit chances must both survive.
+        info_reset();
+        info_alien("Muton");
+        info_shot("", "", "", "", "");
+        info_modifier(0, "Aim", "+65%");
+        info_modifier(0, "Full Cover", "-40%");
+        info_modifier(1, "Weapon", "+10%");
+        info_shot("FIRE", "10%", "Chance to Hit:", "10%", "Chance to Crit:");
+        info_summary(say, sizeof say);
+        check(strcmp(say, "Target information. Muton. Fire. Chance to Hit: 10%. "
+                          "Aim +65%, Full Cover -40%. Chance to Crit: 10%. Weapon +10%.") == 0,
+              "the shot breakdown");
+        check(info_line_count() == 6, "six lines: who, the hit, two modifiers, the crit, one");
+        info_line(3, say, sizeof say);
+        check(strcmp(say, "Full Cover -40%") == 0, "a modifier on its own line");
+
+        info_shot("", "", "", "", "");
+        check(info_line_count() == 1, "a new shot burst drops the old modifiers");
+
+        // An ability that cannot be used: the name and chance go blank and
+        // the labels still arrive.
+        info_shot("", "", "Chance to Hit:", "", "Chance to Crit:");
+        info_summary(say, sizeof say);
+        check(strcmp(say, "Target information. Muton.") == 0,
+              "no chance shown, nothing said of one");
+        info_reset();
     }
 
     // The announcement list behind Insert.

@@ -74,7 +74,7 @@ void soldier_title_case(const char* in, char* out, size_t out_sz)
     out[n] = 0;
 }
 
-static const char* rank_word(const char* r)
+const char* soldier_rank_word(const char* r)
 {
     static const char* ranks[] = {
         "Rookie", "Squaddie", "Corporal", "Sergeant",
@@ -87,7 +87,7 @@ static const char* rank_word(const char* r)
 }
 
 // "heavy" -> "heavy", "mech_psi_gene" -> "MEC trooper, psionic, gene modded".
-static void class_words(const char* c, char* out, size_t out_sz)
+void soldier_class_words(const char* c, char* out, size_t out_sz)
 {
     out[0] = 0;
     if (!*c || strncmp(c, "none", 4) == 0) return;
@@ -150,8 +150,8 @@ void soldier_full(const SoldierState* s, char* out, size_t out_sz)
     who(s, out, out_sz);
 
     char cls[64], piece[96];
-    class_words(s->cls, cls, sizeof cls);
-    const char* rank = rank_word(s->rank);
+    soldier_class_words(s->cls, cls, sizeof cls);
+    const char* rank = soldier_rank_word(s->rank);
     if (*rank || *cls) {
         _snprintf_s(piece, sizeof piece, _TRUNCATE, "%s%s%s.", rank,
                     *rank && *cls ? ", " : "", cls);

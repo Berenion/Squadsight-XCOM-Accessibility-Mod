@@ -47,3 +47,9 @@ void soldier_full(const SoldierState* s, char* out, size_t out_sz);
 
 // "URSULA O'REILLY" -> "Ursula O'Reilly": capitals would be spelt out.
 void soldier_title_case(const char* in, char* out, size_t out_sz);
+
+// "rank3" -> "Sergeant", "shiv2" -> "SHIV", anything else "".
+const char* soldier_rank_word(const char* rank);
+
+// "heavy" -> "heavy", "mech_psi_gene" -> "MEC trooper, psionic, gene modded".
+void soldier_class_words(const char* cls, char* out, size_t out_sz);

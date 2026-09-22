@@ -55,6 +55,7 @@
 #include "combat.h"
 #include "history.h"
 #include "soldier.h"
+#include "info.h"
 #include "abar.h"
 #include "cursor.h"
 #include "nav.h"
@@ -681,6 +682,52 @@ static ULONGLONG g_reticle_said_at;
 
 static void strip_note(void* strip, const char* fn, const Payload* p);
 
+// A call's string and bool parameters, by position. The payload cannot be
+// used for this: it drops empty strings and repeats every argument in the
+// ASValue array, so SetShotInfo("", "72%", "Chance to Hit:", "72%", ...)
+// could not be told from one with no hit chance. Here an empty or unreadable
+// string is kept as "" in its place.
+#define FRAME_ARGS     6
+#define FRAME_ARG_TEXT 1024
+typedef struct {
+    char s[FRAME_ARGS][FRAME_ARG_TEXT];
+    int  ns;
+    int  b[FRAME_ARGS];
+    int  nb;
+} FrameArgs;
+
+static void frame_args(void* node, uint8_t* locals, FrameArgs* a)
+{
+    a->ns = a->nb = 0;
+    if (!locals || !readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*))) return;
+    void* prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
+    for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
+        if (!readable(prop, 0x68)) break;
+        uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
+        uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
+        void* next     = *(void**)((uint8_t*)prop + UFIELD_NEXT);
+        if ((flags & CPF_PARM) && !(flags & CPF_RETURNPARM) && off < 0x1000) {
+            PropKind kind = props_kind(prop);
+            if (kind == PROP_BOOL) {
+                int b = 0;
+                if (a->nb < FRAME_ARGS && props_read_bool(prop, locals, &b)) a->b[a->nb++] = b;
+            } else if (kind == PROP_UNKNOWN && a->ns < FRAME_ARGS) {
+                char* s = a->s[a->ns++];
+                if (read_fstring((const FString*)(locals + off), s, FRAME_ARG_TEXT))
+                    strip_markup(s);
+                else
+                    s[0] = 0;
+            }
+        }
+        prop = next;
+    }
+}
+
+static void info_note(LONG n, void* object, const char* obj_name, const char* fn_name,
+                      void* node, uint8_t* locals);
+static ULONGLONG g_info_due;            // when to say the summary, 0 for not yet
+static void info_settle(void);
+
 static void capture_body(const char* tag, LONG n, void* stack)
 {
     if (!readable(stack, 0x20)) {
@@ -756,6 +803,17 @@ static void capture_body(const char* tag, LONG n, void* stack)
             }
         }
         prop = next;
+    }
+
+    // The unit information screen (F1). See info.h. Its calls are read by
+    // position, and nothing is said until the burst is over (info_settle).
+    // The summary is due from the cursor's per-frame poll; it is checked
+    // here too, since the HUD goes on redrawing while the screen is up, in
+    // case the cursor does not.
+    if (g_info_due) info_settle();
+    if (strncmp(obj_name, "UIUnitGermanMode", 16) == 0) {
+        info_note(n, object, obj_name, fn_name, node, locals);
+        return;
     }
 
     // The shot about to be taken. Its panel states one thing per call and
@@ -3896,6 +3954,178 @@ static void soldier_readout(void)
 // Whether the soldier is aiming: their current action is the targeting one
 // (XGAction_Targeting in EW; EU aims inside XGAction_Fire, as shot_target_now
 // notes). Told by the action object's name, since its class is what differs.
+// ---- the unit information screen (F1) ---------------------------------------
+//
+// See info.h. F1 is the game's own key and reaches the game untouched; what
+// is added is hearing the screen it opens, and walking it. The screen is drawn
+// in one burst of calls on several objects (the screen, three perk lists, the
+// shot panel) whose order is up to Flash, so the summary waits for the burst
+// to go quiet. While it is up, numpad 8 / 2 or the arrows walk its lines and
+// numpad 5 says the line again; the arrows only scroll the screen itself,
+// which consumes every key (eInputState_Consume), so nothing reaches the
+// battle. The game closes it -- Escape, F1, Backspace -- and m_kGermanMode
+// going to none is how that is noticed.
+#define INFO_SETTLE_MS 300
+#define INFO_BURST_GAP_MS 1500
+
+static void*     g_info_screen;         // the UIUnitGermanMode the burst came from
+static void*     g_info_lists[INFO_LISTS];
+static int       g_info_fresh = 1;      // the next content call starts a new screen
+static int       g_info_said;           // the summary has been said for this one
+static ULONGLONG g_info_last;           // the last content call
+static ULONGLONG g_info_opened_at;      // when the summary was said
+static FieldSlot g_info_ctrl, g_info_pres, g_info_german;
+
+// Which of the three lists an object is, in the screen's order. They draw
+// themselves last first (PENALTIES, BONUSES, ABILITIES in the first run), but
+// UIUnitGermanMode.Init spawns them abilities, bonuses, penalties, one after
+// another, so their instance numbers run 0, 1, 2 and then 3, 4, 5 for the next
+// screen: the remainder is the place. Arrival order only if the name will not
+// parse.
+static int info_list_slot(void* obj, const char* obj_name)
+{
+    const char* digits = strrchr(obj_name, '_');
+    if (digits && digits[1] >= '0' && digits[1] <= '9') return atoi(digits + 1) % INFO_LISTS;
+    for (int i = 0; i < INFO_LISTS; i++) {
+        if (g_info_lists[i] == obj) return i;
+        if (!g_info_lists[i]) { g_info_lists[i] = obj; return i; }
+    }
+    return -1;
+}
+
+static void info_note(LONG n, void* object, const char* obj_name, const char* fn_name,
+                      void* node, uint8_t* locals)
+{
+    static FrameArgs a;     // 6 KB: not on the game's stack
+    frame_args(node, locals, &a);
+    const char* s[FRAME_ARGS];
+    for (int i = 0; i < FRAME_ARGS; i++) s[i] = i < a.ns ? a.s[i] : "";
+
+    InfoCall call = info_call(obj_name, fn_name);
+    int is_screen = call == INFO_SOLDIER || call == INFO_ALIEN || call == INFO_STATS;
+    int content = call != INFO_NONE;
+
+    logf_("[%ld] info: %s.%s  \"%s\" \"%s\" \"%s\" \"%s\" \"%s\"  bools %d:%d%s\n", n,
+          obj_name, fn_name, s[0], s[1], s[2], s[3], s[4], a.nb, a.nb ? a.b[0] : -1,
+          content ? "" : "  (not content)");
+    if (!content) return;
+
+    // A new screen. Not while one is open: the scroll calls the arrows make
+    // are not content, but a late call from the open screen must not wipe it.
+    ULONGLONG now = GetTickCount64();
+    if (g_info_fresh || (!info_is_open() && now - g_info_last > INFO_BURST_GAP_MS)) {
+        info_reset();
+        memset(g_info_lists, 0, sizeof g_info_lists);
+        g_info_screen = NULL;
+        g_info_fresh = 0;
+        g_info_said = 0;
+    }
+    g_info_last = now;
+    if (!g_info_said) g_info_due = now + INFO_SETTLE_MS;
+    if (is_screen) g_info_screen = object;
+
+    switch (call) {
+    case INFO_SOLDIER:  info_soldier(s[0], s[1], s[2], s[3], a.nb ? a.b[0] : -1); break;
+    case INFO_ALIEN:    info_alien(s[0]); break;
+    case INFO_STATS:    info_stats(s, a.ns < 4 ? a.ns : 4); break;
+    case INFO_TITLE:    info_list_title(info_list_slot(object, obj_name), s[0]); break;
+    case INFO_PERK:     info_list_add(info_list_slot(object, obj_name), s[0], s[1]); break;
+    case INFO_SHOT:     info_shot(s[0], s[1], s[2], s[3], s[4]); break;
+    case INFO_HIT_MOD:  info_modifier(0, s[0], s[1]); break;
+    case INFO_CRIT_MOD: info_modifier(1, s[0], s[1]); break;
+    default: break;
+    }
+}
+
+// Whether the screen the burst came from is still the one up:
+// controllerRef.m_Pres.m_kGermanMode, which State_GermanMode.Deactivate sets
+// to none as it removes the screen. Anything unreadable counts as closed.
+static int info_screen_up(void)
+{
+    const void* v;
+    void* scr = g_info_screen;
+    if (!scr || !unit_is_live(scr)) return 0;
+    if (!field_ptr(scr, "controllerRef", &g_info_ctrl, sizeof(void*), &v)) return 0;
+    void* pc = *(void* const*)v;
+    if (!pc || !unit_is_live(pc) ||
+        !field_ptr(pc, "m_Pres", &g_info_pres, sizeof(void*), &v)) return 0;
+    void* pres = *(void* const*)v;
+    if (!pres || !unit_is_live(pres) ||
+        !field_ptr(pres, "m_kGermanMode", &g_info_german, sizeof(void*), &v)) return 0;
+    return *(void* const*)v == scr;
+}
+
+// Every frame: the summary, once the burst has gone quiet.
+static void info_settle(void)
+{
+    if (!g_info_due || GetTickCount64() < g_info_due) return;
+    g_info_due = 0;
+    if (!info_has_content()) return;
+    g_info_said = 1;
+    char say[INFO_TEXT * 2];
+    info_summary(say, sizeof say);
+    int up = info_screen_up();
+    logf_("info: summary%s (%d lines) -> \"%s\"\n", up ? "" : " -- but the screen is not up",
+          info_line_count(), say);
+    if (!up) { g_info_fresh = 1; return; }
+    info_open();
+    g_info_opened_at = GetTickCount64();
+    if (g_speak) {
+        speech_cancel_pending();
+        speech_say_now(say);
+    }
+}
+
+#define INFO_KEYS 5
+static const int g_info_vk[INFO_KEYS] = {
+    VK_NUMPAD8, VK_UP, VK_NUMPAD2, VK_DOWN, VK_NUMPAD5
+};
+static int g_info_was[INFO_KEYS];
+
+// Returns 1 while the screen is up, having handled its keys.
+static int info_poll_body(void)
+{
+    int now[INFO_KEYS], pressed[INFO_KEYS];
+    for (int k = 0; k < INFO_KEYS; k++) {
+        now[k] = (GetAsyncKeyState(g_info_vk[k]) & 0x8000) != 0;
+        pressed[k] = now[k] && !g_info_was[k];
+        g_info_was[k] = now[k];
+    }
+    if (!info_is_open()) return 0;
+    if (!info_screen_up()) {
+        info_close();
+        g_info_fresh = 1;
+        logf_("info: the screen closed, %llu ms after the summary\n",
+              GetTickCount64() - g_info_opened_at);
+        speech_cancel_pending();
+        speech_say_now("Closed.");
+        return 0;
+    }
+    char say[INFO_TEXT * 2];
+    if (pressed[0] || pressed[1]) info_step(-1, say, sizeof say);
+    else if (pressed[2] || pressed[3]) info_step(1, say, sizeof say);
+    else if (pressed[4]) info_current(say, sizeof say);
+    else return 1;
+    logf_("info: %s at %llu ms -> \"%s\"\n",
+          pressed[0] || pressed[1] ? "up" : pressed[2] || pressed[3] ? "down" : "again",
+          GetTickCount64() - g_info_opened_at, say);
+    speech_cancel_pending();
+    speech_say_now(say);
+    return 1;
+}
+
+static int info_poll(void)
+{
+    Fault f;
+    __try { return info_poll_body(); }
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        fault_log("info: poll", &f, NULL);
+        info_close();
+        g_info_fresh = 1;
+        return 0;
+    }
+}
+
 static int soldier_aiming(void)
 {
     void* unit = soldier_unit();
@@ -4991,8 +5221,9 @@ static void nav_poll(void)
         walls_quiet();
         return;
     }
-    // The ability menu holds the numpad while it is open, as practice does.
-    if (abar_menu_poll() || review_poll()) {
+    // The ability menu holds the numpad while it is open, as practice does;
+    // so does the unit information screen (F1) while it is up.
+    if (info_poll() || abar_menu_poll() || review_poll()) {
         memset(g_numpad_down, 0, sizeof g_numpad_down);
         g_glide_digit = 0;
         g_glide_steps = 0;
@@ -5109,6 +5340,13 @@ static void cursor_watch(void* self)
         __try { soldier_poll(); }
         __except (fault_note(GetExceptionInformation(), &f)) {
             fault_log("soldier: poll", &f, NULL);
+        }
+    }
+    {
+        Fault f;
+        __try { info_settle(); }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("info: settle", &f, NULL);
         }
     }
 
