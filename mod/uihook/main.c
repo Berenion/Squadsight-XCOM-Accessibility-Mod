@@ -4833,9 +4833,13 @@ static void scan_focus(int tx, int ty, float ground, const char* what)
 #define FLOOR_KEYS 2
 static int g_floor_down[FLOOR_KEYS];      // F, C
 
+// `seen` gets what each layer tried answered, for the log: "6:- 5:F0@212.6"
+// is no floor on layer 6, a floor at 212.6 in storey 0 on layer 5.
 static int floor_next(const CursorGrid* g, int tx, int ty, float from, int dir,
-                      float* out, int* storey)
+                      float* out, int* storey, char* seen, size_t seen_sz)
 {
+    size_t used = 0;
+    seen[0] = 0;
     void* world = cursor_world();
     if (!world) return 0;
     PositionTestFn on_floor = (PositionTestFn)tile_vfn(world, g_tile_slot_onfloor);
@@ -4845,18 +4849,52 @@ static int floor_next(const CursorGrid* g, int tx, int ty, float from, int dir,
     float here[3] = { x, y, from + 4.0f };
     int cur = floor_of(here);
     int layer = cursor_tile_axis(from + 4.0f, g->min_z, 64.0f);
+    int w = _snprintf_s(seen, seen_sz, _TRUNCATE, "from layer %d storey %d:", layer, cur);
+    if (w > 0) used = (size_t)w;
     for (int tz = layer + dir; tz >= 0 && (g->num_z <= 0 || tz < g->num_z); tz += dir) {
         float pos[3] = { x, y, g->min_z + ((float)tz + 0.5f) * 64.0f };
-        if (!on_floor(world, NULL, pos)) continue;
+        if (!on_floor(world, NULL, pos)) {
+            w = _snprintf_s(seen + used, seen_sz - used, _TRUNCATE, " %d:-", tz);
+            if (w > 0) used += (size_t)w;
+            continue;
+        }
         float z = aim_floor_exact(world, pos, g->min_z + (float)tz * 64.0f);
         float at[3] = { x, y, z + 4.0f };
         int f = floor_of(at);
+        w = _snprintf_s(seen + used, seen_sz - used, _TRUNCATE, " %d:F%d@%.1f", tz, f, z);
+        if (w > 0) used += (size_t)w;
         if (f == cur) continue;
         *out = z;
         *storey = f;
         return 1;
     }
     return 0;
+}
+
+// What the game's own F / C made of the key: it still runs AscendFloor /
+// DescendFloor on its cursor, and the storey it reached is kept there even
+// though navigation sets the cursor's position. Read a moment after the key,
+// so the log can say whether the game found a floor where the mod did not.
+#define FLOOR_GAME_CHECK_MS 250
+static ULONGLONG g_floor_check_at;
+static FieldSlot g_cur_requested, g_cur_effective, g_cur_camfloor;
+
+static void floor_game_check(void)
+{
+    void* cur = cursor_object();
+    const void* v;
+    int req = -99, eff = -99;
+    float cam = -99999.0f;
+    if (!cur) return;
+    if (field_ptr(cur, "m_iRequestedFloor", &g_cur_requested, sizeof(int32_t), &v))
+        req = *(const int32_t*)v;
+    if (field_ptr(cur, "m_iLastEffectiveFloorIndex", &g_cur_effective, sizeof(int32_t), &v))
+        eff = *(const int32_t*)v;
+    // EW only; EU keeps the floor's bounds in other fields.
+    if (field_ptr(cur, "m_fLogicalCameraFloorHeight", &g_cur_camfloor, sizeof(float), &v))
+        cam = *(const float*)v;
+    logf_("nav: the game's own cursor after the key: requested floor %d, reached %d, "
+          "camera floor height %.1f\n", req, eff, cam);
 }
 
 static void nav_floor(int dir)
@@ -4874,21 +4912,23 @@ static void nav_floor(int dir)
     }
     float to = from;
     int storey = 0, found = 0;
+    char seen[512] = "";
+    g_floor_check_at = GetTickCount64() + FLOOR_GAME_CHECK_MS;
     Fault f;
-    __try { found = floor_next(&g, tx, ty, from, dir, &to, &storey); }
+    __try { found = floor_next(&g, tx, ty, from, dir, &to, &storey, seen, sizeof seen); }
     __except (fault_note(GetExceptionInformation(), &f)) {
         fault_log("nav: floor key", &f, NULL);
         found = 0;
     }
     if (!found) {
-        logf_("nav: %s at %d, %d from %.1f -- no floor that way\n",
-              dir > 0 ? "F" : "C", tx, ty, from);
+        logf_("nav: %s at %d, %d from %.1f -- no floor that way (%s)\n",
+              dir > 0 ? "F" : "C", tx, ty, from, seen);
         speech_cancel_pending();
         speech_say_now(dir > 0 ? "No floor above." : "No floor below.");
         return;
     }
-    logf_("nav: %s at %d, %d: %.1f -> %.1f, storey %d\n", dir > 0 ? "F" : "C",
-          tx, ty, from, to, storey);
+    logf_("nav: %s at %d, %d: %.1f -> %.1f, storey %d (%s)\n", dir > 0 ? "F" : "C",
+          tx, ty, from, to, storey, seen);
     scan_focus(tx, ty, to, dir > 0 ? "the floor above" : "the floor below");
     _snprintf_s(g_step_note, sizeof g_step_note, _TRUNCATE, "Floor %d.", storey + 1);
     g_floor_hold = 1;
@@ -5473,6 +5513,14 @@ static void nav_poll(void)
         int down = (GetAsyncKeyState(floor_keys[k]) & 0x8000) != 0;
         if (down && !g_floor_down[k]) nav_floor(k == 0 ? 1 : -1);
         g_floor_down[k] = down;
+    }
+    if (g_floor_check_at && GetTickCount64() >= g_floor_check_at) {
+        g_floor_check_at = 0;
+        Fault f;
+        __try { floor_game_check(); }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("nav: floor check", &f, NULL);
+        }
     }
 
     // Delete: the selected soldier (soldier.h). Its only binding, Camera
