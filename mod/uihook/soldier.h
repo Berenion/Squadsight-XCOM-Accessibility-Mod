@@ -16,6 +16,13 @@
 // that there are some, not which).
 
 #define SOLDIER_TEXT 640
+
+// Critically wounded, as the flag draws it (UIUnitFlag.RealizeCriticallyWounded
+// -> SetCriticallyWounded(bleeding, turns)): bleeding out with turns left, or
+// stabilised.
+#define SOLDIER_WOUND_NONE       0
+#define SOLDIER_BLEEDING         1
+#define SOLDIER_STABILISED       2
 #define SOLDIER_WEAPON_TEXT 256
 
 // One of the HUD's two weapon panels, as UITacticalHUD_WeaponPanel.
@@ -45,6 +52,9 @@ typedef struct {
     int  hp, hp_max;    // from the flag; -1 unknown
     int  actions;       // from the flag; -1 unknown
     int  buff, debuff;  // from the flag: 1, 0, -1 unknown
+    int  panicked;      // the flag's EKG: 1, 0, -1 unknown
+    int  wounded;       // SOLDIER_WOUND_*
+    int  bleed_turns;   // turns before bleeding out, while SOLDIER_BLEEDING
     char weapon[SOLDIER_WEAPON_TEXT];   // the equipped weapon: "LMG, 1 shot left."
     char weapons[SOLDIER_WEAPON_TEXT];  // it, then the other: "... Rocket Launcher, full."
 } SoldierState;
@@ -87,6 +97,12 @@ void soldier_weapon_text(const char* name, const SoldierWeapon* w,
 // names it, `active_name`), and every weapon, equipped first, into `all`.
 void soldier_weapons(const char* active_name, const SoldierWeapon* w, int n,
                      char* active, size_t active_sz, char* all, size_t all_sz);
+
+// One squad member's state as their flag shows it, for the squad list:
+// "2 actions, 11 of 11 HP", "no actions left, 5 of 10 HP, panicked",
+// "bleeding out, 2 turns left", "stabilised". Unknown parts are left out.
+void soldier_squad_words(int actions, int hp, int hp_max, int panicked, int wounded,
+                         int bleed_turns, char* out, size_t out_sz);
 
 // "rank3" -> "Sergeant", "shiv2" -> "SHIV", anything else "".
 const char* soldier_rank_word(const char* rank);

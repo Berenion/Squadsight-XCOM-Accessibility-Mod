@@ -1124,6 +1124,35 @@ int main(void)
         info_reset();
     }
 
+    // The squad at a glance: what each soldier's flag shows (numpad -).
+    printf("\nsquad at a glance\n");
+    {
+        char say[SOLDIER_TEXT];
+        soldier_squad_words(2, 11, 11, 0, SOLDIER_WOUND_NONE, 0, say, sizeof say);
+        check(strcmp(say, "2 actions, 11 of 11 HP") == 0, "actions and hit points");
+        soldier_squad_words(0, 5, 10, 1, SOLDIER_WOUND_NONE, 0, say, sizeof say);
+        check(strcmp(say, "no actions left, 5 of 10 HP, panicked") == 0, "spent and panicked");
+        soldier_squad_words(1, -1, -1, -1, SOLDIER_WOUND_NONE, 0, say, sizeof say);
+        check(strcmp(say, "1 action") == 0, "what is unknown is left out");
+        soldier_squad_words(0, 0, 10, 0, SOLDIER_BLEEDING, 2, say, sizeof say);
+        check(strcmp(say, "bleeding out, 2 turns left") == 0, "bleeding out, alone");
+        soldier_squad_words(0, 0, 10, 0, SOLDIER_STABILISED, 0, say, sizeof say);
+        check(strcmp(say, "stabilised") == 0, "stabilised");
+
+        SoldierState s;
+        const char* hudson[] = { "KELLY HUDSON", "rank2", "heavy" };
+        soldier_clear(&s);
+        soldier_from_stats(&s, hudson, 3);
+        s.hp = 5; s.hp_max = 10; s.actions = 0; s.panicked = 1;
+        soldier_brief(&s, say, sizeof say);
+        check(strcmp(say, "Kelly Hudson. Panicked. 5 of 10 HP. No actions left.") == 0,
+              "a switch says panicked first");
+        s.wounded = SOLDIER_BLEEDING; s.bleed_turns = 1;
+        soldier_brief(&s, say, sizeof say);
+        check(strcmp(say, "Kelly Hudson. Bleeding out, 1 turn left.") == 0,
+              "and bleeding out instead of the rest");
+    }
+
     // The announcement list behind Insert.
     printf("\nannouncement list\n");
     {

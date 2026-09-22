@@ -14,6 +14,7 @@ void soldier_clear(SoldierState* s)
     s->hp = s->hp_max = -1;
     s->actions = -1;
     s->buff = s->debuff = -1;
+    s->panicked = -1;
 }
 
 static int is_rank(const char* t)
@@ -121,6 +122,21 @@ static void who(const SoldierState* s, char* out, size_t out_sz)
 static void hp_and_actions(const SoldierState* s, char* out, size_t out_sz)
 {
     char piece[64];
+    // A soldier bleeding out has no actions and no hit points worth saying.
+    if (s->wounded == SOLDIER_BLEEDING) {
+        if (s->bleed_turns > 0)
+            _snprintf_s(piece, sizeof piece, _TRUNCATE, "Bleeding out, %d turn%s left.",
+                        s->bleed_turns, s->bleed_turns == 1 ? "" : "s");
+        else
+            _snprintf_s(piece, sizeof piece, _TRUNCATE, "Bleeding out.");
+        add(out, out_sz, piece);
+        return;
+    }
+    if (s->wounded == SOLDIER_STABILISED) {
+        add(out, out_sz, "Stabilised.");
+        return;
+    }
+    if (s->panicked == 1) add(out, out_sz, "Panicked.");
     if (s->hp >= 0 && s->hp_max > 0) {
         _snprintf_s(piece, sizeof piece, _TRUNCATE, "%d of %d HP.", s->hp, s->hp_max);
         add(out, out_sz, piece);
@@ -133,6 +149,41 @@ static void hp_and_actions(const SoldierState* s, char* out, size_t out_sz)
         _snprintf_s(piece, sizeof piece, _TRUNCATE, "%d actions.", s->actions);
         add(out, out_sz, piece);
     }
+}
+
+static void comma(char* out, size_t out_sz, const char* piece)
+{
+    size_t used = strlen(out);
+    if (piece && *piece)
+        _snprintf_s(out + used, out_sz - used, _TRUNCATE, "%s%s", used ? ", " : "", piece);
+}
+
+void soldier_squad_words(int actions, int hp, int hp_max, int panicked, int wounded,
+                         int bleed_turns, char* out, size_t out_sz)
+{
+    char piece[64];
+    out[0] = 0;
+    if (wounded == SOLDIER_BLEEDING) {
+        if (bleed_turns > 0)
+            _snprintf_s(piece, sizeof piece, _TRUNCATE, "bleeding out, %d turn%s left",
+                        bleed_turns, bleed_turns == 1 ? "" : "s");
+        else
+            _snprintf_s(piece, sizeof piece, _TRUNCATE, "bleeding out");
+        comma(out, out_sz, piece);
+        return;
+    }
+    if (wounded == SOLDIER_STABILISED) { comma(out, out_sz, "stabilised"); return; }
+    if (actions == 0) comma(out, out_sz, "no actions left");
+    else if (actions == 1) comma(out, out_sz, "1 action");
+    else if (actions > 1) {
+        _snprintf_s(piece, sizeof piece, _TRUNCATE, "%d actions", actions);
+        comma(out, out_sz, piece);
+    }
+    if (hp >= 0 && hp_max > 0) {
+        _snprintf_s(piece, sizeof piece, _TRUNCATE, "%d of %d HP", hp, hp_max);
+        comma(out, out_sz, piece);
+    }
+    if (panicked == 1) comma(out, out_sz, "panicked");
 }
 
 void soldier_weapon_words(const char* type, char* out, size_t out_sz)

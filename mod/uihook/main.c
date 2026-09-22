@@ -2104,6 +2104,9 @@ typedef struct {
     int   strip_flanked; // the target strip's mark: flanked by the soldier, -1 unknown
     int   moves;        // RealizeMoves: action pips, friendly units only; -1 unknown
     int   buff, debuff; // ShowBuff / ShowDebuff: the flag's markers; -1 unknown
+    int   panicked;     // RealizeEKG: 1, 0, -1 unknown
+    int   wounded;      // RealizeCriticallyWounded: SOLDIER_WOUND_* (soldier.h)
+    int   bleed_turns;  // turns left while bleeding out
 } UnitName;
 
 static UnitName  g_units[UNIT_MAX];
@@ -2145,6 +2148,7 @@ static UnitName* unit_entry(void* flag)
     u->moves = -1;
     u->buff = u->debuff = -1;
     u->hp = u->hp_max = -1;
+    u->panicked = -1;
     return u;
 }
 
@@ -2450,6 +2454,31 @@ static void unit_flag_drew(void* flag, const char* fn, const Payload* p)
     if (strcmp(fn, "RealizeMoves") == 0) {
         UnitName* u = unit_entry(flag);
         if (u && p->nnumbers > 0) u->moves = (int)p->numbers[p->nnumbers - 1];
+        return;
+    }
+    // The turn ending greys every friendly flag out and empties its pips
+    // (UIUnitFlag.EndTurn: SetDisabled, then SetMoves(0)).
+    if (strcmp(fn, "EndTurn") == 0) {
+        UnitName* u = unit_entry(flag);
+        if (u) u->moves = 0;
+        return;
+    }
+    // The panic readout: RealizeEKG sends SetEKGState(1) when the unit
+    // panics and SetEKGState(0) when it stops -- only ever on a change.
+    if (strcmp(fn, "RealizeEKG") == 0) {
+        UnitName* u = unit_entry(flag);
+        if (u && p->nnumbers > 0) u->panicked = p->numbers[p->nnumbers - 1] != 0;
+        return;
+    }
+    // Critically wounded: SetCriticallyWounded(bleeding, turns), sent for a
+    // soldier whose m_iCriticalWoundCounter is running; bleeding false is one
+    // who has been stabilised.
+    if (strcmp(fn, "RealizeCriticallyWounded") == 0) {
+        UnitName* u = unit_entry(flag);
+        if (!u) return;
+        int bleeding = p->nabools ? p->abools[0] : (p->nbools ? p->bools[0] : 1);
+        u->wounded = bleeding ? SOLDIER_BLEEDING : SOLDIER_STABILISED;
+        u->bleed_turns = p->nnumbers > 0 ? (int)p->numbers[p->nnumbers - 1] : 0;
         return;
     }
     // The selection marker: UIUnitFlag.Update runs SetSelected(true) and
@@ -3392,16 +3421,30 @@ static void radar(int friendly)
     static SeenSet sight;
     if (!friendly) squad_sight(squad, &sight);
 
-    static char labels[UNIT_MAX][160];
+    // The squad list is also the squad at a glance: each soldier with what
+    // their flag shows over their head -- the action pips, hit points, panic,
+    // bleeding out -- so who can still act is heard without switching to
+    // each in turn. The selected soldier is in it too, "here".
+    static char labels[UNIT_MAX][256];
     TileContact c[UNIT_MAX];
     int n = 0;
     for (int i = 0; i < g_nunits; i++) {
         UnitSeen s;
         if (!unit_seen(&g_units[i], squad, &s) || s.friendly != friendly ||
-            (from_soldier && s.pawn == soldier) ||
+            (!friendly && from_soldier && s.pawn == soldier) ||
             (!friendly && !seen_has(&sight, s.unit)))
             continue;
         unit_label(&g_units[i], labels[n], sizeof labels[n]);
+        if (friendly) {
+            const UnitName* u = &g_units[i];
+            char state[128];
+            soldier_squad_words(u->moves, u->hp, u->hp_max, u->panicked, u->wounded,
+                                u->bleed_turns, state, sizeof state);
+            if (state[0]) {
+                size_t used = strlen(labels[n]);
+                _snprintf_s(labels[n] + used, sizeof labels[n] - used, _TRUNCATE, ", %s", state);
+            }
+        }
         c[n].name = labels[n];
         c[n].dx = cursor_tile_axis(s.loc[0], g.min_x, CURSOR_TILE) - ox;
         c[n].dy = cursor_tile_axis(s.loc[1], g.min_y, CURSOR_TILE) - oy;
@@ -3409,8 +3452,7 @@ static void radar(int friendly)
     }
     static char say[2048];
     tile_contacts(c, n,
-                  !friendly ? "No enemies in sight." :
-                  from_soldier ? "No one else in the squad." : "No squad in sight.",
+                  !friendly ? "No enemies in sight." : "No squad in sight.",
                   say, sizeof say);
     logf_("radar: %s from %d, %d%s%s: %s\n", friendly ? "squad" : "enemies", ox, oy,
           from_soldier ? " (the soldier)" : " (the target)",
@@ -4310,6 +4352,9 @@ static int soldier_state(const UnitName* u, SoldierState* s)
     s->actions = u->moves;
     s->buff = u->buff;
     s->debuff = u->debuff;
+    s->panicked = u->panicked;
+    s->wounded = u->wounded;
+    s->bleed_turns = u->bleed_turns;
     // The panels are the active soldier's, redrawn before the flag marks a
     // switch (2026-09-22: SetWeaponAndAmmo at 712, ShowExtension at 743).
     weapon_words(s->weapon, sizeof s->weapon, s->weapons, sizeof s->weapons);
