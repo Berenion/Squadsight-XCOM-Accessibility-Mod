@@ -58,6 +58,7 @@
 #include "soldier.h"
 #include "info.h"
 #include "sight.h"
+#include "mission.h"
 #include "abar.h"
 #include "cursor.h"
 #include "nav.h"
@@ -731,6 +732,112 @@ static void info_note(LONG n, void* object, const char* obj_name, const char* fn
 static ULONGLONG g_info_due;            // when to say the summary, 0 for not yet
 static void info_settle(void);
 
+// ---- the mission's objectives (mission.h) -----------------------------------
+//
+// Each call is read by position (frame_args), except the sorted list, which is
+// an array of strings and comes through the payload. What changed is said
+// MISSION_SETTLE_MS after the last call of a burst, queued and kept.
+#define MISSION_SETTLE_MS 500
+static ULONGLONG g_mission_due;
+static void*     g_mission_panel;       // the UITacticalHUD_ObjectivesList
+
+// Whether the list is on screen: 1, 0, or -1 when that cannot be asked.
+//
+// The game fills the list on every mission and draws it on few. OnInit hides
+// it unless the mission is eMission_Special (11), and only a script's
+// SeqAct_ToggleAllMissionObjectives shows it elsewhere -- so on an ordinary
+// mission it holds whatever the script put there at the start, never kept up
+// to date because nobody sees it. The first run read exactly that, a list the
+// player took for stale (2026-09-22). So what is said follows the screen:
+// UI_FxsPanel.IsVisible, a native asked through its vtable slot.
+static int mission_visible(void);
+
+// Visibility polled at most this often, and what it was last.
+#define MISSION_VIS_MS 250
+static ULONGLONG g_mission_vis_at;
+static int       g_mission_vis = -1;
+
+static void mission_note(LONG n, void* object, const char* fn_name, void* node,
+                         uint8_t* locals, const Payload* p)
+{
+    // A new HUD is a new mission; the old one's list is not this one's.
+    if (g_mission_panel && object != g_mission_panel) {
+        logf_("[%ld] mission: a new list panel -- starting afresh\n", n);
+        mission_reset();
+        g_mission_vis = -1;
+    }
+    g_mission_panel = object;
+    const char* fn = strncmp(fn_name, "AS_", 3) == 0 ? fn_name + 3 : fn_name;
+    static FrameArgs a;     // 6 KB: not on the game's stack
+    frame_args(node, locals, &a);
+    const char* id = a.ns > 0 ? a.s[0] : "";
+    if (strcmp(fn, "AddObjective") == 0) {
+        mission_add(id, a.ns > 1 ? a.s[1] : "", a.ns > 2 ? a.s[2] : "", a.nb ? a.b[0] : 1);
+        logf_("[%ld] mission: add %s \"%s\" \"%s\"%s\n", n, id, a.ns > 1 ? a.s[1] : "",
+              a.ns > 2 ? a.s[2] : "", a.nb && !a.b[0] ? " (hint)" : "");
+    } else if (strcmp(fn, "CompleteObjective") == 0) {
+        mission_complete(id);
+        logf_("[%ld] mission: complete %s\n", n, id);
+    } else if (strcmp(fn, "FailObjective") == 0) {
+        mission_fail(id);
+        logf_("[%ld] mission: fail %s\n", n, id);
+    } else if (strcmp(fn, "RemoveObjective") == 0) {
+        mission_remove(id);
+        logf_("[%ld] mission: remove %s\n", n, id);
+    } else if (strcmp(fn, "RemoveAllObjectives") == 0) {
+        mission_clear();
+        logf_("[%ld] mission: clear\n", n);
+    } else if (strcmp(fn, "SetSortedList") == 0) {
+        const char* ids[MISSION_MAX];
+        int k = 0;
+        char seen[256] = "";
+        for (int i = 0; i < p->nstrings && k < MISSION_MAX; i++) {
+            ids[k++] = p->strings[i];
+            size_t used = strlen(seen);
+            _snprintf_s(seen + used, sizeof seen - used, _TRUNCATE, "%s%s", used ? " " : "",
+                        p->strings[i]);
+        }
+        mission_order(ids, k);
+        logf_("[%ld] mission: order %s\n", n, seen);
+        return;     // the order alone is not a change worth waiting on
+    } else {
+        return;
+    }
+    g_mission_due = GetTickCount64() + MISSION_SETTLE_MS;
+}
+
+static void mission_poll(void)
+{
+    ULONGLONG now = GetTickCount64();
+    char say[MISSION_TEXT];
+
+    // Shown mid-mission by a script: what it shows is read then.
+    if (g_mission_panel && now - g_mission_vis_at >= MISSION_VIS_MS) {
+        g_mission_vis_at = now;
+        int vis = mission_visible();
+        if (vis != g_mission_vis) {
+            logf_("mission: the list is %s\n",
+                  vis > 0 ? "shown" : vis == 0 ? "hidden" : "of unknown visibility");
+            if (vis > 0 && g_mission_vis == 0 && !g_mission_due) {
+                mission_list(say, sizeof say);
+                logf_("mission: shown -> \"%s\"\n", say);
+                announce(say);
+            }
+            g_mission_vis = vis;
+        }
+    }
+
+    if (!g_mission_due || now < g_mission_due) return;
+    g_mission_due = 0;
+    // The changes are taken either way, so a list that is shown later is
+    // compared with what it held, not with the start of the mission.
+    mission_changes(say, sizeof say);
+    if (!say[0]) return;
+    int vis = mission_visible();
+    logf_("mission: -> \"%s\"%s\n", say, vis == 0 ? "  (hidden -- not said)" : "");
+    if (vis != 0) announce(say);
+}
+
 static void capture_body(const char* tag, LONG n, void* stack)
 {
     if (!readable(stack, 0x20)) {
@@ -806,6 +913,14 @@ static void capture_body(const char* tag, LONG n, void* stack)
             }
         }
         prop = next;
+    }
+
+    // The mission's objectives. See mission.h. Kept, and said once a burst
+    // of changes is over (mission_poll).
+    if (g_mission_due) mission_poll();
+    if (strncmp(obj_name, "UITacticalHUD_ObjectivesList", 28) == 0) {
+        mission_note(n, object, fn_name, node, locals, p);
+        return;
     }
 
     // The unit information screen (F1). See info.h. Its calls are read by
@@ -1740,6 +1855,7 @@ static int       g_tile_slot_floorz = -1;   // XComWorldData.GetFloorZForPositio
 typedef float (__fastcall* FloorZFn)(void* self, void* edx, const float* pos, int unlimited);
 static int       g_unit_slot_visible = -1;  // XGUnitNativeBase.IsAliveAndVisible
 static int       g_unit_slot_alive = -1;    // XGUnitNativeBase.IsAlive
+static int       g_panel_slot_visible = -1; // UI_FxsPanel.IsVisible
 static int       g_cursor_slot_floor = -1;  // XCom3DCursor.WorldZToCursorFloor
 static int       g_world_slot_seetile = -1; // XComWorldData.CanSeeActorToTile
 static int       g_unit_slot_flanking = -1; // XGUnitNativeBase.IsFlankingCoverPoint
@@ -2091,6 +2207,22 @@ static void* squad_player(void)
 static int unit_is_live(void* obj)
 {
     return !objects_ready() || objects_live(obj);
+}
+
+static int mission_visible(void)
+{
+    void* panel = g_mission_panel;
+    if (!panel) return -1;
+    // Gone with the mission it belonged to: what it held is not on any screen,
+    // and must not be read into the next mission, whose list comes later.
+    if (!unit_is_live(panel)) {
+        logf_("mission: the list's panel is gone -- forgetting its objectives\n");
+        g_mission_panel = NULL;
+        mission_reset();
+        return 0;
+    }
+    UnitTestFn visible = (UnitTestFn)tile_vfn(panel, g_panel_slot_visible);
+    return visible ? visible(panel, NULL) != 0 : -1;
 }
 
 static int unit_seen(UnitName* u, void* squad, UnitSeen* out)
@@ -3312,6 +3444,7 @@ static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
         { "XGUnitNativeBaseexecIsPointWithinFiringRange", &g_unit_slot_range, NULL },
         { "XGUnitNativeBaseexecIsAliveAndVisible",   &g_unit_slot_visible,  NULL },
         { "XGUnitNativeBaseexecIsAlive",             &g_unit_slot_alive,    NULL },
+        { "UI_FxsPanelexecIsVisible",                &g_panel_slot_visible, NULL },
         { "XCom3DCursorexecWorldZToCursorFloor",     &g_cursor_slot_floor,  NULL },
     };
     for (int i = 0; i < (int)(sizeof want / sizeof want[0]); i++) {
@@ -5806,6 +5939,24 @@ static void nav_poll(void)
         if (down && !g_floor_down[k]) nav_floor(k == 0 ? 1 : -1);
         g_floor_down[k] = down;
     }
+    // M: the mission's objectives, as the HUD lists them. M is bound in no
+    // section of DefaultInput.ini or BaseInput.ini, so it never reaches the
+    // game.
+    static int mission_key_down;
+    int mkey = (GetAsyncKeyState('M') & 0x8000) != 0;
+    if (mkey && !mission_key_down) {
+        char say[MISSION_TEXT];
+        mission_list(say, sizeof say);
+        if (mission_visible() == 0) {
+            logf_("mission: M, the list hidden: \"%s\"\n", say);
+            strcpy_s(say, sizeof say, "No objectives on screen.");
+        }
+        logf_("mission: M -> \"%s\"\n", say);
+        speech_cancel_pending();
+        speech_say_now(say);
+    }
+    mission_key_down = mkey;
+
     // X: the game's weapon switch. Only noted; the change it makes is said
     // when the HUD redraws the equipped weapon (weapon_note).
     int x = (GetAsyncKeyState('X') & 0x8000) != 0;
@@ -5858,6 +6009,13 @@ static void cursor_watch(void* self)
         __try { soldier_poll(); }
         __except (fault_note(GetExceptionInformation(), &f)) {
             fault_log("soldier: poll", &f, NULL);
+        }
+    }
+    {
+        Fault f;
+        __try { mission_poll(); }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("mission: poll", &f, NULL);
         }
     }
     {

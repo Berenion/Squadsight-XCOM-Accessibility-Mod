@@ -21,6 +21,7 @@
 #include "soldier.h"
 #include "info.h"
 #include "sight.h"
+#include "mission.h"
 #include "abar.h"
 #include "props.h"
 #include "input.h"
@@ -757,6 +758,91 @@ int main(void)
         soldier_clear(&s);
         soldier_brief(&s, say, sizeof say);
         check(say[0] == 0, "nobody selected says nothing");
+    }
+
+    // The mission's objectives (mission.h), in the order the first run logged
+    // them (2026-09-22): cleared, two added, one completed at once.
+    printf("\nmission objectives\n");
+    {
+        char say[MISSION_TEXT];
+        mission_reset();
+        mission_list(say, sizeof say);
+        check(strcmp(say, "No objectives.") == 0, "none yet");
+
+        mission_clear();
+        mission_add("ObjID_2", "", "Find the source of the infestation.", 1);
+        mission_add("ObjID_1", "", "Investigate the response team's disappearance.", 1);
+        const char* order[] = { "ObjID_2", "ObjID_1" };
+        mission_order(order, 2);
+        mission_complete("ObjID_1");
+        mission_changes(say, sizeof say);
+        check(strcmp(say, "Objectives: Find the source of the infestation. "
+                          "Investigate the response team's disappearance, complete.") == 0,
+              "a mission's first list is read whole, each with its state");
+        mission_changes(say, sizeof say);
+        check(say[0] == 0, "and not again");
+
+        // The same list sent again says nothing.
+        mission_clear();
+        mission_add("ObjID_2", "", "Find the source of the infestation.", 1);
+        mission_add("ObjID_1", "", "Investigate the response team's disappearance.", 1);
+        mission_complete("ObjID_1");
+        mission_changes(say, sizeof say);
+        check(say[0] == 0, "a rebuild of the same list says nothing");
+
+        mission_add("ObjID_3", "", "Evacuate the civilians", 1);
+        mission_changes(say, sizeof say);
+        check(strcmp(say, "New objective: Evacuate the civilians.") == 0,
+              "a new objective, with its full stop");
+
+        mission_add("ObjID_3", "", "Evacuate the civilians: 2 of 5", 1);
+        mission_changes(say, sizeof say);
+        check(strcmp(say, "Objective: Evacuate the civilians: 2 of 5.") == 0,
+              "new text for the same objective");
+
+        mission_complete("ObjID_2");
+        mission_fail("ObjID_3");
+        mission_changes(say, sizeof say);
+        check(strcmp(say, "Objective failed: Evacuate the civilians: 2 of 5. "
+                          "Objective complete: Find the source of the infestation.") == 0,
+              "failed and complete together");
+
+        mission_list(say, sizeof say);
+        check(strstr(say, "Evacuate the civilians: 2 of 5, failed.") != NULL &&
+              strstr(say, "Find the source of the infestation, complete.") != NULL,
+              "M says each objective's state after it");
+
+        // The Van Doorn list, in the game's sorted order (2026-09-22): heard
+        // under a "Complete:" heading it was taken for the escort being done.
+        mission_reset();
+        mission_clear();
+        mission_add("ObjID_3", "", "Escort General Van Doorn back to the Skyranger.", 1);
+        mission_add("ObjID_2", "", "Approach General Van Doorn.", 1);
+        mission_add("ObjID_1", "", "Locate General Van Doorn.", 1);
+        mission_complete("ObjID_2");
+        mission_complete("ObjID_1");
+        {
+            const char* sorted_ids[] = { "ObjID_3", "ObjID_1", "ObjID_2" };
+            mission_order(sorted_ids, 3);
+        }
+        mission_changes(say, sizeof say);
+        check(strcmp(say, "Objectives: Escort General Van Doorn back to the Skyranger. "
+                          "Locate General Van Doorn, complete. "
+                          "Approach General Van Doorn, complete.") == 0,
+              "the escort open, the other two complete, in the order drawn");
+
+        mission_remove("ObjID_3");
+        mission_changes(say, sizeof say);
+        check(say[0] == 0, "a removal is silent");
+
+        // A new mission: nothing of the old list is left.
+        mission_clear();
+        mission_add("Bomb", "", "Disarm the device", 1);
+        mission_add("Hint", "", "Use the numpad to move.", 0);
+        mission_changes(say, sizeof say);
+        check(strcmp(say, "Objectives: Disarm the device. Use the numpad to move.") == 0,
+              "a list replaced outright is read whole");
+        mission_reset();
     }
 
     // Enemies coming into and going out of sight (sight.h).

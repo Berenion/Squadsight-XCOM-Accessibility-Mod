@@ -464,14 +464,19 @@ int objects_live(void* obj)
     void** data = (void**)g_objs->Data;
     int total = g_objs->Num;
     if (!data || total <= 0) return 0;
-    if (!region_ok(obj, 0x60)) return 0;
+    // Asked afresh, not of the region cache. The cache is emptied at the start
+    // of each walk and trusted within it; between walks a load can free the
+    // regions it vouches for. It did: the objectives panel of the mission being
+    // left, asked about during the next one's load, faulted here three times
+    // (2026-09-22, reading its index from released memory).
+    if (!readable(obj, 0x60)) return 0;
 
     // The object is asked where it thinks it sits and the table is asked to
     // agree -- the same invariant the probe was built on. A freed object's
     // slot is nulled, so a pointer kept from a moment ago fails here.
     int32_t idx = *(const int32_t*)((const uint8_t*)obj + g_index_off);
     if (idx < 0 || idx >= total) return 0;
-    if (!region_ok(&data[idx], sizeof(void*))) return 0;
+    if (!readable(&data[idx], sizeof(void*))) return 0;
     return data[idx] == obj;
 }
 
