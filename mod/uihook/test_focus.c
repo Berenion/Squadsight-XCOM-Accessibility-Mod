@@ -18,6 +18,7 @@
 #include "shot.h"
 #include "combat.h"
 #include "history.h"
+#include "soldier.h"
 #include "abar.h"
 #include "props.h"
 #include "input.h"
@@ -714,6 +715,46 @@ int main(void)
         combat_turn_reset();
         check(combat_turn("HideAlienTurn", NULL, 0, say, sizeof say) &&
               strcmp(say, "Your turn.") == 0, "with no texts yet, English stands in");
+    }
+
+    // The selected soldier, from SetStats' strings as they arrive.
+    printf("\nselected soldier\n");
+    {
+        char say[SOLDIER_TEXT];
+        SoldierState s;
+        const char* wright[] = { "URSULA WRIGHT", "'Disco'", "rank3", "heavy" };
+        soldier_clear(&s);
+        soldier_from_stats(&s, wright, 4);
+        check(strcmp(s.rank, "rank3") == 0 && strcmp(s.cls, "heavy") == 0,
+              "rank and class found");
+        s.hp = 11; s.hp_max = 11; s.actions = 2;
+        soldier_brief(&s, say, sizeof say);
+        check(strcmp(say, "Ursula Wright, 'Disco'. 11 of 11 HP. 2 actions.") == 0,
+              "a switch, briefly");
+        s.leader = 1; s.aim = 69; s.promotion = 1; s.buff = 1; s.debuff = 0;
+        soldier_full(&s, say, sizeof say);
+        check(strcmp(say, "Ursula Wright, 'Disco'. Sergeant, heavy. Squad leader. 11 of 11 HP. "
+                          "2 actions. Aim 69. Promotion available. Has bonuses.") == 0,
+              "everything the HUD shows");
+
+        const char* ellis[] = { "DONNY ELLIS", "rank2", "heavy" };
+        soldier_clear(&s);
+        soldier_from_stats(&s, ellis, 3);
+        s.actions = 0;
+        soldier_brief(&s, say, sizeof say);
+        check(strcmp(say, "Donny Ellis. No actions left.") == 0,
+              "no nickname, no actions, hit points unknown");
+
+        const char* mec[] = { "SHAWNA O'REILLY", "rank1", "mech_gene" };
+        soldier_clear(&s);
+        soldier_from_stats(&s, mec, 3);
+        s.actions = 1;
+        soldier_full(&s, say, sizeof say);
+        check(strcmp(say, "Shawna O'Reilly. Squaddie, MEC trooper, gene modded. 1 action.") == 0,
+              "O' names and class suffixes");
+        soldier_clear(&s);
+        soldier_brief(&s, say, sizeof say);
+        check(say[0] == 0, "nobody selected says nothing");
     }
 
     // The announcement list behind Insert.

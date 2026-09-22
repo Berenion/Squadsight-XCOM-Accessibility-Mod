@@ -54,6 +54,7 @@
 #include "shot.h"
 #include "combat.h"
 #include "history.h"
+#include "soldier.h"
 #include "abar.h"
 #include "cursor.h"
 #include "nav.h"
@@ -654,6 +655,8 @@ static void unit_note(void* flag, const char* name, const char* nick);
 static void unit_flag_drew(void* flag, const char* fn, const Payload* p);
 static void combat_message(LONG n, void* stack, const Payload* p);
 static void announce(const char* text);
+static void soldier_stats_note(LONG n, const Payload* p);
+static void soldier_selected(void* flag);
 static void shot_target_now(void* stack);
 
 // Aiming a cursor-moving ability (a rocket, a grenade) rather than choosing a
@@ -769,6 +772,13 @@ static void capture_body(const char* tag, LONG n, void* stack)
     }
     if (strncmp(obj_name, "UIUnitFlag_", 11) == 0)
         unit_flag_drew(object, fn_name, p);
+    // The selected soldier's panel. See soldier.h. Not spoken as it passes:
+    // soldier_poll announces a switch once the flags have caught up.
+    if (strncmp(obj_name, "UITacticalHUD_SoldierStatsContainer", 35) == 0 &&
+        strcmp(fn_name, "SetStats") == 0) {
+        soldier_stats_note(n, p);
+        return;
+    }
     // Whose turn it is. See combat_turn in combat.h.
     if (strncmp(obj_name, "UITurnOverlay", 13) == 0) {
         const char* strs[8];
@@ -1891,6 +1901,8 @@ typedef struct {
     int   flanked;      // the shield's flanked state, -1 unknown
     int   hp, hp_max;   // as displayed, -1 when the flag shows none
     int   strip_flanked; // the target strip's mark: flanked by the soldier, -1 unknown
+    int   moves;        // RealizeMoves: action pips, friendly units only; -1 unknown
+    int   buff, debuff; // ShowBuff / ShowDebuff: the flag's markers; -1 unknown
 } UnitName;
 
 static UnitName  g_units[UNIT_MAX];
@@ -1929,6 +1941,8 @@ static UnitName* unit_entry(void* flag)
     u->flag = flag;
     u->flanked = -1;
     u->strip_flanked = -1;
+    u->moves = -1;
+    u->buff = u->debuff = -1;
     u->hp = u->hp_max = -1;
     return u;
 }
@@ -2012,7 +2026,7 @@ static int unit_seen(UnitName* u, void* squad, UnitSeen* out)
     }
     void* unit = *(void* const*)v;
 
-    // ⛔ A live flag is not a live unit, and this is a CALL into the game.
+    // â›” A live flag is not a live unit, and this is a CALL into the game.
     // tile_vfn only proves the vtable entry points into the image, which a
     // RECYCLED object's does perfectly well -- so without this the mod can
     // call a real function of the wrong class on a wrong `this`. The
@@ -2197,6 +2211,30 @@ static void unit_flag_drew(void* flag, const char* fn, const Payload* p)
                 history_extend(label, say);
             }
         }
+        return;
+    }
+    // The action pips: RealizeMoves sends SetMoves(n), n being
+    // GetRemainingActions for a friendly unit with moves left and 0 otherwise.
+    if (strcmp(fn, "RealizeMoves") == 0) {
+        UnitName* u = unit_entry(flag);
+        if (u && p->nnumbers > 0) u->moves = (int)p->numbers[p->nnumbers - 1];
+        return;
+    }
+    // The selection marker: UIUnitFlag.Update runs SetSelected(true) and
+    // ShowExtension on the new active unit's flag. It reaches Flash once per
+    // change of selection, after the flags exist -- which the panel's
+    // SetStats does not wait for at a mission's start -- so it is what
+    // announces a switch (soldier_poll).
+    if (strcmp(fn, "ShowExtension") == 0) {
+        soldier_selected(flag);
+        return;
+    }
+    // The bonus and penalty markers: whether there are any, not which.
+    if (strcmp(fn, "ShowBuff") == 0 || strcmp(fn, "ShowDebuff") == 0) {
+        UnitName* u = unit_entry(flag);
+        if (!u || !p->nbools) return;
+        if (fn[4] == 'B') u->buff = p->bools[0] != 0;
+        else u->debuff = p->bools[0] != 0;
         return;
     }
     if (strcmp(fn, "RealizeCover") == 0) {
@@ -2555,7 +2593,7 @@ static void* unit_pawn(void* unit)
 // XGPlayer.TestUnitCoverExposure instead, which is the AI's cover scorer, and
 // it never once said flanked over a mission's worth of tiles.
 //
-// ⛔ The range gate is the game's and is not optional. IsLocationFlanked
+// â›” The range gate is the game's and is not optional. IsLocationFlanked
 // skips an enemy for which
 //
 //     Enemy.IsPointWithinFiringRange(.., Enemy, CoverPoint.CoverLocation,
@@ -2605,7 +2643,7 @@ static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
     for (int i = 0; i < sight.n; i++) {
         void* unit = sight.unit[i];
 
-        // ⛔ Nothing had ever DEREFERENCED these before. squad_sight builds
+        // â›” Nothing had ever DEREFERENCED these before. squad_sight builds
         // the set out of each soldier's m_arrVisibleEnemies and the radar
         // only ever compared the pointers, so a dead unit in it cost nothing;
         // handing one to the game's own natives cost a crash. The 2026-09-21
@@ -3740,6 +3778,121 @@ static void* soldier_unit(void)
     return unit && unit_is_live(unit) ? unit : NULL;
 }
 
+// ---- the selected soldier (soldier.h) ---------------------------------------
+//
+// The panel (SetStats) says who the soldier is; the flag (ShowExtension) says
+// when they became the selection. SetStats cannot be the trigger: at a
+// mission's start it is sent while the HUD is still being built, before any
+// flag exists, and a switch announced from it came out as a bare name while
+// the mission was still loading (2026-09-22). ShowExtension reaches Flash
+// once per change of selection, from the new soldier's own flag, after the
+// panel has been redrawn -- six switches, six calls, in that log. The panel
+// is matched to the flag by surname, so nothing depends on when the cursor's
+// ChainedPawn catches up.
+#define SOLDIER_SETTLE_MS 100
+static SoldierState g_panel;            // the panel as last drawn
+static void*        g_selected_flag;    // the flag ShowExtension last marked
+static void*        g_soldier_said;     // the flag last announced
+static ULONGLONG    g_soldier_due;      // when to announce, 0 for never
+
+// Case-insensitive: does `hay` contain `needle`? "URSULA WRIGHT" / "Wright".
+static int contains_ci(const char* hay, const char* needle)
+{
+    size_t n = strlen(needle);
+    if (!n) return 0;
+    for (; *hay; hay++)
+        if (_strnicmp(hay, needle, n) == 0) return 1;
+    return 0;
+}
+
+static void soldier_stats_note(LONG n, const Payload* p)
+{
+    SoldierState s;
+    soldier_clear(&s);
+    const char* strs[8];
+    int ns = 0;
+    for (int i = 0; i < p->nstrings && ns < 8; i++) strs[ns++] = p->strings[i];
+    soldier_from_stats(&s, strs, ns);
+    if (p->nabools > 0) s.leader = p->abools[0];
+    if (p->nabools > 1) s.promotion = p->abools[1];
+    if (p->nnumbers > 0) s.aim = (int)p->numbers[p->nnumbers - 1];
+    // The surname-only redraw while the ability menu is up: the same soldier,
+    // and the full name is kept.
+    if (s.name[0] && contains_ci(g_panel.name, s.name) && strlen(s.name) < strlen(g_panel.name))
+        memcpy(s.name, g_panel.name, sizeof s.name);
+    g_panel = s;
+    logf_("[%ld] soldier: panel \"%s\" %s %s %s, leader %d, promotion %d, aim %d\n", n,
+          s.name, s.nick, s.rank, s.cls, s.leader, s.promotion, s.aim);
+}
+
+static void soldier_selected(void* flag)
+{
+    g_selected_flag = flag;
+    g_soldier_due = GetTickCount64() + SOLDIER_SETTLE_MS;
+}
+
+static UnitName* unit_of_flag(void* flag)
+{
+    for (int i = 0; i < g_nunits; i++)
+        if (flag && g_units[i].flag == flag) return &g_units[i];
+    return NULL;
+}
+
+// The soldier behind flag entry `u`: the panel if it is theirs, their flag's
+// name otherwise, and the flag's hit points, actions and markers.
+static int soldier_state(const UnitName* u, SoldierState* s)
+{
+    if (!u || !u->name[0]) return 0;
+    if (g_panel.name[0] && contains_ci(g_panel.name, u->name)) {
+        *s = g_panel;
+    } else {
+        soldier_clear(s);
+        strncpy_s(s->name, sizeof s->name, u->name, _TRUNCATE);
+        if (u->nick[0]) _snprintf_s(s->nick, sizeof s->nick, _TRUNCATE, "'%s'", u->nick);
+    }
+    s->hp = u->hp;
+    s->hp_max = u->hp_max;
+    s->actions = u->moves;
+    s->buff = u->buff;
+    s->debuff = u->debuff;
+    return 1;
+}
+
+// Every frame: a switch, once the flag has marked it.
+static void soldier_poll(void)
+{
+    if (!g_soldier_due || GetTickCount64() < g_soldier_due) return;
+    g_soldier_due = 0;
+    if (g_selected_flag == g_soldier_said) return;
+    SoldierState s;
+    if (!soldier_state(unit_of_flag(g_selected_flag), &s)) return;
+    g_soldier_said = g_selected_flag;
+    char say[SOLDIER_TEXT];
+    soldier_brief(&s, say, sizeof say);
+    logf_("soldier: selected -> \"%s\"\n", say);
+    if (say[0] && g_speak && !muted()) {
+        speech_cancel_pending();
+        speech_say_now(say);
+    }
+}
+
+// Delete: everything the HUD shows about the selected soldier.
+static void soldier_readout(void)
+{
+    SoldierState s;
+    char say[SOLDIER_TEXT];
+    UnitName* u = unit_of_flag(g_selected_flag);
+    if (!u) u = unit_by_unit(soldier_unit());
+    if (!soldier_state(u, &s)) {
+        speech_say_now("No soldier selected.");
+        return;
+    }
+    soldier_full(&s, say, sizeof say);
+    logf_("soldier: Delete -> \"%s\"\n", say);
+    speech_cancel_pending();
+    speech_say_now(say);
+}
+
 // Whether the soldier is aiming: their current action is the targeting one
 // (XGAction_Targeting in EW; EU aims inside XGAction_Fire, as shot_target_now
 // notes). Told by the action object's name, since its class is what differs.
@@ -4062,7 +4215,7 @@ static void scan_add_world(void)
 // XComPathingPawn.SetDirectedTargetPoint, which is what fills vTargetPoint.
 // SeqAct_UnrestrictMovementCursor clears it again.
 //
-// ⛔ bUseTargetPoint is not read, although it exists. It is a bool among ten
+// â›” bUseTargetPoint is not read, although it exists. It is a bool among ten
 // on that pawn and this build found no UBoolProperty::BitMask ("props: no
 // BitMask"), so it would read as whatever its neighbours are. The game does
 // not trust it alone either: XComDirectedTacticalExperience.InvalidMovement
@@ -4919,6 +5072,20 @@ static void nav_poll(void)
     }
     g_walls_down = walls;
 
+    // Delete: the selected soldier (soldier.h). Its only binding, Camera
+    // Default, is removed with -Bindings in [Engine.PlayerInput], so like
+    // Insert it never reaches the game.
+    static int soldier_key_down;
+    int soldier_key = (GetAsyncKeyState(VK_DELETE) & 0x8000) != 0;
+    if (soldier_key && !soldier_key_down) {
+        Fault f;
+        __try { soldier_readout(); }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("soldier: readout", &f, NULL);
+        }
+    }
+    soldier_key_down = soldier_key;
+
     // The scanner: Page Up, Page Down, Home, End. Read here rather than in a
     // poll of its own so it shares the guards this one already applies --
     // practice has taken the keys, the game has the foreground.
@@ -4937,6 +5104,13 @@ static void cursor_watch(void* self)
     // a few frames, and a quarter-second poll would drop quick ones.
     if (cursor_resolved()) nav_poll();
     combat_poll();
+    {
+        Fault f;
+        __try { soldier_poll(); }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("soldier: poll", &f, NULL);
+        }
+    }
 
     ULONGLONG now = GetTickCount64();
     if (now - g_cursor_at < CURSOR_WATCH_MS) return;
