@@ -51,6 +51,11 @@ void info_soldier(const char* name, const char* nick, const char* cls,
 void info_alien(const char* name);
 void info_stats(const char* const* stats, int n);
 
+// The soldier's weapons and their ammo, as the HUD's weapon panels show them:
+// "LMG, 1 shot left. Rocket Launcher, full." The screen itself does not draw
+// them, but the HUD under it does, all the time, so it is said with the stats.
+void info_weapons(const char* text);
+
 // A perk list: `list` is which of the three panels, as the caller tells them
 // apart (by object). Lists with nothing in them are left out of everything.
 void info_list_title(int list, const char* title);

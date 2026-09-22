@@ -950,6 +950,94 @@ int main(void)
         info_reset();
     }
 
+    // The weapon panels, as SetWeaponAndAmmo sends them (2026-09-22: an LMG
+    // at 34, one shot left of three, and a rocket launcher at 100).
+    printf("\nweapons\n");
+    {
+        char say[SOLDIER_TEXT], words[64], one[SOLDIER_WEAPON_TEXT], all[SOLDIER_WEAPON_TEXT];
+        SoldierWeapon w[2];
+        memset(w, 0, sizeof w);
+        soldier_weapon_words("_RocketLauncher", words, sizeof words);
+        check(strcmp(words, "Rocket Launcher") == 0, "a type split into words");
+        soldier_weapon_words("_LMG", words, sizeof words);
+        check(strcmp(words, "LMG") == 0, "capitals kept together");
+        check(soldier_weapon_is("Rocket Launcher", "_RocketLauncher") &&
+              soldier_weapon_is("LMG", "_LMG") && !soldier_weapon_is("LMG", "_RocketLauncher"),
+              "the equipped weapon's name matches its panel");
+
+        // The name the HUD shows is not always the type spelt out
+        // (2026-09-22: Aya Imad's "Laser Rifle" was _LaserAssaultRifle, and
+        // said nothing).
+        check(soldier_weapon_like("Laser Rifle", "_LaserAssaultRifle") &&
+              soldier_weapon_like("Light Plasma Rifle", "_PlasmaLightRifle") &&
+              !soldier_weapon_like("Laser Rifle", "_Pistol"),
+              "a name whose words are all in the type matches it");
+        {
+            SoldierWeapon a[2];
+            memset(a, 0, sizeof a);
+            a[0].set = 1; strcpy_s(a[0].type, sizeof a[0].type, "_LaserAssaultRifle"); a[0].value = 50;
+            a[1].set = 1; strcpy_s(a[1].type, sizeof a[1].type, "_Pistol"); a[1].value = 100;
+            soldier_weapons("Laser Rifle", a, 2, one, sizeof one, all, sizeof all);
+            check(strcmp(one, "Laser Rifle, 50% ammo.") == 0, "Aya's laser rifle is found");
+            soldier_weapons("Pistol", a, 2, one, sizeof one, all, sizeof all);
+            check(strcmp(all, "Pistol, full. Laser Assault Rifle, 50% ammo.") == 0,
+                  "the pistol drawn, the rifle second");
+            soldier_weapons("Something Else", a, 2, one, sizeof one, all, sizeof all);
+            check(strcmp(one, "Something Else, 50% ammo.") == 0,
+                  "no match at all: the primary weapon");
+        }
+
+        w[0].set = 1; strcpy_s(w[0].type, sizeof w[0].type, "_LMG"); w[0].value = 34;
+        w[1].set = 1; strcpy_s(w[1].type, sizeof w[1].type, "_RocketLauncher"); w[1].value = 100;
+        soldier_weapons("LMG", w, 2, one, sizeof one, all, sizeof all);
+        check(strcmp(one, "LMG, 34% ammo.") == 0, "no cost known yet: the percentage");
+        check(strcmp(all, "LMG, 34% ammo. Rocket Launcher, full.") == 0,
+              "both, the equipped one first");
+        w[0].cost = 33; w[1].cost = 100;
+        soldier_weapons("LMG", w, 2, one, sizeof one, all, sizeof all);
+        check(strcmp(all, "LMG, 1 shot left. Rocket Launcher, 1 shot left.") == 0,
+              "with the cost, in shots");
+        w[0].value = 100;
+        soldier_weapon_text("LMG", &w[0], one, sizeof one);
+        check(strcmp(one, "LMG, 3 shots left.") == 0, "a full LMG is three shots");
+        soldier_weapons("Rocket Launcher", w, 2, one, sizeof one, all, sizeof all);
+        check(strncmp(all, "Rocket Launcher, 1 shot left. LMG,", 34) == 0,
+              "the equipped weapon leads, whichever it is");
+        w[0].value = 0; w[0].reload = 1;
+        soldier_weapon_text("LMG", &w[0], one, sizeof one);
+        check(strcmp(one, "LMG, empty, reload needed.") == 0, "empty, and the reload flag");
+        w[0].value = 12; w[0].overheat = 1; w[0].reload = 0;
+        soldier_weapon_text("Laser", &w[0], one, sizeof one);
+        check(strcmp(one, "Laser, 12% overheat chance.") == 0, "a weapon that overheats");
+
+        SoldierState s;
+        const char* hudson[] = { "KELLY HUDSON", "rank2", "heavy" };
+        soldier_clear(&s);
+        soldier_from_stats(&s, hudson, 3);
+        s.hp = 10; s.hp_max = 10; s.actions = 2;
+        strcpy_s(s.weapon, sizeof s.weapon, "LMG, 1 shot left.");
+        strcpy_s(s.weapons, sizeof s.weapons, "LMG, 1 shot left. Rocket Launcher, full.");
+        soldier_brief(&s, say, sizeof say);
+        check(strcmp(say, "Kelly Hudson. 10 of 10 HP. 2 actions. LMG, 1 shot left.") == 0,
+              "a switch says the equipped weapon");
+        soldier_full(&s, say, sizeof say);
+        check(strstr(say, "2 actions. LMG, 1 shot left. Rocket Launcher, full.") != NULL,
+              "Delete says both");
+
+        info_reset();
+        const char* stats[] = { "Health: 10", "Will: 53", "Offense: 68", "Defense: 20" };
+        info_soldier("Kelly Hudson", "", "heavy", "rank2", 0);
+        info_stats(stats, 4);
+        info_weapons("LMG, 1 shot left. Rocket Launcher, full.");
+        info_summary(say, sizeof say);
+        check(strcmp(say, "Target information. Kelly Hudson. Corporal, heavy. Health: 10. "
+                          "Will: 53. Offense: 68. Defense: 20. LMG, 1 shot left. "
+                          "Rocket Launcher, full.") == 0,
+              "F1 says the weapons after the stats");
+        check(info_line_count() == 3, "and walks them as a line of their own");
+        info_reset();
+    }
+
     // The announcement list behind Insert.
     printf("\nannouncement list\n");
     {

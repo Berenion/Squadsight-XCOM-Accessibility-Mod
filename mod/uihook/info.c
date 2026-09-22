@@ -25,6 +25,7 @@ static struct {
     char who[256];              // the header, already worded
     char stats[4][48];
     int  nstats;
+    char weapons[256];
     InfoList lists[INFO_LISTS];
     char shot[64], hit[16], hit_label[48], crit[16], crit_label[48];
     InfoMod mods[2][INFO_MODS]; // [0] hit, [1] crit
@@ -111,6 +112,11 @@ void info_stats(const char* const* stats, int n)
     g.nstats = 0;
     for (int i = 0; i < n && g.nstats < 4; i++)
         if (stats[i] && *stats[i]) copy(g.stats[g.nstats++], sizeof g.stats[0], stats[i]);
+}
+
+void info_weapons(const char* text)
+{
+    copy(g.weapons, sizeof g.weapons, text);
 }
 
 void info_list_title(int list, const char* title)
@@ -214,6 +220,7 @@ void info_summary(char* out, size_t out_sz)
     add(out, out_sz, " ", g.who);
     stats_line(piece, sizeof piece);
     add(out, out_sz, " ", piece);
+    add(out, out_sz, " ", g.weapons);
     if (has_shot()) {
         hit_line(piece, sizeof piece);
         add(out, out_sz, " ", piece);
@@ -244,6 +251,7 @@ static int lines(int want, char* out, size_t out_sz)
     if (g.who[0]) LINE(g.who);
     stats_line(piece, sizeof piece);
     if (piece[0]) LINE(piece);
+    if (g.weapons[0]) LINE(g.weapons);
     if (has_shot()) {
         hit_line(piece, sizeof piece);
         if (piece[0]) LINE(piece);

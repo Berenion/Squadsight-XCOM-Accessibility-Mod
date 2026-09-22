@@ -15,7 +15,24 @@
 // bonus and a penalty marker (ShowBuff / ShowDebuff, on or off; the flag says
 // that there are some, not which).
 
-#define SOLDIER_TEXT 384
+#define SOLDIER_TEXT 640
+#define SOLDIER_WEAPON_TEXT 256
+
+// One of the HUD's two weapon panels, as UITacticalHUD_WeaponPanel.
+// SetWeaponAndAmmo sends it: the weapon's type ("_LMG", its EItemType less
+// "eItem"), then either its ammo (a percentage: 100 is full, each shot takes
+// its cost off, and 1 left is rounded to 0) or, for a weapon that overheats,
+// its overheat chance; the ammo the selected ability would spend from it, 0
+// when the ability uses another weapon; whether it overheats; and whether it
+// is empty and can be reloaded.
+typedef struct {
+    int  set;           // a weapon is in this panel
+    char type[48];      // "_LMG"
+    int  value;         // ammo percent, or overheat chance
+    int  cost;          // ammo percent one shot costs, 0 unknown
+    int  overheat;      // `value` is an overheat chance
+    int  reload;        // empty, and a reload would refill it
+} SoldierWeapon;
 
 typedef struct {
     char name[64];      // "URSULA WRIGHT", as the panel sends it
@@ -28,6 +45,8 @@ typedef struct {
     int  hp, hp_max;    // from the flag; -1 unknown
     int  actions;       // from the flag; -1 unknown
     int  buff, debuff;  // from the flag: 1, 0, -1 unknown
+    char weapon[SOLDIER_WEAPON_TEXT];   // the equipped weapon: "LMG, 1 shot left."
+    char weapons[SOLDIER_WEAPON_TEXT];  // it, then the other: "... Rocket Launcher, full."
 } SoldierState;
 
 // Clears to "all unknown".
@@ -47,6 +66,27 @@ void soldier_full(const SoldierState* s, char* out, size_t out_sz);
 
 // "URSULA O'REILLY" -> "Ursula O'Reilly": capitals would be spelt out.
 void soldier_title_case(const char* in, char* out, size_t out_sz);
+
+// "_RocketLauncher" -> "Rocket Launcher", "_LMG" -> "LMG".
+void soldier_weapon_words(const char* type, char* out, size_t out_sz);
+
+// Whether the equipped weapon's name, as the HUD shows it ("Rocket
+// Launcher"), is the weapon of this type ("_RocketLauncher"): the same
+// letters, ignoring case, spaces and punctuation.
+int soldier_weapon_is(const char* name, const char* type);
+
+// Looser: every word of the name appears in the type, in any order.
+int soldier_weapon_like(const char* name, const char* type);
+
+// "LMG, 1 shot left." / "full." / "34% ammo." / "empty, reload needed." /
+// "12% overheat chance." -- `name` is what to call it.
+void soldier_weapon_text(const char* name, const SoldierWeapon* w,
+                         char* out, size_t out_sz);
+
+// Both panels in words: the equipped weapon into `active` (named as the HUD
+// names it, `active_name`), and every weapon, equipped first, into `all`.
+void soldier_weapons(const char* active_name, const SoldierWeapon* w, int n,
+                     char* active, size_t active_sz, char* all, size_t all_sz);
 
 // "rank3" -> "Sergeant", "shiv2" -> "SHIV", anything else "".
 const char* soldier_rank_word(const char* rank);

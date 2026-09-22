@@ -659,6 +659,7 @@ static void unit_flag_drew(void* flag, const char* fn, const Payload* p);
 static void combat_message(LONG n, void* stack, const Payload* p);
 static void announce(const char* text);
 static void soldier_stats_note(LONG n, const Payload* p);
+static int weapon_note(LONG n, const char* obj, const char* fn, const Payload* p);
 static void soldier_selected(void* flag);
 static void shot_target_now(void* stack);
 
@@ -839,6 +840,9 @@ static void capture_body(const char* tag, LONG n, void* stack)
         soldier_stats_note(n, p);
         return;
     }
+    // The weapon panels: the equipped weapon and the ammo each has. Kept for
+    // the soldier's readouts, not said as they pass (weapon_note).
+    if (weapon_note(n, obj_name, fn_name, p)) return;
     // Whose turn it is. See combat_turn in combat.h.
     if (strncmp(obj_name, "UITurnOverlay", 13) == 0) {
         const char* strs[8];
@@ -3977,6 +3981,187 @@ static UnitName* unit_of_flag(void* flag)
 
 // The soldier behind flag entry `u`: the panel if it is theirs, their flag's
 // name otherwise, and the flag's hit points, actions and markers.
+// ---- the weapon panels (soldier.h) -----------------------------------------
+//
+// UITacticalHUD_WeaponContainer.SetWeapons draws the active soldier's two
+// weapons, each in a UITacticalHUD_WeaponPanel through SetWeaponAndAmmo, and
+// names the equipped one with AS_SetWeaponName. It runs on every HUD update
+// (UITacticalHUD.Update -> m_kWeaponContainer.Update(true)), so what is kept
+// here is the soldier now selected. The panel's ASValue array carries the
+// numbers: the type string, the ammo or overheat chance, the ability's cost,
+// then the overheat and reload flags.
+//
+// A shot's cost is only sent while an ability that uses the weapon is
+// selected, and GetAmmoCost is native, so each type's cost is learnt as it
+// passes and kept for the mission: the smallest seen, since Rapid Fire sends
+// double.
+#define WEAPON_COSTS 32
+static SoldierWeapon g_weapon[2];
+static char          g_weapon_name[64];
+static struct { char type[48]; int cost; } g_weapon_cost[WEAPON_COSTS];
+static int           g_weapon_ncost;
+
+static int weapon_cost(const char* type)
+{
+    for (int i = 0; i < g_weapon_ncost; i++)
+        if (strcmp(g_weapon_cost[i].type, type) == 0) return g_weapon_cost[i].cost;
+    return 0;
+}
+
+// The costs are kept between sessions, in xcom_uihook_ammo.ini beside the log
+// (one "type=cost" per line), so a weapon aimed once is counted in shots from
+// the start of every mission after. One file per build, since the log is.
+static char g_weapon_cost_path[MAX_PATH];
+
+static void weapon_costs_save(void)
+{
+    if (!g_weapon_cost_path[0]) return;
+    FILE* f = NULL;
+    if (fopen_s(&f, g_weapon_cost_path, "w") != 0 || !f) {
+        logf_("weapon: could not write %s\n", g_weapon_cost_path);
+        return;
+    }
+    for (int i = 0; i < g_weapon_ncost; i++)
+        fprintf(f, "%s=%d\n", g_weapon_cost[i].type, g_weapon_cost[i].cost);
+    fclose(f);
+}
+
+// Returns 1 when the table changed.
+static int weapon_set_cost(const char* type, int cost)
+{
+    if (!type[0] || cost <= 0) return 0;
+    for (int i = 0; i < g_weapon_ncost; i++)
+        if (strcmp(g_weapon_cost[i].type, type) == 0) {
+            if (cost >= g_weapon_cost[i].cost) return 0;
+            g_weapon_cost[i].cost = cost;
+            return 1;
+        }
+    if (g_weapon_ncost >= WEAPON_COSTS) return 0;
+    strncpy_s(g_weapon_cost[g_weapon_ncost].type, sizeof g_weapon_cost[0].type, type, _TRUNCATE);
+    g_weapon_cost[g_weapon_ncost++].cost = cost;
+    return 1;
+}
+
+static void weapon_learn_cost(const char* type, int cost)
+{
+    if (weapon_set_cost(type, cost)) weapon_costs_save();
+}
+
+// At startup: the costs already seen in EW's logs (2026-09-22, an LMG's three
+// shots and a laser rifle's four), then whatever the file has learnt since.
+// The two are EW's only; EU learns its own.
+static void weapon_costs_load(const char* dir, int is_ew)
+{
+    if (is_ew) {
+        weapon_set_cost("_LMG", 33);
+        weapon_set_cost("_LaserAssaultRifle", 25);
+    }
+    _snprintf_s(g_weapon_cost_path, sizeof g_weapon_cost_path, _TRUNCATE,
+                "%sxcom_uihook_ammo.ini", dir);
+    FILE* f = NULL;
+    int read = 0;
+    if (fopen_s(&f, g_weapon_cost_path, "r") == 0 && f) {
+        char line[128];
+        while (fgets(line, sizeof line, f)) {
+            char* eq = strchr(line, '=');
+            if (!eq) continue;
+            *eq = 0;
+            int cost = atoi(eq + 1);
+            if (line[0] && cost > 0 && cost <= 100) { weapon_set_cost(line, cost); read++; }
+        }
+        fclose(f);
+    }
+    logf_("weapon: %d shot cost%s known at startup (%d from %s)\n", g_weapon_ncost,
+          g_weapon_ncost == 1 ? "" : "s", read, g_weapon_cost_path);
+}
+
+// X switches weapons (X_Key_Press -> CycleWeapons, and the container is
+// redrawn). A change of the equipped weapon this soon after X is that switch
+// and is said; one without it is a soldier switch, which says the weapon
+// itself.
+//
+// Not the clock alone: X on a soldier who cannot switch (a heavy's rocket
+// launcher is not drawn) followed by Tab to a sniper with a pistol out read
+// as a switch, and the pistol was said twice (2026-09-22). So X also notes
+// who is active and which two weapons they carry, and a change counts only
+// for the same soldier with the same two.
+#define WEAPON_SWITCH_MS 1500
+static ULONGLONG g_weapon_x_at;
+static int       g_weapon_x_down;
+static void*     g_weapon_x_unit;
+static char      g_weapon_x_types[2][48];
+
+static void weapon_x_pressed(void)
+{
+    g_weapon_x_at = GetTickCount64();
+    g_weapon_x_unit = soldier_unit();
+    for (int i = 0; i < 2; i++)
+        strncpy_s(g_weapon_x_types[i], sizeof g_weapon_x_types[i], g_weapon[i].type, _TRUNCATE);
+}
+
+static int weapon_x_same_soldier(void)
+{
+    for (int i = 0; i < 2; i++)
+        if (strcmp(g_weapon_x_types[i], g_weapon[i].type) != 0) return 0;
+    void* now = soldier_unit();
+    return !g_weapon_x_unit || !now || now == g_weapon_x_unit;
+}
+
+static void weapon_words(char* active, size_t active_sz, char* all, size_t all_sz);
+
+static int weapon_note(LONG n, const char* obj, const char* fn, const Payload* p)
+{
+    if (strncmp(obj, "UITacticalHUD_WeaponContainer", 29) == 0 && strstr(fn, "SetWeaponName")) {
+        const char* name = p->nstrings ? p->strings[0] : "";
+        if (strcmp(name, g_weapon_name) == 0) return 1;
+        strncpy_s(g_weapon_name, sizeof g_weapon_name, name, _TRUNCATE);
+        int after_x = g_weapon_x_at && GetTickCount64() - g_weapon_x_at < WEAPON_SWITCH_MS;
+        int switched = after_x && weapon_x_same_soldier();
+        logf_("[%ld] weapon: equipped \"%s\"%s\n", n, g_weapon_name,
+              switched ? " -- after X" : after_x ? " -- after X, but another soldier" : "");
+        if (switched) {
+            g_weapon_x_at = 0;
+            char one[SOLDIER_WEAPON_TEXT], all[SOLDIER_WEAPON_TEXT];
+            weapon_words(one, sizeof one, all, sizeof all);
+            logf_("weapon: switched -> \"%s\"\n", one);
+            if (one[0] && g_speak) {
+                speech_cancel_pending();
+                speech_say_now(one);
+            }
+        }
+        return 1;
+    }
+    if (strncmp(obj, "UITacticalHUD_WeaponPanel_", 26) != 0 ||
+        strcmp(fn, "SetWeaponAndAmmo") != 0)
+        return 0;
+    SoldierWeapon* w = &g_weapon[atoi(obj + 26) % 2];
+    SoldierWeapon was = *w;
+    memset(w, 0, sizeof *w);
+    if (p->nstrings) strncpy_s(w->type, sizeof w->type, p->strings[0], _TRUNCATE);
+    w->set = w->type[0] != 0;
+    w->value = p->nnumbers > 0 ? (int)(p->numbers[0] + 0.5f) : 0;
+    int cost = p->nnumbers > 1 ? (int)(p->numbers[1] + 0.5f) : 0;
+    w->overheat = p->nabools > 0 ? p->abools[0] : 0;
+    w->reload = p->nabools > 1 ? p->abools[1] : 0;
+    int known = weapon_cost(w->type);
+    if (!w->overheat) weapon_learn_cost(w->type, cost);
+    // Every HUD update redraws both panels; only a change is worth a line.
+    if (memcmp(&was, w, sizeof was) != 0 || weapon_cost(w->type) != known)
+        logf_("[%ld] weapon: %s %s %s %d, cost %d (%d known)%s\n", n, obj,
+              w->set ? w->type : "(none)", w->overheat ? "overheat" : "ammo", w->value,
+              cost, weapon_cost(w->type), w->reload ? ", reload needed" : "");
+    return 1;
+}
+
+// The two panels in words, with each type's cost as learnt.
+static void weapon_words(char* active, size_t active_sz, char* all, size_t all_sz)
+{
+    SoldierWeapon w[2];
+    memcpy(w, g_weapon, sizeof w);
+    for (int i = 0; i < 2; i++) w[i].cost = weapon_cost(w[i].type);
+    soldier_weapons(g_weapon_name, w, 2, active, active_sz, all, all_sz);
+}
+
 static int soldier_state(const UnitName* u, SoldierState* s)
 {
     if (!u || !u->name[0]) return 0;
@@ -3992,6 +4177,9 @@ static int soldier_state(const UnitName* u, SoldierState* s)
     s->actions = u->moves;
     s->buff = u->buff;
     s->debuff = u->debuff;
+    // The panels are the active soldier's, redrawn before the flag marks a
+    // switch (2026-09-22: SetWeaponAndAmmo at 712, ShowExtension at 743).
+    weapon_words(s->weapon, sizeof s->weapon, s->weapons, sizeof s->weapons);
     return 1;
 }
 
@@ -4104,7 +4292,17 @@ static void info_note(LONG n, void* object, const char* obj_name, const char* fn
     if (is_screen) g_info_screen = object;
 
     switch (call) {
-    case INFO_SOLDIER:  info_soldier(s[0], s[1], s[2], s[3], a.nb ? a.b[0] : -1); break;
+    case INFO_SOLDIER: {
+        info_soldier(s[0], s[1], s[2], s[3], a.nb ? a.b[0] : -1);
+        // Only for the active soldier: the HUD's panels are theirs. F1 opens
+        // on the active soldier unless aiming, and then on the target.
+        if (!soldier_aiming()) {
+            char one[SOLDIER_WEAPON_TEXT], all[SOLDIER_WEAPON_TEXT];
+            weapon_words(one, sizeof one, all, sizeof all);
+            info_weapons(all);
+        }
+        break;
+    }
     case INFO_ALIEN:    info_alien(s[0]); break;
     case INFO_STATS:    info_stats(s, a.ns < 4 ? a.ns : 4); break;
     case INFO_TITLE:    info_list_title(info_list_slot(object, obj_name), s[0]); break;
@@ -5608,6 +5806,12 @@ static void nav_poll(void)
         if (down && !g_floor_down[k]) nav_floor(k == 0 ? 1 : -1);
         g_floor_down[k] = down;
     }
+    // X: the game's weapon switch. Only noted; the change it makes is said
+    // when the HUD redraws the equipped weapon (weapon_note).
+    int x = (GetAsyncKeyState('X') & 0x8000) != 0;
+    if (x && !g_weapon_x_down) weapon_x_pressed();
+    g_weapon_x_down = x;
+
     if (g_floor_check_at && GetTickCount64() >= g_floor_check_at) {
         g_floor_check_at = 0;
         Fault f;
@@ -6798,6 +7002,16 @@ static DWORD WINAPI init(LPVOID param)
 
     HMODULE mod = GetModuleHandleA(NULL);
     logf_("xcom_uihook: module base %p\n", (void*)mod);
+    {
+        // `path` is the log's; its directory is the game's own.
+        char dir[MAX_PATH], exe[MAX_PATH];
+        strcpy_s(dir, sizeof dir, path);
+        char* s = strrchr(dir, '\\');
+        if (s) *(s + 1) = 0;
+        GetModuleFileNameA(NULL, exe, MAX_PATH);
+        char* base = strrchr(exe, '\\');
+        weapon_costs_load(dir, _stricmp(base ? base + 1 : exe, "XComEW.exe") == 0);
+    }
 
     char why[256];
     if (names_init(mod, why, sizeof why))
