@@ -87,6 +87,14 @@ typedef enum {
 #define NAVH_LIFT 64.0f
 #define NAVH_SETTLE_MS 300
 
+// A floor the search finds further below the ground than this is only a
+// fallback. The game's search misses a floor asked about from inside its own
+// grid layer and answers with the next one down: on a roof at 466.2 the first
+// start, 32 above, came back 212.6, the floor below (2026-09-22). So the
+// search goes on, and the far find is taken only if nothing nearer turns up
+// -- which is what a step off a roof needs.
+#define NAVH_FAR_BELOW 64.0f
+
 // Sets the ground estimate outright -- at the start of navigation.
 void navh_set_ground(float ground);
 

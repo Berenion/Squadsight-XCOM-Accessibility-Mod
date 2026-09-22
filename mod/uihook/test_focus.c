@@ -758,6 +758,25 @@ int main(void)
         check(say[0] == 0, "nobody selected says nothing");
     }
 
+    // Someone in the column of the tile stepped onto, on another floor
+    // (2026-09-22: Godongwana on the roof at 466.2, feet 469.4, named on the
+    // floor below at 212.6 as though standing there).
+    printf("\nunits on another floor\n");
+    {
+        char say[128];
+        check(scan_storey_diff(469.4f, 466.2f) == 0, "a soldier on the roof is on the roof");
+        check(scan_storey_diff(469.4f, 212.6f) == 1, "and one floor up from the floor below");
+        check(scan_storey_diff(212.6f, 469.4f) == -1, "the floor below is one floor down");
+        check(scan_storey_diff(0.0f, 600.0f) == -3, "three storeys");
+        check(scan_storey_diff(80.0f, 0.0f) == 0, "a crate top is the same floor");
+        scan_unit_floor_text("Godongwana", 1, say, sizeof say);
+        check(strcmp(say, "Godongwana, one floor up.") == 0, "said with the difference");
+        scan_unit_floor_text("Wright, Disco", 0, say, sizeof say);
+        check(strcmp(say, "Wright, Disco.") == 0, "on the same floor, the name alone");
+        scan_unit_floor_text("Muton", -2, say, sizeof say);
+        check(strcmp(say, "Muton, two floors down.") == 0, "below");
+    }
+
     // The unit information screen behind F1, from its calls by position.
     printf("\nunit information\n");
     {
@@ -1280,6 +1299,40 @@ int main(void)
         check(navh_path_result(0.0f + NAVH_LIFT, 1, 7100) == NAVH_REACHABLE &&
               navh_poll(8000) == NAVH_WAIT,
               "a success before the settle time cancels the failure");
+
+        // A roof over a lower floor: the first start, just above the roof,
+        // comes back with the floor below, as the game's search does from
+        // inside the roof's layer. That is kept back, and the roof is taken
+        // when a start further up finds it (2026-09-22, 41, 15).
+        navh_set_ground(466.2f);
+        navh_begin_tile();
+        z = navh_query_z();
+        navh_floor_result(z, 212.6f);
+        check(navh_phase() == NAVH_SEARCH, "a floor far below does not settle at once");
+        for (int i = 0; i < 64 && navh_phase() == NAVH_SEARCH; i++) {
+            z = navh_query_z();
+            navh_floor_result(z, z > 500.0f ? 466.2f : 212.6f);
+        }
+        check(navh_phase() == NAVH_SETTLED && navh_ground() == 466.2f,
+              "the roof is found from further up");
+
+        // Off the edge of a roof: nothing near is found, so the floor below is.
+        navh_set_ground(466.2f);
+        navh_begin_tile();
+        for (int i = 0; i < 64 && navh_phase() == NAVH_SEARCH; i++) {
+            z = navh_query_z();
+            navh_floor_result(z, z > 250.0f ? 212.6f : z);
+        }
+        check(navh_phase() == NAVH_SETTLED && navh_ground() == 212.6f,
+              "a step off a roof still lands on the floor below");
+
+        // A small step down is near, and settles on the first find as before.
+        navh_set_ground(0.0f);
+        navh_begin_tile();
+        z = navh_query_z();
+        navh_floor_result(z, -40.0f);
+        check(navh_phase() == NAVH_SETTLED && navh_ground() == -40.0f,
+              "a floor a little below still settles at once");
 
         // While still searching, a failure at an unsettled height is not a verdict.
         navh_set_ground(0.0f);

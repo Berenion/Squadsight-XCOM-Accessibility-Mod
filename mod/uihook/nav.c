@@ -66,6 +66,8 @@ static float g_ground;
 static float g_settled;
 static int   g_search, g_probe;
 static int   g_decided;
+static int   g_have_far;        // a floor found far below the ground (NAVH_FAR_BELOW)
+static float g_far;             // the highest such floor
 static unsigned long long g_failed_at;
 
 static int near_z(float a, float b) { return a - b < 1.0f && b - a < 1.0f; }
@@ -79,6 +81,7 @@ void navh_begin_tile(void)
     g_probe = 0;
     g_decided = 0;
     g_failed_at = 0;
+    g_have_far = 0;
 }
 
 float navh_query_z(void)
@@ -103,10 +106,19 @@ void navh_floor_result(float asked, float got)
 {
     if (g_phase == NAVH_SETTLED || g_phase == NAVH_NONE) return;
     if (!near_z(asked, got)) {          // it found a floor
-        settle(got);
-        return;
+        if (got >= g_ground - NAVH_FAR_BELOW) {
+            settle(got);
+            return;
+        }
+        // Far below: kept, and the search goes on for a nearer one.
+        if (!g_have_far || got > g_far) g_far = got;
+        g_have_far = 1;
     }
     if (g_phase == NAVH_SEARCH && ++g_search >= COUNT(SEARCH_STARTS)) {
+        if (g_have_far) {
+            settle(g_far);
+            return;
+        }
         g_phase = NAVH_PROBE;
         g_probe = 0;
     }

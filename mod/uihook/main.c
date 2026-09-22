@@ -40,6 +40,7 @@
 #include <share.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 #include <stdlib.h>
 
 #include "ue3.h"
@@ -1768,7 +1769,27 @@ static volatile LONG g_path_calls;
 static int       g_step_late;
 static int       g_step_late_at[2];
 static char      g_step_coords[NAV_MAX_TEXT];
-static char      g_step_who[TILE_MAX_TEXT];   // units on the tile, found on arrival
+// One unit in a tile's column, on any storey, and where its feet are
+// (units_in_column).
+typedef struct {
+    char  label[160];
+    float feet;
+    int   mine;         // the soldier being moved
+} ColumnUnit;
+#define COLUMN_UNITS 8
+
+// Who stands in the target's column, found on arrival. A step does not know
+// its floor yet then, so they are worded when the step is said, against the
+// floor it settled on: "Godongwana, one floor up." (step_who).
+static ColumnUnit g_step_units[COLUMN_UNITS];
+static int        g_step_nunits;
+static char      g_step_note[48];              // said first: "Floor 2." after F / C
+// The floor F / C put the target on, until the next step. The tile does not
+// change, so a path the game already had for it -- on the floor it was just
+// taken off -- is still reported, and was taken as proof of that floor: the
+// first runs of F went 212.6 -> 466.2 and settled straight back on 212.6.
+static int       g_floor_hold;
+static float     g_floor_hold_z;
 
 // How long after a tile's first path it is described. None: the next frame.
 // It was 200 ms while "Dash" came from DestinationReachability, which the
@@ -2162,18 +2183,14 @@ static void unit_label(const UnitName* u, char* out, size_t out_sz)
     _snprintf_s(out, out_sz, _TRUNCATE, u->nick[0] ? "%s, %s" : "%s", u->name, u->nick);
 }
 
-// "Wright, Disco. Sectoid." -- everyone in sight whose pawn stands on
-// (tx, ty). With a floor known, a unit on another storey of the same column
-// is left out: a pawn's origin is its middle, about one floor above its feet.
-// *mine is set when one of them is the soldier being moved.
-static void units_on_tile(int tx, int ty, int have_floor, float floor,
-                          char* out, size_t out_sz, int* mine)
+// Everyone in sight whose pawn stands in the column of (tx, ty), on any
+// storey, with where their feet are: a pawn's origin is its middle,
+// NAV_CURSOR_LIFT above its feet. `mine` marks the soldier being moved.
+static int units_in_column(int tx, int ty, ColumnUnit* out, int max)
 {
-    size_t used = 0;
-    out[0] = 0;
-    if (mine) *mine = 0;
+    int n = 0;
     CursorGrid g;
-    if (!cursor_grid(&g)) return;
+    if (!cursor_grid(&g)) return 0;
     void* soldier = NULL;
     cursor_chained_pawn(&soldier);
     // Someone not on the squad is named only once the squad has seen them,
@@ -2181,23 +2198,42 @@ static void units_on_tile(int tx, int ty, int have_floor, float floor,
     void* squad = squad_player();
     static SeenSet sight;
     squad_sight(squad, &sight);
-    for (int i = 0; i < g_nunits; i++) {
+    for (int i = 0; i < g_nunits && n < max; i++) {
         UnitSeen s;
         if (!unit_seen(&g_units[i], squad, &s)) continue;
         if (!s.friendly && !seen_has(&sight, s.unit)) continue;
         if (cursor_tile_axis(s.loc[0], g.min_x, CURSOR_TILE) != tx ||
             cursor_tile_axis(s.loc[1], g.min_y, CURSOR_TILE) != ty)
             continue;
-        if (have_floor && (s.loc[2] < floor - 32.0f || s.loc[2] > floor + 192.0f)) {
+        unit_label(&g_units[i], out[n].label, sizeof out[n].label);
+        out[n].feet = s.loc[2] - NAV_CURSOR_LIFT;
+        out[n].mine = s.pawn == soldier;
+        n++;
+    }
+    return n;
+}
+
+// "Wright, Disco. Sectoid." -- everyone in sight whose pawn stands on
+// (tx, ty). With a floor known, a unit on another storey of the same column
+// is left out. *mine is set when one of them is the soldier being moved.
+static void units_on_tile(int tx, int ty, int have_floor, float floor,
+                          char* out, size_t out_sz, int* mine)
+{
+    size_t used = 0;
+    out[0] = 0;
+    if (mine) *mine = 0;
+    ColumnUnit u[COLUMN_UNITS];
+    int n = units_in_column(tx, ty, u, COLUMN_UNITS);
+    for (int i = 0; i < n; i++) {
+        float mid = u[i].feet + NAV_CURSOR_LIFT;
+        if (have_floor && (mid < floor - 32.0f || mid > floor + 192.0f)) {
             logf_("tile: %s stands in this column at %.1f, not on floor %.1f\n",
-                  g_units[i].name, s.loc[2], floor);
+                  u[i].label, mid, floor);
             continue;
         }
-        if (mine && s.pawn == soldier) *mine = 1;
-        char label[160];
-        unit_label(&g_units[i], label, sizeof label);
+        if (mine && u[i].mine) *mine = 1;
         int w = _snprintf_s(out + used, out_sz - used, _TRUNCATE, "%s%s.",
-                            used ? " " : "", label);
+                            used ? " " : "", u[i].label);
         if (w < 0) break;
         used += (size_t)w;
     }
@@ -3005,14 +3041,45 @@ static void walls_poll(void)
 
 // Says the pending step: anyone standing there, `body`, then the
 // coordinates. Once per step.
+// The floor the step stands on, as far as it is known: the aim's, or the
+// ground the height search settled on.
+static float step_floor(void)
+{
+    return g_nav_aim ? g_aim_floor : navh_ground();
+}
+
+// The units in the target's column, worded against the step's floor:
+// "Godongwana, one floor up." With `same_only`, only those on that floor --
+// the ones that can be standing in the way.
+static void step_who(int same_only, char* out, size_t out_sz)
+{
+    size_t used = 0;
+    out[0] = 0;
+    float floor = step_floor();
+    for (int i = 0; i < g_step_nunits; i++) {
+        int dz = scan_storey_diff(g_step_units[i].feet, floor);
+        if (same_only && dz) continue;
+        char piece[TILE_MAX_TEXT];
+        scan_unit_floor_text(g_step_units[i].label, dz, piece, sizeof piece);
+        int w = _snprintf_s(out + used, out_sz - used, _TRUNCATE, "%s%s",
+                            used ? " " : "", piece);
+        if (w < 0) break;
+        used += (size_t)w;
+    }
+}
+
 static int nav_step_say(const char* body)
 {
     if (!g_step_pending) return 0;
     g_step_pending = 0;
-    char say[TILE_MAX_TEXT + TILE_MAX_TEXT + NAV_MAX_TEXT];
-    _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s.", g_step_who,
-                g_step_who[0] && body[0] ? " " : "", body,
-                g_step_who[0] || body[0] ? " " : "", g_step_coords);
+    char who[TILE_MAX_TEXT];
+    step_who(0, who, sizeof who);
+    char say[TILE_MAX_TEXT + TILE_MAX_TEXT + NAV_MAX_TEXT + sizeof g_step_note];
+    _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s%s%s.", g_step_note,
+                g_step_note[0] ? " " : "", who,
+                who[0] && body[0] ? " " : "", body,
+                who[0] || body[0] ? " " : "", g_step_coords);
+    g_step_note[0] = 0;
     logf_("nav: said \"%s\"\n", say);
     speech_say_now(say);
     return 1;
@@ -3134,8 +3201,10 @@ static float aim_floor(const CursorGrid* g, int tx, int ty, float from)
 // whole answer. Otherwise the tile's flags say why.
 static void nav_say_no_path(int tx, int ty)
 {
-    logf_("nav: %d, %d unreachable%s\n", tx, ty, g_step_who[0] ? " -- occupied" : "");
-    if (g_step_who[0]) {
+    char here[TILE_MAX_TEXT];
+    step_who(1, here, sizeof here);
+    logf_("nav: %d, %d unreachable%s\n", tx, ty, here[0] ? " -- occupied" : "");
+    if (here[0]) {
         nav_step_say("");
         return;
     }
@@ -3386,6 +3455,8 @@ static int glide_interval(int steps)
 static void nav_arrive(int tx, int ty)
 {
     g_tile_due = 0;
+    g_step_note[0] = 0;
+    g_floor_hold = 0;
     navh_begin_tile();
     g_nav_path_tile[0] = tx;
     g_nav_path_tile[1] = ty;
@@ -3395,12 +3466,17 @@ static void nav_arrive(int tx, int ty)
     // verdict: another unit's tile gets only "No path", and the soldier's
     // own tile gets no verdict at all -- the game builds no path to
     // within 64 units of the soldier (XGAction_Path.DoPathingTick).
+    // Every storey of the column: which floor the step is on is not known
+    // until it settles, so step_who words them then.
     int mine = 0;
     Fault f;
-    __try { units_on_tile(tx, ty, 0, 0.0f, g_step_who, sizeof g_step_who, &mine); }
+    __try {
+        g_step_nunits = units_in_column(tx, ty, g_step_units, COLUMN_UNITS);
+        for (int i = 0; i < g_step_nunits; i++) mine |= g_step_units[i].mine;
+    }
     __except (fault_note(GetExceptionInformation(), &f)) {
         fault_log("tile: units", &f, NULL);
-        g_step_who[0] = 0;
+        g_step_nunits = 0;
     }
     nav_describe(tx, ty, g_step_coords, sizeof g_step_coords);
     g_step_late = 0;
@@ -4739,6 +4815,93 @@ static void scan_focus(int tx, int ty, float ground, const char* what)
     logf_("scan: cursor to %s on %d, %d, ground %.1f\n", what, tx, ty, ground);
 }
 
+// F and C: the target one storey up or down -- the game's own keys for it
+// ("Change Cursor Altitude", also the mouse wheel). In the moving state and
+// while aiming a rocket or grenade the game runs XCom3DCursor.AscendFloor /
+// DescendFloor on them, which is the next *storey* (WorldZToCursorFloor, 192
+// units), snapped to whatever surface it has there. Numpad navigation holds
+// the cursor's height itself every frame, so without this the keys moved the
+// camera's cut-away and nothing else. They still reach the game, which keeps
+// that cut-away in step.
+//
+// The next storey is the first grid layer, going the way asked, that has a
+// floor on this tile (IsPositionOnFloor) and lies in a different storey from
+// where the target stands. A crate top on the same storey is passed over, as
+// the game passes over it. The target is then put there exactly as Home puts
+// it on a scanner item, so a move gets its path verdict and an aim its odds,
+// with "Floor N." in front.
+#define FLOOR_KEYS 2
+static int g_floor_down[FLOOR_KEYS];      // F, C
+
+static int floor_next(const CursorGrid* g, int tx, int ty, float from, int dir,
+                      float* out, int* storey)
+{
+    void* world = cursor_world();
+    if (!world) return 0;
+    PositionTestFn on_floor = (PositionTestFn)tile_vfn(world, g_tile_slot_onfloor);
+    if (!on_floor) return 0;
+    float x = g->min_x + ((float)tx + 0.5f) * CURSOR_TILE;
+    float y = g->min_y + ((float)ty + 0.5f) * CURSOR_TILE;
+    float here[3] = { x, y, from + 4.0f };
+    int cur = floor_of(here);
+    int layer = cursor_tile_axis(from + 4.0f, g->min_z, 64.0f);
+    for (int tz = layer + dir; tz >= 0 && (g->num_z <= 0 || tz < g->num_z); tz += dir) {
+        float pos[3] = { x, y, g->min_z + ((float)tz + 0.5f) * 64.0f };
+        if (!on_floor(world, NULL, pos)) continue;
+        float z = aim_floor_exact(world, pos, g->min_z + (float)tz * 64.0f);
+        float at[3] = { x, y, z + 4.0f };
+        int f = floor_of(at);
+        if (f == cur) continue;
+        *out = z;
+        *storey = f;
+        return 1;
+    }
+    return 0;
+}
+
+static void nav_floor(int dir)
+{
+    CursorGrid g;
+    int tx, ty;
+    float from, z;
+    if (!cursor_grid(&g)) return;
+    if (nav_active() && nav_target(&tx, &ty)) {
+        from = g_nav_aim ? g_aim_floor : navh_ground();
+    } else if (cursor_tile(&g, &tx, &ty, &z)) {
+        from = z - NAV_CURSOR_LIFT;
+    } else {
+        return;
+    }
+    float to = from;
+    int storey = 0, found = 0;
+    Fault f;
+    __try { found = floor_next(&g, tx, ty, from, dir, &to, &storey); }
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        fault_log("nav: floor key", &f, NULL);
+        found = 0;
+    }
+    if (!found) {
+        logf_("nav: %s at %d, %d from %.1f -- no floor that way\n",
+              dir > 0 ? "F" : "C", tx, ty, from);
+        speech_cancel_pending();
+        speech_say_now(dir > 0 ? "No floor above." : "No floor below.");
+        return;
+    }
+    logf_("nav: %s at %d, %d: %.1f -> %.1f, storey %d\n", dir > 0 ? "F" : "C",
+          tx, ty, from, to, storey);
+    scan_focus(tx, ty, to, dir > 0 ? "the floor above" : "the floor below");
+    _snprintf_s(g_step_note, sizeof g_step_note, _TRUNCATE, "Floor %d.", storey + 1);
+    g_floor_hold = 1;
+    g_floor_hold_z = to;
+    // Arrival counted the soldier as on this tile whatever their floor. Their
+    // own tile is described on a timer, since no path is built to it -- but
+    // on another floor of the column it gets a path like any other.
+    int mine = 0;
+    for (int i = 0; i < g_step_nunits; i++)
+        if (g_step_units[i].mine && scan_storey_diff(g_step_units[i].feet, to) == 0) mine = 1;
+    if (!mine) g_tile_due = 0;
+}
+
 static void scan_home(int shift)
 {
     CursorGrid g;
@@ -5303,6 +5466,15 @@ static void nav_poll(void)
     }
     g_walls_down = walls;
 
+    // F and C: the target a storey up or down. They are the game's own keys
+    // for it and reach the game as well; see nav_floor.
+    static const int floor_keys[FLOOR_KEYS] = { 'F', 'C' };
+    for (int k = 0; k < FLOOR_KEYS; k++) {
+        int down = (GetAsyncKeyState(floor_keys[k]) & 0x8000) != 0;
+        if (down && !g_floor_down[k]) nav_floor(k == 0 ? 1 : -1);
+        g_floor_down[k] = down;
+    }
+
     // Delete: the selected soldier (soldier.h). Its only binding, Camera
     // Default, is removed with -Bindings in [Engine.PlayerInput], so like
     // Insert it never reaches the game.
@@ -5568,7 +5740,7 @@ static void nav_aim_landed(const CursorGrid* g, int px, int py)
     g_nav_world[2] = g_aim_floor;
     nav_describe(px, py, g_step_coords, sizeof g_step_coords);
     // Who was found on arrival stands on the tile asked for, not this one.
-    g_step_who[0] = 0;
+    g_step_nunits = 0;
     nav_step_say("Out of range.");
 }
 
@@ -5883,6 +6055,9 @@ static void __fastcall hook_floorz(void* self, void* edx, void* stack, void* res
 // moves only along what that produced -- an empty path makes a confirm do
 // nothing, silently. The destination is the caller's first parameter, as for
 // the placement. Logged when the answer or the tile changes, while navigating.
+// How far a path's end may sit from the floor F / C chose and still be on it:
+// half a storey, well clear of the floors either side.
+#define FLOOR_HOLD_SLACK 96.0f
 static int   g_path_logged_ok = -1;
 static int   g_path_logged_tile[2] = { -1, -1 };
 static float g_path_logged_z;
@@ -5915,7 +6090,11 @@ static void nav_path_result(void* self, void* stack, void* result)
         tx = cursor_tile_axis(dest[0], g.min_x, CURSOR_TILE);
         ty = cursor_tile_axis(dest[1], g.min_y, CURSOR_TILE);
     }
-    if (dest && tx == g_nav_path_tile[0] && ty == g_nav_path_tile[1]) {
+    // After F / C, a path whose end is not on the chosen floor is the one
+    // from before the key: the same tile, the old storey.
+    int stale = dest && g_floor_hold &&
+                fabsf(dest[2] - NAV_CURSOR_LIFT - g_floor_hold_z) > FLOOR_HOLD_SLACK;
+    if (dest && !stale && tx == g_nav_path_tile[0] && ty == g_nav_path_tile[1]) {
         g_path_pawn = self;
         NavVerdict v = navh_path_result(dest[2], ok, GetTickCount64());
         nav_log_phase();

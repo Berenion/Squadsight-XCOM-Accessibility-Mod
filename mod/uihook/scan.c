@@ -203,6 +203,19 @@ static void floor_offset_text(int dz, char* out, size_t out_sz)
         _snprintf_s(out, out_sz, _TRUNCATE, "%d floors %s", n, dz > 0 ? "up" : "down");
 }
 
+int scan_storey_diff(float feet, float floor)
+{
+    float d = (feet - floor) / 192.0f;
+    return (int)(d >= 0.0f ? d + 0.5f : d - 0.5f);
+}
+
+void scan_unit_floor_text(const char* label, int dz, char* out, size_t out_sz)
+{
+    char storey[48];
+    floor_offset_text(dz, storey, sizeof storey);
+    _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s.", label, storey[0] ? ", " : "", storey);
+}
+
 void scan_describe(const ScanItem* item, int from_tx, int from_ty, int from_tz,
                    char* out, size_t out_sz)
 {

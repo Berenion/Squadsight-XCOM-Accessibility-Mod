@@ -134,6 +134,15 @@ void scan_category_text(ScanCategory c, int floor, int count,
 // "Floor 3." / "All floors." -- what a storey change says.
 void scan_floor_text(int floor, char* out, size_t out_sz);
 
+// How many storeys a unit whose feet are at `feet` stands above (+) or below
+// (-) a floor at `floor`. By height, 192 to a storey, rounded: within half a
+// storey is the same floor. Pure arithmetic, because it is asked while a step
+// is being spoken, which can be inside one of the game's own calls.
+int scan_storey_diff(float feet, float floor);
+
+// "Godongwana." on the same floor, "Godongwana, one floor up." otherwise.
+void scan_unit_floor_text(const char* label, int dz, char* out, size_t out_sz);
+
 // "Nothing here." -- said in place of an item when the list is empty. The
 // category is named so the player knows which list was empty.
 void scan_empty_text(ScanCategory c, char* out, size_t out_sz);
