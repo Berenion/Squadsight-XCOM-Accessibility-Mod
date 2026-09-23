@@ -40,6 +40,7 @@
 #include <share.h>
 #include <stdint.h>
 #include <string.h>
+#include <ctype.h>
 #include <math.h>
 #include <stdlib.h>
 
@@ -236,9 +237,30 @@ static void strip_markup(char* s)
 {
     char* w = s;
     int depth = 0;
+    int brk = 0;
     for (char* r = s; *r; r++) {
+        // A line break is a pause, not nothing: the unlock popup is
+        // strName $ "<br><br>" $ strDescription $ "<br><br>" $ strHelp
+        // (XComPresentationLayerBase), and dropping the tags read
+        // "LaboratoryEach laboratory ...". A stop where the line had none.
+        // Written once the tag has closed: by then the tag's four or more
+        // characters are behind the reader, so the two written cannot
+        // overtake it.
+        if (*r == '<' && !depth && (r[1] == 'b' || r[1] == 'B') &&
+            (r[2] == 'r' || r[2] == 'R') && (r[3] == '>' || r[3] == '/' || r[3] == ' '))
+            brk = 1;
         if (*r == '<') { depth++; continue; }
-        if (*r == '>') { if (depth) depth--; continue; }
+        if (*r == '>') {
+            if (depth) depth--;
+            if (!depth && brk) {
+                brk = 0;
+                char* b = w;
+                while (b > s && b[-1] == ' ') b--;
+                if (b > s && !strchr(".!?:;,", b[-1])) *w++ = '.';
+                *w++ = ' ';
+            }
+            continue;
+        }
         if (!depth) *w++ = *r;
     }
     *w = 0;
@@ -365,6 +387,17 @@ static void*     g_summary_obj;
 static int       g_summary_titled;         // this pass put the soldier in the heading
 static ULONGLONG g_summary_at;
 #define SUMMARY_HEADER_MS 1000
+
+// The debrief page last said, for Up and Down to say again where the page
+// gives them nothing to do (rewrite_cmd); 0 when they are the page's own.
+static char      g_debrief_page[4096];
+static int       g_debrief_rereads;
+
+// The dialogue box last said, for Up and Down to say again (rewrite_cmd).
+static char      g_dialog_said[DIALOG_MAX_TEXT];
+
+// The mission summary on screen, once it has drawn; see msum_screen_up.
+static void*     g_msum_screen;
 
 // When each layer's HUD last drew. See capture_body.
 static volatile ULONGLONG g_seen_strategy_at;
@@ -1918,6 +1951,282 @@ static void capture_body(const char* tag, LONG n, void* stack)
         if (strcmp(fn_name, "StartBriefing") == 0) return;
     }
 
+    // The end of a mission (UIMissionSummary). Its factor panel builds first,
+    // the whole table in one string (hq_summary_factors); then the screen's
+    // OnInit sends the header -- result, operation, mission type, time,
+    // place -- through Invoke("SetMissionInfo"), and ends with
+    // AS_SetButtonHelp(CONTINUE, icon). Every piece went into a list and
+    // nothing was said: the screen was silent. Gathered, and said whole at
+    // the button, which is last. Only the factor page is ever shown -- in
+    // both builds XGSummaryUI.OnNextView does nothing from view 0 and
+    // OnUnrealCommand never pages -- and the header's rating and influence
+    // are never filled, so arrive empty.
+    if (strncmp(obj_name, "UIMissionSummary", 16) == 0) {
+        static char s_factors[1024], s_head[512];
+        if (strncmp(obj_name, "UIMissionSummary_Factors", 24) == 0) {
+            if (strcmp(fn_name, "SetData") == 0) {
+                const char* raw = "";
+                for (int i = 0; i < p->nstrings; i++)
+                    if (strchr(p->strings[i], ',') && strlen(p->strings[i]) > strlen(raw))
+                        raw = p->strings[i];
+                hq_summary_factors(raw, s_factors, sizeof s_factors);
+                logf_("[%ld] %s %s.%s  SUMMARY factors \"%s\"\n", n, tag, obj_name,
+                      fn_name, s_factors);
+            }
+            return;
+        }
+        // The unshown pages and the ticker: UIMissionSummary_Artifacts_0 and
+        // the rest. The screen itself is UIMissionSummary_0 -- a digit after
+        // the underscore -- and must not be caught here.
+        if (obj_name[16] == '_' && !(obj_name[17] >= '0' && obj_name[17] <= '9')) return;
+        if (strcmp(fn_name, "OnInit") == 0 && p->nstrings) {
+            g_msum_screen = object;
+            size_t used = 0;
+            s_head[0] = 0;
+            for (int i = 0; i < p->nstrings; i++) {
+                int dup = 0;
+                for (int j = 0; j < i; j++)
+                    if (strcmp(p->strings[i], p->strings[j]) == 0) dup = 1;
+                if (dup || looks_like_asset(p->strings[i])) continue;
+                // "Mission Completed!" carries its own stop.
+                const char* sep = !used ? ""
+                                : strchr(".!?", s_head[used - 1]) ? " " : ". ";
+                int w = _snprintf_s(s_head + used, sizeof s_head - used, _TRUNCATE, "%s%s",
+                                    sep, p->strings[i]);
+                if (w < 0) break;
+                used += (size_t)w;
+            }
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetButtonHelp") == 0) {
+            const char* label = "";
+            const char* icon = "";
+            for (int i = 0; i < p->nstrings; i++) {
+                if (strncmp(p->strings[i], "Icon_", 5) == 0) { if (!*icon) icon = p->strings[i]; }
+                else if (!*label) label = p->strings[i];
+            }
+            if (*label) help_set(object, 0, label, *icon ? icon : "Icon_A_X", 0);
+            char say[2048];
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s", s_head,
+                        s_head[0] && s_factors[0] ? ". " : "", s_factors,
+                        *label ? ". Enter: " : "", label);
+            s_head[0] = s_factors[0] = 0;
+            logf_("[%ld] %s %s.%s  SUMMARY \"%s\"\n", n, tag, obj_name, fn_name, say);
+            speech_cancel_pending();
+            announce(say);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetMissionStatus") == 0) return;
+    }
+
+    // The debrief back at the base (UIDebrief): one screen, a page at a time
+    // -- the soldiers, then the science (research and artifacts), and after
+    // other missions the council's report or a covert operative. Every row
+    // went into a list the cursor never visits, so the only thing heard was
+    // the last soldier's slot changing; the loot's quantity is an int
+    // parameter and was dropped altogether. Each page is gathered from its
+    // setters and said whole at its AS_Show*Debrief, which comes last. By
+    // position (frame_args), the same in EU and EW:
+    //     AS_SetTitles(debrief, operation, soldierTitle, scienceTitle,
+    //                  councilTitle, covertTitle, covertSubTitle)
+    //     AS_SetLabels(kills, missions, active, wounded, days, kia, continue, ...)
+    //     AS_SetSoldier(int slot, portrait, flag, rank, class, name, nick,
+    //                   int kills, int killsThisMission, int missions,
+    //                   int promoteRank, promoteText, classPromoteText, status,
+    //                   bool isDead, bool psiPromoted)
+    //     AS_SetShiv(int slot, name, int kills, int killsThisMission,
+    //                int missions, bool isAlive, status, rankIcon)
+    //     AS_SetCovertSoldier -- AS_SetSoldier without the slot
+    //     AS_AddListHeader(int id, text)
+    //     AS_AddScienceResearch(int id, title, description, image)
+    //     AS_AddScienceItem(int id, description, int amount, image)
+    //     AS_SetCouncilInfo(text, rewards, panic)
+    //     AS_SetCovertInfo(bool success, feedback, clue)
+    // Up and Down pick among the promoted soldiers (AS_SetSoldierSelection)
+    // on the soldier page and scroll the science page (AS_ScrollUp/Down);
+    // both are followed and the line under them said.
+    if (strncmp(obj_name, "UIDebrief", 9) == 0) {
+        static char s_op[128], s_title[5][128], s_continue[64] = "CONTINUE";
+        static char s_page[3072], s_council[1536], s_covert[1536];
+        static char s_lines[32][384];
+        static int  s_nlines, s_line = -1, s_promoted, s_building;
+        static FrameArgs a;
+        char row[FOCUS_MAX_LABEL];
+
+        if (strcmp(fn_name, "AS_SetTitles") == 0) {
+            frame_args(node, locals, &a);
+            strncpy_s(s_op, sizeof s_op, a.ns > 1 ? a.s[1] : "", _TRUNCATE);
+            for (int i = 0; i < 5; i++)
+                strncpy_s(s_title[i], sizeof s_title[i], a.ns > i + 2 ? a.s[i + 2] : "",
+                          _TRUNCATE);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetLabels") == 0) {
+            frame_args(node, locals, &a);
+            if (a.ns > 6 && a.s[6][0])
+                strncpy_s(s_continue, sizeof s_continue, a.s[6], _TRUNCATE);
+            return;
+        }
+        int soldier = strcmp(fn_name, "AS_SetSoldier") == 0;
+        int covert = strcmp(fn_name, "AS_SetCovertSoldier") == 0;
+        int shiv = strcmp(fn_name, "AS_SetShiv") == 0;
+        if (soldier || covert || shiv) {
+            frame_args(node, locals, &a);
+            int k = covert ? 0 : 1;               // the numbers after the slot
+            int kills = p->nnumbers > k ? (int)p->numbers[k] : 0;
+            int missions = p->nnumbers > k + 2 ? (int)p->numbers[k + 2] : 0;
+            const char *name, *nick = "", *cls = "", *status, *promo = "", *cpromo = "";
+            if (shiv) {
+                name = a.ns > 0 ? a.s[0] : "";
+                status = a.ns > 1 ? a.s[1] : "";
+            } else {
+                cls = a.ns > 3 ? a.s[3] : "";
+                name = a.ns > 4 ? a.s[4] : "";
+                nick = a.ns > 5 ? a.s[5] : "";
+                promo = a.ns > 6 ? a.s[6] : "";
+                cpromo = a.ns > 7 ? a.s[7] : "";
+                status = a.ns > 8 ? a.s[8] : "";
+            }
+            // The class is an icon name, "heavy" or "none"; it is left out
+            // when the promotion already names it ("Class Assigned: Sniper").
+            char cls_word[32] = "";
+            if (*cls && strcmp(cls, "none") != 0 && !*cpromo) {
+                strncpy_s(cls_word, sizeof cls_word, cls, _TRUNCATE);
+                cls_word[0] = (char)toupper((unsigned char)cls_word[0]);
+            }
+            _snprintf_s(row, sizeof row, _TRUNCATE,
+                        "%s%s%s%s%s%s, %s%s%d kill%s, %d mission%s%s%s%s%s", name,
+                        *nick ? " '" : "", nick, *nick ? "'" : "",
+                        *cls_word ? ", " : "", cls_word, status, *status ? ", " : "",
+                        kills, kills == 1 ? "" : "s", missions, missions == 1 ? "" : "s",
+                        *promo ? ". " : "", promo, *cpromo ? ". " : "", cpromo);
+            if (*promo) s_promoted = 1;
+            if (covert) {
+                strncpy_s(s_covert, sizeof s_covert, row, _TRUNCATE);
+            } else {
+                if (!s_building) { s_building = 1; s_page[0] = 0; s_promoted = *promo != 0; }
+                int slot = p->nnumbers ? (int)p->numbers[0] : 0;
+                focus_set(object, slot, row);
+                size_t used = strlen(s_page);
+                _snprintf_s(s_page + used, sizeof s_page - used, _TRUNCATE, "%s%s",
+                            used ? ". " : "", row);
+            }
+            logf_("[%ld] %s %s.%s  DEBRIEF soldier \"%s\"\n", n, tag, obj_name, fn_name, row);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetSoldierSelection") == 0) {
+            int idx = p->nnumbers ? (int)p->numbers[0] : -1;
+            // Sent while the page builds too, before anything is said.
+            if (idx >= 0 && !s_building && focus_label_at(object, idx, row, sizeof row)) {
+                logf_("[%ld] %s %s.%s  DEBRIEF selected %d \"%s\"\n", n, tag, obj_name,
+                      fn_name, idx, row);
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_now(row);
+            }
+            return;
+        }
+        if (strcmp(fn_name, "AS_AddListHeader") == 0 ||
+            strcmp(fn_name, "AS_AddScienceResearch") == 0 ||
+            strcmp(fn_name, "AS_AddScienceItem") == 0) {
+            frame_args(node, locals, &a);
+            int id = p->nnumbers ? (int)p->numbers[0] : s_nlines;
+            if (id == 0) s_nlines = 0;
+            if (fn_name[6] == 'L')
+                strncpy_s(row, sizeof row, a.ns ? a.s[0] : "", _TRUNCATE);
+            else if (fn_name[13] == 'R')
+                _snprintf_s(row, sizeof row, _TRUNCATE, "%s%s%s", a.ns ? a.s[0] : "",
+                            a.ns > 1 && a.s[1][0] ? ": " : "", a.ns > 1 ? a.s[1] : "");
+            else
+                _snprintf_s(row, sizeof row, _TRUNCATE, "%s, %d", a.ns ? a.s[0] : "",
+                            p->nnumbers > 1 ? (int)p->numbers[1] : 0);
+            if (id >= 0 && id < 32) {
+                strncpy_s(s_lines[id], sizeof s_lines[id], row, _TRUNCATE);
+                if (id >= s_nlines) s_nlines = id + 1;
+            }
+            logf_("[%ld] %s %s.%s  DEBRIEF line %d \"%s\"\n", n, tag, obj_name, fn_name,
+                  id, row);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetCouncilInfo") == 0) {
+            frame_args(node, locals, &a);
+            _snprintf_s(s_council, sizeof s_council, _TRUNCATE, "%s%s%s%s%s",
+                        a.ns ? a.s[0] : "", a.ns > 1 && a.s[1][0] ? ". " : "",
+                        a.ns > 1 ? a.s[1] : "", a.ns > 2 && a.s[2][0] ? ". " : "",
+                        a.ns > 2 ? a.s[2] : "");
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetCovertInfo") == 0) {
+            frame_args(node, locals, &a);
+            size_t used = strlen(s_covert);
+            _snprintf_s(s_covert + used, sizeof s_covert - used, _TRUNCATE, "%s%s%s%s",
+                        a.ns && a.s[0][0] ? ". " : "", a.ns ? a.s[0] : "",
+                        a.ns > 1 && a.s[1][0] ? ". " : "", a.ns > 1 ? a.s[1] : "");
+            return;
+        }
+        if (strcmp(fn_name, "AS_ScrollUp") == 0 || strcmp(fn_name, "AS_ScrollDown") == 0) {
+            if (!s_nlines) return;
+            int down = fn_name[9] == 'D';
+            s_line += down ? 1 : -1;
+            if (s_line < 0) s_line = 0;
+            if (s_line >= s_nlines) s_line = s_nlines - 1;
+            const char* say = s_lines[s_line][0] ? s_lines[s_line] : "blank";
+            logf_("[%ld] %s %s.%s  DEBRIEF line %d -> \"%s\"\n", n, tag, obj_name, fn_name,
+                  s_line, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return;
+        }
+        if (strncmp(fn_name, "AS_Show", 7) == 0 && strstr(fn_name, "Debrief")) {
+            char say[4096];
+            const char* title = "";
+            const char* body = "";
+            char science[3072];
+            science[0] = 0;
+            help_clear(object);
+            help_set(object, 0, s_continue, "Icon_A_X", 0);
+            if (strstr(fn_name, "Soldier")) {
+                title = s_title[0];
+                body = s_page;
+                s_building = 0;
+                if (s_promoted) help_set(object, 1, "PROMOTE", "Icon_Y_TRIANGLE", 0);
+            } else if (strstr(fn_name, "Science")) {
+                title = s_title[1];
+                for (int i = 0; i < s_nlines; i++) {
+                    if (!s_lines[i][0]) continue;
+                    size_t used = strlen(science);
+                    // A header ends in a colon and leads its items.
+                    const char* sep = !used ? "" : science[used - 1] == ':' ? " " : ". ";
+                    _snprintf_s(science + used, sizeof science - used, _TRUNCATE, "%s%s",
+                                sep, s_lines[i]);
+                }
+                body = science;
+                s_line = -1;
+            } else if (strstr(fn_name, "Council")) {
+                title = s_title[2];
+                body = s_council;
+            } else if (strstr(fn_name, "Covert")) {
+                title = s_title[3];
+                body = s_covert;
+            }
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s%s%s%s", s_op,
+                        s_op[0] && title[0] ? ". " : "", title,
+                        (s_op[0] || title[0]) && body[0] ? ". " : "", body,
+                        s_promoted && strstr(fn_name, "Soldier")
+                            ? ". Up and Down pick a promoted soldier, 1 promotes" : "",
+                        ". Enter: ", s_continue);
+            // The science page scrolls on the arrows and a soldier page with
+            // a promotion moves between the promoted; everywhere else they do
+            // nothing (UIDebrief.OnPressUp/Down), so they say the page again.
+            strncpy_s(g_debrief_page, sizeof g_debrief_page, say, _TRUNCATE);
+            g_debrief_rereads = !strstr(fn_name, "Science") &&
+                                !(strstr(fn_name, "Soldier") && s_promoted);
+            logf_("[%ld] %s %s.%s  DEBRIEF \"%s\"\n", n, tag, obj_name, fn_name, say);
+            speech_cancel_pending();
+            announce(say);
+            return;
+        }
+    }
+
     // The squad for a mission. See hq_squad_row. Each slot is either a
     // soldier (AS_SetUnitInfo with a status) or empty (status -1, then
     // AS_SetAddUnitText with "ADD UNIT" and a "+", or the Officer Training
@@ -2134,6 +2443,8 @@ static void capture_body(const char* tag, LONG n, void* stack)
         char say[DIALOG_MAX_TEXT];
         int what = dialog_note(object, fn_name, slot, text, say, sizeof say);
         if (what != DIALOG_IGNORED) {
+            if (what == DIALOG_SPEAK || what == DIALOG_UPDATE)
+                strncpy_s(g_dialog_said, sizeof g_dialog_said, say, _TRUNCATE);
             if (what == DIALOG_SPEAK) {
                 logf_("[%ld] %s %s.%s  DIALOG says \"%s\"\n",
                       n, tag, obj_name, fn_name, say);
@@ -2639,6 +2950,27 @@ static int rewrite_cmd(LONG n, void* stack)
         ((cmd >= 500 && cmd <= 503) || cmd == 510 || cmd == 511)) {
         *cmd_slot = CMD_INERT;
         return SUPPRESS;
+    }
+
+    // Up or Down on a dialogue box says it again. It is read once, as it
+    // appears, often straight after something else -- the unlock popup lands
+    // on the end of the council's report -- and nothing else will ever read
+    // it. UIDialogueBox.OnUnrealCommand has no case for either arrow in
+    // either build, so the key goes on to be ignored.
+    if (press && (cmd == FXS_ARROW_UP || cmd == FXS_ARROW_DOWN) &&
+        dialog_is_box(screen) && g_dialog_said[0]) {
+        logf_("[%ld] Input        %s  DIALOG again \"%s\"\n", n, screen, g_dialog_said);
+        if (g_speak) speech_say_now(g_dialog_said);
+    }
+
+    // Up or Down on a debrief page they do nothing on says the page again.
+    // The council's report can be buried by the unlock popup that opens on
+    // top of it: re-reading that popup cut the report off, and once the
+    // popup closed nothing would read the page.
+    if (press && (cmd == FXS_ARROW_UP || cmd == FXS_ARROW_DOWN) &&
+        strncmp(screen, "UIDebrief", 9) == 0 && g_debrief_rereads && g_debrief_page[0]) {
+        logf_("[%ld] Input        %s  DEBRIEF again\n", n, screen);
+        if (g_speak) speech_say_now(g_debrief_page);
     }
 
     // Left in the loadout's locker. See loadout_leave_locker.
@@ -6009,6 +6341,34 @@ static int info_screen_up(void)
     return *(void* const*)v == scr;
 }
 
+// Whether the mission summary is still up: m_Pres.m_kMissionSummary, which
+// State_MissionSummary sets as it spawns the screen. Its Deactivate quits
+// the map, so the presentation layer going is what ends it; anything
+// unreadable counts as gone. While it is up the battle is over and the
+// numpad has nothing to move -- in the 2026-09-24 log it went on walking the
+// cursor under the screen.
+static FieldSlot g_msum_ctrl, g_msum_pres, g_msum_field;
+static int msum_screen_up(void)
+{
+    const void* v;
+    void* scr = g_msum_screen;
+    if (!scr) return 0;
+    int up = 0;
+    if (unit_is_live(scr) &&
+        field_ptr(scr, "controllerRef", &g_msum_ctrl, sizeof(void*), &v)) {
+        void* pc = *(void* const*)v;
+        if (pc && unit_is_live(pc) &&
+            field_ptr(pc, "m_Pres", &g_msum_pres, sizeof(void*), &v)) {
+            void* pres = *(void* const*)v;
+            up = pres && unit_is_live(pres) &&
+                 field_ptr(pres, "m_kMissionSummary", &g_msum_field, sizeof(void*), &v) &&
+                 *(void* const*)v == scr;
+        }
+    }
+    if (!up) g_msum_screen = NULL;
+    return up;
+}
+
 // Every frame: the summary, once the burst has gone quiet.
 static void info_settle(void)
 {
@@ -7614,6 +7974,14 @@ static void nav_poll(void)
     // so does the unit information screen (F1) while it is up.
     // Insert's list is polled on its own thread (review_pump); while it is
     // open the numpad is its, as before.
+    // The mission summary: the battle is over.
+    if (msum_screen_up()) {
+        if (nav_active()) nav_stop("the mission summary");
+        memset(g_numpad_down, 0, sizeof g_numpad_down);
+        g_glide_digit = 0;
+        g_glide_steps = 0;
+        return;
+    }
     if (info_poll() || abar_menu_poll() || history_is_open()) {
         memset(g_numpad_down, 0, sizeof g_numpad_down);
         g_glide_digit = 0;

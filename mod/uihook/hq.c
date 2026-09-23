@@ -289,6 +289,47 @@ void hq_abduction_line(const char* panic_label, int panic,
                 reward_label && *reward_label ? reward_label : "REWARD:", r);
 }
 
+int hq_summary_factors(const char* raw, char* out, size_t out_sz)
+{
+    if (!out || !out_sz) return 0;
+    out[0] = 0;
+    if (!raw) return 0;
+    size_t used = 0;
+    int rows = 0;
+    const char* row = raw;
+    while (*row) {
+        const char* end = strchr(row, ';');
+        size_t len = end ? (size_t)(end - row) : strlen(row);
+        char f[6][96];
+        int nf = 0;
+        const char* c = row;
+        while (nf < 6) {
+            const char* comma = memchr(c, ',', len - (size_t)(c - row));
+            size_t flen = comma ? (size_t)(comma - c) : len - (size_t)(c - row);
+            if (flen >= sizeof f[0]) flen = sizeof f[0] - 1;
+            memcpy(f[nf], c, flen);
+            f[nf][flen] = 0;
+            nf++;
+            if (!comma) break;
+            c = comma + 1;
+        }
+        for (int i = nf; i < 6; i++) f[i][0] = 0;
+        if (f[0][0]) {
+            const char* result = f[3];
+            const char* rating = f[5];
+            int w = _snprintf_s(out + used, out_sz - used, _TRUNCATE, "%s%s%s%s%s%s",
+                                used ? ". " : "", f[0], *result || *rating ? ": " : "",
+                                result, *result && *rating ? ", " : "", rating);
+            if (w < 0) break;
+            used += (size_t)w;
+            rows++;
+        }
+        if (!end) break;
+        row = end + 1;
+    }
+    return rows;
+}
+
 // ---- the base's status -------------------------------------------------------
 
 #define HQ_RESOURCES 8

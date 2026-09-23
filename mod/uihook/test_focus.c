@@ -2355,6 +2355,15 @@ int main(void)
         hq_abduction_line("PANIC:", 1, "MISSION DIFFICULTY:", "Easy", "REWARD:",
                           "\xC2\xA7" "200", pr, sizeof pr);
         check(strstr(pr, "REWARD: 200") != NULL, "a money reward without the section sign");
+
+        // As the EW log carried it, markup already stripped.
+        check(hq_summary_factors("Aliens Killed,_deadAliens,RESULTS:,4,RATING:,Excellent!;"
+                                 "XCOM Operatives Lost,_deadSoldiers,RESULTS:,0,RATING:,Excellent!",
+                                 pr, sizeof pr) == 2 &&
+              strcmp(pr, "Aliens Killed: 4, Excellent!. XCOM Operatives Lost: 0, Excellent!") == 0,
+              "the mission's factors, row by row");
+        check(hq_summary_factors("Mission Length,_missionLength,,,RATING:,Good", pr, sizeof pr) == 1 &&
+              strcmp(pr, "Mission Length: Good") == 0, "a factor with a rating and no result");
     }
 
     printf("\noptions\n");

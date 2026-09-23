@@ -134,6 +134,18 @@ void hq_abduction_line(const char* panic_label, int panic,
                        const char* reward_label, const char* reward,
                        char* out, size_t out_sz);
 
+// ---- the mission's end (UIMissionSummary_Factors) ---------------------------
+//
+// The factor table reaches Flash as one string, rows split by ';' and each
+// row's six fields by ',' (UIMissionSummary_Factors.SetData):
+//
+//     factor, icon, "RESULTS:", result, "RATING:", rating
+//
+// with the two labels empty when their value is. "Aliens Killed,_deadAliens,
+// RESULTS:,4,RATING:,Excellent!" -> "Aliens Killed: 4, Excellent!". Rows are
+// joined with ". ". Returns how many rows it read.
+int hq_summary_factors(const char* raw, char* out, size_t out_sz);
+
 // ---- the base's status (Delete at the base) ---------------------------------
 //
 // The strategy HUD states the base's position in three panels, and nothing

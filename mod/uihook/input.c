@@ -97,6 +97,11 @@ static const Remap g_remaps[] = {
     { "UISquadSelect",     FXS_KEY_1,   FXS_BUTTON_Y,       "Launch mission" },
     { "UISquadSelect",     FXS_KEY_2,   FXS_BUTTON_X,       NULL },
     { "UISquadSelect",     FXS_KEY_3,   FXS_BUTTON_RBUMPER, NULL },
+
+    // The debrief promotes the selected soldier on Y (303, OnAlternatePressed)
+    // and nothing else; Up and Down pick among the promoted first, since a
+    // mouse-mode screen starts with nobody selected. No digit has a case.
+    { "UIDebrief",         FXS_KEY_1,   FXS_BUTTON_Y,       "Promote" },
 };
 
 int input_remap(const char* screen, int cmd)
