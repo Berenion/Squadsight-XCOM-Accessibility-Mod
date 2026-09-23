@@ -4470,6 +4470,29 @@ static void perf_note(long long walls_ticks, long long hearts_ticks)
     walls_max = hearts_max = 0;
 }
 
+// Door and window sounds (SET_DOORS, SET_WINDOWS): every door and window
+// within DOOR_RANGE tiles of where the field listens from, one sound per
+// doorway or window, taking turns in the mixer, in one round together. The
+// doors are the scanner's (world_refresh), refreshed every DOORS_SCAN_MS --
+// doors do not move -- and the first refresh of a mission is the object walk
+// the scanner would otherwise make on its first press.
+#define DOOR_RANGE      10
+#define DOORS_SCAN_MS   1000
+#define DOOR_ALONE_S    2.7f    // a door with no other near knocks this often
+#define DOORS_MAX       64
+
+// One entry per doorway or window tile, kept for the mission: its address is
+// the id in the mixer, so it keeps its place in the round. A double door is
+// two actors on one tile, and is one entry. [2] is its HEART_* kind.
+static int   g_door_tile[DOORS_MAX][3];
+static int   g_door_n;
+static void* g_door_map;        // the cursor the table was built for
+static int   g_door_near[DOORS_MAX];    // this refresh's doors within range
+static int   g_door_near_n;
+
+// Below the scanner, whose world list it reads.
+static void doors_refresh(const CursorGrid* g, int tx, int ty, int doors, int windows);
+
 // "Follow one soldier" (settings.h, SET_HEART_SOLO): the soldier last picked
 // in the scanner, by the name the scanner gives them (unit_label). Set by
 // scan_say_selected, on the same thread as hearts_poll.
@@ -4487,7 +4510,9 @@ static void hearts_poll(void)
     int allies = settings_get(SET_HEARTS) && audio_hearts_available(HEART_ALLY);
     int solo = settings_get(SET_HEART_SOLO);
     int aliens = settings_get(SET_ALIENS) && audio_hearts_available(HEART_ALIEN);
-    int on = allies || aliens;
+    int doors = settings_get(SET_DOORS) && audio_hearts_available(HEART_DOOR);
+    int windows = settings_get(SET_WINDOWS) && audio_hearts_available(HEART_WINDOW);
+    int on = allies || aliens || doors || windows;
     if (!on && was_on) audio_hearts_off();
     was_on = on;
     if (!on) return;
@@ -4513,9 +4538,26 @@ static void hearts_poll(void)
     cursor_chained_pawn(&soldier);
 
     Fault flt;
-    int k = 0, seen_aliens = 0;
+    int k = 0, seen_aliens = 0, near_doors = 0, near_windows = 0;
     static SeenSet sight;
+    static ULONGLONG doors_at;
     __try {
+        if (!doors && !windows) g_door_near_n = 0;
+        else if (!doors_at || now - doors_at >= DOORS_SCAN_MS) {
+            doors_at = now;
+            doors_refresh(&g, tx, ty, doors, windows);
+        }
+        for (int d = 0; d < g_door_near_n && k < HEARTS_MAX; d++) {
+            int* t = g_door_tile[g_door_near[d]];
+            // Checked here too, so a switch in the menu is heard at once
+            // rather than at the next refresh.
+            if (t[2] == HEART_DOOR ? !doors : !windows) continue;
+            heart_sound(t[0] - tx, t[1] - ty, -1, -1, 0, SOLDIER_WOUND_NONE, &sounds[k]);
+            sounds[k].kind = t[2];
+            sounds[k].period = DOOR_ALONE_S;
+            if (t[2] == HEART_DOOR) near_doors++; else near_windows++;
+            ids[k++] = t;
+        }
         // Enemies only while a squad member sees them: the radar's rule.
         if (aliens) squad_sight(squad, &sight);
         for (int i = 0; i < g_nunits && k < HEARTS_MAX; i++) {
@@ -4554,9 +4596,11 @@ static void hearts_poll(void)
     }
     n = k;
     audio_hearts(ids, sounds, n);
-    if (n * 100 + seen_aliens != logged) {
-        logged = n * 100 + seen_aliens;
-        logf_("hearts: %d beating, %d of them aliens\n", n, seen_aliens);
+    int sig = ((n * 64 + seen_aliens) * 64 + near_doors) * 64 + near_windows;
+    if (sig != logged) {
+        logged = sig;
+        logf_("hearts: %d sounding: %d aliens, %d doors, %d windows\n", n, seen_aliens,
+              near_doors, near_windows);
     }
 }
 
@@ -6123,7 +6167,7 @@ static void scan_add_targets(void)
 typedef struct {
     void* actor;
     int   idx;      // its slot in the object table, for objects_still
-    int   kind;     // 0 interactive, 1 ladder, 2 Meld canister
+    int   kind;     // 0 interactive, 1 ladder, 2 Meld canister, 3 window
 } WorldActor;
 
 static WorldActor g_wactors[SCAN_MAX];
@@ -6171,6 +6215,19 @@ static void scan_describe_interactive(void* actor)
 
     float world[3];
     if (!actor_location(actor, &g_ilact_loc, world)) return;
+    if (scan_item_at(&it, world, 0.0f)) world_keep(&it);
+}
+
+static FieldSlot g_window_loc;
+
+static void scan_describe_window(void* actor)
+{
+    ScanItem it;
+    memset(&it, 0, sizeof it);
+    it.kind = SCAN_INTERACT;
+    strncpy_s(it.name, sizeof it.name, "Window", _TRUNCATE);
+    float world[3];
+    if (!actor_location(actor, &g_window_loc, world)) return;
     if (scan_item_at(&it, world, 0.0f)) world_keep(&it);
 }
 
@@ -6222,7 +6279,8 @@ static void scan_world_items(void)
         switch (g_wactors[i].kind) {
         case 0:  scan_describe_interactive(g_wactors[i].actor); break;
         case 1:  scan_describe_ladder(g_wactors[i].actor);      break;
-        default: scan_describe_meld(g_wactors[i].actor);        break;
+        case 2:  scan_describe_meld(g_wactors[i].actor);        break;
+        default: scan_describe_window(g_wactors[i].actor);      break;
         }
     }
 }
@@ -6232,10 +6290,35 @@ static void scan_world_items(void)
 // and this keeps the call cheap.
 static const int* g_scan_kinds;
 
+// A window is a plain XComDestructibleActor -- the class of every crate, car
+// and fence -- and nothing in script says which are windows: the window icon
+// on interactive actors exists, but no map seen uses it, and the traversal a
+// soldier makes through one (eTraversal_BreakWindow) is in pathing data with
+// no script accessor. A survey of one map's 948 destructibles (2026-09-23,
+// 22:37 log) showed them by their static mesh: WindowSolidSingleE,
+// WindowSolidDoubleA, WindowSolidDouble_DAMAGE, all Toughness_GLASS, and
+// BoardedWindows in wood. Glass alone is not the test -- WarningLight is glass
+// too -- so the test is the mesh's name.
+static FieldSlot g_win_smc, g_win_mesh;
+
+static int is_window(void* actor)
+{
+    const void* v;
+    char mesh[64];
+    if (!field_ptr(actor, "StaticMeshComponent", &g_win_smc, sizeof(void*), &v)) return 0;
+    void* smc = *(void* const*)v;
+    if (!smc || !field_ptr(smc, "StaticMesh", &g_win_mesh, sizeof(void*), &v)) return 0;
+    if (!object_name(*(void* const*)v, mesh, sizeof mesh)) return 0;
+    return strstr(mesh, "Window") != NULL || strstr(mesh, "window") != NULL;
+}
+
 static int scan_collect_world(void* actor, int which, int idx, void* ctx)
 {
     (void)ctx;
     if (g_wactor_n >= SCAN_MAX) return 0;
+    // Every destructible on the map comes through, nearly a thousand; only
+    // the windows are kept.
+    if (g_scan_kinds[which] == 3 && !is_window(actor)) return 1;
     g_wactors[g_wactor_n].actor = actor;
     g_wactors[g_wactor_n].idx   = idx;
     g_wactors[g_wactor_n].kind  = g_scan_kinds[which];
@@ -6243,19 +6326,22 @@ static int scan_collect_world(void* actor, int which, int idx, void* ctx)
     return 1;
 }
 
-// The three classes, resolved together, because finding a class by name costs
+// The four classes, resolved together, because finding a class by name costs
 // a pass over the whole table. After the first scan of a mission they come
 // from the cache. `map` receives the kind each entry of `use` stands for.
+// XComDestructibleActor last: interactive actors are destructibles too, and
+// an object matching two entries goes to the first.
 static int scan_world_classes(const void** use, int* map)
 {
     static const char* const names[] = {
         "XComInteractiveLevelActor", "XComLadder", "XComMeldContainerActor",
+        "XComDestructibleActor",
     };
-    const void* cls[3];
-    objects_classes(names, cls, 3);
+    const void* cls[4];
+    objects_classes(names, cls, 4);
 
     int n = 0;
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < 4; i++)
         if (cls[i]) { use[n] = cls[i]; map[n] = i; n++; }
     return n;
 }
@@ -6299,7 +6385,10 @@ static void scan_world_catch_up(const void* const* use, int nclasses)
               gone, found, g_world_next - was);
 }
 
-static void scan_add_world(void)
+// Brings the level actors and their items (g_world) up to date for the map
+// in g_scan_grid, without touching the scanner's list: the scanner adds them
+// itself, and the door sounds read them. Returns 0 when there is nothing.
+static int world_refresh(void)
 {
     g_world_n = 0;
     if (!objects_ready()) {
@@ -6310,13 +6399,13 @@ static void scan_add_world(void)
         char why[256];
         int got = objects_retry(why, sizeof why);
         if (why[0]) logf_("objects: %s%s\n", got ? "" : "still unavailable -- ", why);
-        if (!got) return;
+        if (!got) return 0;
     }
 
-    const void* use[3];
-    int map[3];
+    const void* use[4];
+    int map[4];
     int nclasses = scan_world_classes(use, map);
-    if (!nclasses) return;
+    if (!nclasses) return 0;
     g_scan_kinds = map;
 
     // A different cursor, or a different grid, is a different map: what was
@@ -6335,7 +6424,47 @@ static void scan_add_world(void)
     g_world_grid = g_scan_grid;
 
     scan_world_items();
+    return 1;
+}
+
+static void scan_add_world(void)
+{
+    if (!world_refresh()) return;
     for (int i = 0; i < g_world_n; i++) scan_add(&g_world[i]);
+}
+
+// The doors and windows within range of (tx, ty), of the kinds switched on,
+// into g_door_near; the table and its reasons are above hearts_poll.
+static void doors_refresh(const CursorGrid* g, int tx, int ty, int doors, int windows)
+{
+    if (g_door_map != cursor_object()) { g_door_n = 0; g_door_map = cursor_object(); }
+    g_scan_grid = *g;
+    g_door_near_n = 0;
+    if (!world_refresh()) return;
+    for (int i = 0; i < g_world_n; i++) {
+        const ScanItem* it = &g_world[i];
+        int kind;
+        if (it->kind == SCAN_DOORS && doors) kind = HEART_DOOR;
+        else if (it->kind == SCAN_INTERACT && windows && strcmp(it->name, "Window") == 0)
+            kind = HEART_WINDOW;
+        else continue;
+        int dx = it->tx - tx, dy = it->ty - ty;
+        if (dx * dx + dy * dy > DOOR_RANGE * DOOR_RANGE) continue;
+        int k;
+        for (k = 0; k < g_door_n; k++)
+            if (g_door_tile[k][0] == it->tx && g_door_tile[k][1] == it->ty &&
+                g_door_tile[k][2] == kind) break;
+        if (k == g_door_n) {
+            if (g_door_n >= DOORS_MAX) continue;
+            g_door_tile[k][0] = it->tx;
+            g_door_tile[k][1] = it->ty;
+            g_door_tile[k][2] = kind;
+            g_door_n++;
+        }
+        int dup = 0;
+        for (int j = 0; j < g_door_near_n; j++) if (g_door_near[j] == k) dup = 1;
+        if (!dup && g_door_near_n < DOORS_MAX) g_door_near[g_door_near_n++] = k;
+    }
 }
 
 // ---- the ways up -----------------------------------------------------------
@@ -8665,7 +8794,9 @@ static DWORD WINAPI init(LPVOID param)
         learn_apply_levels(levels, sizeof levels);
         logf_("audio: %s\n", levels);
         // The heartbeats ship beside the DLL, as the NVDA client does.
-        static const char* const BEAT_FILE[HEART_KINDS] = { "ekgbeep.wav", "alienbeat.wav" };
+        static const char* const BEAT_FILE[HEART_KINDS] = { "ekgbeep.wav", "alienbeat.wav",
+                                                             "doorsound.wav",
+                                                             "windowsound.wav" };
         for (int kind = 0; kind < HEART_KINDS; kind++) {
             char beat[MAX_PATH];
             _snprintf_s(beat, sizeof beat, _TRUNCATE, "%s%s", dll_dir, BEAT_FILE[kind]);

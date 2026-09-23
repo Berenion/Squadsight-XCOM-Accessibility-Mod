@@ -27,6 +27,8 @@ rem one is optional until it is cut: without it only the aliens are silent.
 copy /y "%HERE%ekgbeep.wav" "%OUT%\ekgbeep.wav" >nul
 if errorlevel 1 (popd & echo HEARTBEAT COPY FAILED & exit /b 1)
 if exist "%HERE%alienbeat.wav" copy /y "%HERE%alienbeat.wav" "%OUT%\alienbeat.wav" >nul
+if exist "%HERE%doorsound.wav" copy /y "%HERE%doorsound.wav" "%OUT%\doorsound.wav" >nul
+if exist "%HERE%windowsound.wav" copy /y "%HERE%windowsound.wav" "%OUT%\windowsound.wav" >nul
 
 cl /nologo /W3 /O2 /MT "%HERE%inject.c" "%HERE%injector.c" /Fe:inject.exe /link user32.lib
 if errorlevel 1 (popd & echo INJECTOR BUILD FAILED & exit /b 1)

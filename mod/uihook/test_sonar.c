@@ -90,7 +90,8 @@ static int practice(void)
         return 1;
     }
     printf("audio: %s\n", why);
-    static const char* const BEAT_FILE[HEART_KINDS] = { "ekgbeep.wav", "alienbeat.wav" };
+    static const char* const BEAT_FILE[HEART_KINDS] = { "ekgbeep.wav", "alienbeat.wav",
+                                                         "doorsound.wav", "windowsound.wav" };
     for (int kind = 0; kind < HEART_KINDS; kind++) {
         char beat[MAX_PATH];
         _snprintf_s(beat, sizeof beat, _TRUNCATE, "%s\\%s", dir, BEAT_FILE[kind]);

@@ -26,8 +26,10 @@
 // Only the mapping lives here, so the offline checks can reach it. Which
 // allies, and the mixing, are main.c's and audio.c's.
 
-// Which recording a heart plays.
-enum { HEART_ALLY, HEART_ALIEN, HEART_KINDS };
+// Which recording a heart plays. Doors and windows are not hearts, but they
+// are placed, levelled and taken in turns the same way, so they are kinds here
+// too.
+enum { HEART_ALLY, HEART_ALIEN, HEART_DOOR, HEART_WINDOW, HEART_KINDS };
 
 typedef struct {
     int   kind;     // HEART_*

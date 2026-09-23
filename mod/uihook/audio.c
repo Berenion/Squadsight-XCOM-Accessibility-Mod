@@ -277,8 +277,10 @@ static volatile int     g_ready;
 static float            g_glide;        // per-sample level coefficient
 static int              g_stale;        // frames since the field was renewed
 // Per source (AUDIO_*), read once per buffer by the mixer.
-static int              g_notch[AUDIO_SOURCES] = { VOLUME_MIDDLE, VOLUME_MIDDLE };
-static float            g_volume[AUDIO_SOURCES] = { 1.0f, 1.0f };
+static int              g_notch[AUDIO_SOURCES] = { VOLUME_MIDDLE, VOLUME_MIDDLE,
+                                                   VOLUME_MIDDLE, VOLUME_MIDDLE,
+                                                   VOLUME_MIDDLE };
+static float            g_volume[AUDIO_SOURCES] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
 
 // ---- heartbeats ---------------------------------------------------------------
 //
@@ -292,13 +294,18 @@ static float            g_volume[AUDIO_SOURCES] = { 1.0f, 1.0f };
 //   alienbeat.wav  seen enemies: one thump and its murmur. Freesound 351789,
 //                  "sinth_heart" by renzogen, CC BY 4.0 -- the author must
 //                  be credited wherever the mod is distributed.
+//   doorsound.wav  doors within 10 tiles: a wooden door's latch. Freesound
+//                  684538 by pnmcarrierailfan, CC BY-NC 4.0 -- credited,
+//                  and never in anything sold.
+//   windowsound.wav windows within 10 tiles: a sash sliding and shutting.
+//                  Freesound 784299, "window shut" by dilly_deelin, CC0.
 // Each is played once per beat by a voice per unit. Unlike
 // the bands these are triggered, but the mod still only says what should be
 // sounding and the mixer keeps the time: each voice counts down to its next
 // beat in samples, so the pace never depends on the game's frame rate. A beat
 // plays through with the place and loudness it started with -- changing them
 // mid-beat would smear it -- and the next one picks up any change.
-#define HEARTS_MAX   32               // a full squad and a map's worth in sight
+#define HEARTS_MAX   48               // a squad, the aliens in sight, the doors near
 #define HEART_DEMO   HEARTS_MAX         // the extra voice the menu plays through
 // Doubled from 0.30 after the first run, where hearts were too quiet even at
 // Loud. A near heart peaks at about half scale at Normal; at Loudest several
@@ -314,7 +321,7 @@ static float            g_volume[AUDIO_SOURCES] = { 1.0f, 1.0f };
 // A heart held back keeps the later time, so within a few beats the squad
 // falls into turns on its own and each beep is heard alone, from its place.
 #define HEART_SPACING_S 0.25f
-// Allies do not keep their own time: they take turns (hearts_turns). Each
+// Allies do not keep their own time: they take turns (g_turns). Each
 // has two figures -- two beats, or two panic triples -- close together
 // (heart_turn_gap), then this pause, and the next ally has the turn. Asked
 // for by the player after spacing alone still left the squad hard to tell
@@ -323,8 +330,7 @@ static float            g_volume[AUDIO_SOURCES] = { 1.0f, 1.0f };
 // the wrong beats together: it was 0.6 s against a 1.2 s calm gap, and one
 // soldier's second beat was heard as the next one's first. An ally beating
 // alone keeps their own unhurried rhythm (heart_gap), with no pause.
-#define TURN_FIGURES 2
-#define TURN_GAP_S   1.0f
+
 
 typedef struct {
     const void* id;         // the ally, as main.c names them; NULL for free
@@ -343,20 +349,42 @@ typedef struct {
 static float*     g_heart[HEART_KINDS];     // each kind's sample, mono, -1..1
 static int        g_heart_len[HEART_KINDS];
 // Each kind's level (AUDIO_*): allies and aliens are turned up and down apart.
-static const int  HEART_SOURCE[HEART_KINDS] = { AUDIO_HEARTS, AUDIO_ALIENS };
+static const int  HEART_SOURCE[HEART_KINDS] = { AUDIO_HEARTS, AUDIO_ALIENS, AUDIO_DOORS,
+                                                AUDIO_WINDOWS };
 // And a trim, so the kinds sit together at the same notch. The alien beat's
 // murmur fills its gaps: 0.353 rms against the old lub-dub's 0.262, so 0.74
 // matched them. The beep carries about the lub-dub's energy, but at 1600 Hz,
 // where the ear is far more sensitive than at a thump's low thud, so it
 // starts at half; which is louder after that is the player's to say.
-static const float HEART_TRIM[HEART_KINDS] = { 0.5f, 0.74f };
+// The door's latch is one short knock and a long quiet tail, 0.13 rms against
+// the alien beat's 0.353: 1.6 brings its knock up beside the others without
+// its peak reaching far into the limiter. The window is quieter still, 0.056
+// rms -- a soft slide and a 30 ms click -- and is given the same 1.6, as far
+// as the click can go at Normal without the limiter.
+static const float HEART_TRIM[HEART_KINDS] = { 0.5f, 0.74f, 1.6f, 1.6f };
 static HeartVoice g_voice[HEARTS_MAX + 1];
 static int        g_hearts_stale;   // samples since the set was renewed
 static long long  g_clock;          // samples mixed, for the spacing
-static int        g_turn_voice = -1;  // the ally with the turn
-static int        g_turn_beat;        // beats played of this turn
-static int        g_turn_beats;       // beats the turn has
-static int        g_turn_wait;        // samples to the turn's next event
+// The rounds of turns, each over a set of kinds: allies two beats each, a
+// second between soldiers; doors and windows together, one sound each, 0.7 s
+// apart, and a rest of 2 s after the last before the round starts again, so
+// they are always there but never a clatter. One round for both, because a
+// door and a window sounding at once would blur into neither. One alone
+// sounds every heart_gap (main.c gives them a period).
+#define KIND_BIT(k) (1 << (k))
+typedef struct {
+    int   kinds;            // KIND_BIT of each kind in the round
+    int   figures;
+    float gap_s;            // between two members of the round
+    float round_rest_s;     // added when the round comes back to its start
+    int   voice, beat, beats, wait;
+} Turns;
+
+static Turns g_turns[] = {
+    { KIND_BIT(HEART_ALLY),                          2, 1.0f, 0.0f, -1 },
+    { KIND_BIT(HEART_DOOR) | KIND_BIT(HEART_WINDOW), 1, 0.7f, 2.0f, -1 },
+};
+#define TURN_KINDS ((int)(sizeof g_turns / sizeof g_turns[0]))
 static unsigned   g_hearts_born;    // how many voices have started, for the stagger
 
 // Constant power: a sound thrown hard to one side is as loud as the same
@@ -464,48 +492,61 @@ static int hearts_crowded(int self, long long now)
     return 0;
 }
 
-// The next live ally after voice `after` (-1 for the first), round the
-// slots; -1 when there is none.
-static int hearts_next_ally(int after)
+static int in_kinds(int kinds, int kind)
+{
+    return kind >= 0 && kind < HEART_KINDS && (kinds & KIND_BIT(kind));
+}
+
+// The next live voice of one of `kinds` after voice `after` (-1 for the
+// first), round the slots; -1 when there is none.
+static int hearts_next_of(int kinds, int after)
 {
     for (int k = 1; k <= HEARTS_MAX; k++) {
         int j = ((after < 0 ? -1 : after) + k + HEARTS_MAX) % HEARTS_MAX;
-        if (g_voice[j].live && g_voice[j].next.kind == HEART_ALLY) return j;
+        if (g_voice[j].live && in_kinds(kinds, g_voice[j].next.kind)) return j;
     }
     return -1;
 }
 
-// The allies' turns, one buffer's worth. A beat is not played here: the
-// voice is armed with how many samples into this buffer it starts, and the
-// voice pass below plays it from there.
-static void hearts_turns(void)
+// One kind's turns, one buffer's worth. A beat is not played here: the voice
+// is armed with how many samples into this buffer it starts, and the voice
+// pass below plays it from there.
+static void turns_run(Turns* t)
 {
     for (int f = 0; f < FRAMES; f++) {
-        if (--g_turn_wait > 0) continue;
-        HeartVoice* v = g_turn_voice >= 0 ? &g_voice[g_turn_voice] : NULL;
-        if (!v || !v->live || v->next.kind != HEART_ALLY || g_turn_beat >= g_turn_beats) {
-            int j = hearts_next_ally(g_turn_voice);
-            if (j < 0) { g_turn_voice = -1; g_turn_wait = RATE / 20; continue; }
-            g_turn_voice = j;
+        if (--t->wait > 0) continue;
+        HeartVoice* v = t->voice >= 0 ? &g_voice[t->voice] : NULL;
+        if (!v || !v->live || !in_kinds(t->kinds, v->next.kind) || t->beat >= t->beats) {
+            int j = hearts_next_of(t->kinds, t->voice);
+            if (j < 0) { t->voice = -1; t->wait = RATE / 20; continue; }
+            t->voice = j;
             v = &g_voice[j];
-            g_turn_beat = 0;
-            g_turn_beats = TURN_FIGURES * heart_figure_len(&v->next);
+            t->beat = 0;
+            t->beats = t->figures * heart_figure_len(&v->next);
         }
         long long now = g_clock + f;
-        if (heart_figure_start(&v->next, g_turn_beat) && hearts_crowded(g_turn_voice, now)) {
-            g_turn_wait = RATE / 20;
+        if (heart_figure_start(&v->next, t->beat) && hearts_crowded(t->voice, now)) {
+            t->wait = RATE / 20;
             continue;
         }
         v->armed = 1;
         v->countdown = (float)(f + 1);
         v->started_at = now;
-        int next = hearts_next_ally(g_turn_voice);
-        int alone = next < 0 || next == g_turn_voice;
-        float gap = (alone ? heart_gap(&v->next, g_turn_beat)
-                           : heart_turn_gap(&v->next, g_turn_beat)) * RATE;
-        if (++g_turn_beat >= g_turn_beats && !alone) gap = TURN_GAP_S * RATE;
-        g_turn_wait = (int)(gap > RATE * 0.1f ? gap : RATE * 0.1f);
+        int next = hearts_next_of(t->kinds, t->voice);
+        int alone = next < 0 || next == t->voice;
+        float gap = (alone ? heart_gap(&v->next, t->beat)
+                           : heart_turn_gap(&v->next, t->beat)) * RATE;
+        if (++t->beat >= t->beats && !alone)
+            gap = (t->gap_s + (next < t->voice ? t->round_rest_s : 0.0f)) * RATE;
+        t->wait = (int)(gap > RATE * 0.1f ? gap : RATE * 0.1f);
     }
+}
+
+static int kind_takes_turns(int kind)
+{
+    for (int k = 0; k < TURN_KINDS; k++)
+        if (in_kinds(g_turns[k].kinds, kind)) return 1;
+    return 0;
 }
 
 // One buffer of every heartbeat, into g_mix. Called with the lock held.
@@ -518,7 +559,7 @@ static void hearts_mix(void)
         for (int i = 0; i < HEARTS_MAX; i++) g_voice[i].live = 0;
         g_hearts_stale = HEARTS_STALE_MS * RATE / 1000 + 1;
     }
-    hearts_turns();
+    for (int k = 0; k < TURN_KINDS; k++) turns_run(&g_turns[k]);
     for (int i = 0; i <= HEARTS_MAX; i++) {
         HeartVoice* v = &g_voice[i];
         if (!v->live && !v->playing) {
@@ -533,7 +574,7 @@ static void hearts_mix(void)
         int len = g_heart_len[kind];
         if (!smp) { v->playing = 0; continue; }
         float amp = HEART_VOLUME * HEART_TRIM[kind] * g_volume[HEART_SOURCE[kind]];
-        int turned = i < HEARTS_MAX && kind == HEART_ALLY;
+        int turned = i < HEARTS_MAX && kind_takes_turns(kind);
         for (int f = 0; f < FRAMES; f++) {
             if (turned) {
                 // An ally beats when hearts_turns says, not on its own clock.

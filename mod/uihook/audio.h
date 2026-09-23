@@ -60,6 +60,8 @@ enum {
     AUDIO_WALLS,        // the wall field
     AUDIO_HEARTS,       // ally heartbeats
     AUDIO_ALIENS,       // enemy heartbeats
+    AUDIO_DOORS,        // doors nearby
+    AUDIO_WINDOWS,      // windows nearby
     AUDIO_SOURCES
 };
 

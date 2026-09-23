@@ -35,7 +35,8 @@ enum { MODE_OFF, MODE_MENU, MODE_PRACTICE, MODE_HEARTS };
 #define ITEM_HEAR     (-2)
 static const int MENU[] = {
     SET_FIELD, SET_WALL_LEVEL, ITEM_PRACTICE,
-    SET_HEARTS, SET_HEART_SOLO, SET_HEART_LEVEL, SET_ALIENS, SET_ALIEN_LEVEL, ITEM_HEAR,
+    SET_HEARTS, SET_HEART_SOLO, SET_HEART_LEVEL, SET_ALIENS, SET_ALIEN_LEVEL,
+    SET_DOORS, SET_DOOR_LEVEL, SET_WINDOWS, SET_WINDOW_LEVEL, ITEM_HEAR,
     SET_GLIDE,
     SET_COMBAT, SET_SIGHT, SET_TURN, SET_TICKER, SET_OBJECTIVES, SET_NARRATIVE,
 };
@@ -46,6 +47,8 @@ static const struct { int setting, source; } LEVELS[] = {
     { SET_WALL_LEVEL,  AUDIO_WALLS  },
     { SET_HEART_LEVEL, AUDIO_HEARTS },
     { SET_ALIEN_LEVEL, AUDIO_ALIENS },
+    { SET_DOOR_LEVEL,  AUDIO_DOORS  },
+    { SET_WINDOW_LEVEL, AUDIO_WINDOWS },
 };
 #define NLEVELS ((int)(sizeof LEVELS / sizeof LEVELS[0]))
 
@@ -239,6 +242,14 @@ static const HeartDemo DEMO[] = {
     { "Alien, 10 north",            HEART_ALIEN,   0,  10, 6, 6, 0, SOLDIER_WOUND_NONE },
     { "Alien, 10 south",            HEART_ALIEN,   0, -10, 6, 6, 0, SOLDIER_WOUND_NONE },
     { "Alien, badly hurt",          HEART_ALIEN,   0,   0, 1, 6, 0, SOLDIER_WOUND_NONE },
+    { "Door, here",                 HEART_DOOR,    0,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Door, 5 west",               HEART_DOOR,   -5,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Door, 8 east, 4 north",      HEART_DOOR,    8,   4, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Door, 10 south",             HEART_DOOR,    0, -10, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Window, here",               HEART_WINDOW,  0,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Window, 5 east",             HEART_WINDOW,  5,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Window, 8 west, 4 south",    HEART_WINDOW, -8,  -4, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Window, 10 north",           HEART_WINDOW,  0,  10, 6, 6, 0, SOLDIER_WOUND_NONE },
 };
 #define DEMO_ITEMS ((int)(sizeof DEMO / sizeof DEMO[0]))
 // Three of a steady heart -- at the calm pace that is already five seconds
@@ -315,7 +326,7 @@ static void menu_say_item(const char* before)
     char say[256], value[32];
     int id = MENU[g_item];
     const char* name = id == ITEM_PRACTICE ? "Sound practice"
-                     : id == ITEM_HEAR     ? "Hear the heartbeats"
+                     : id == ITEM_HEAR     ? "Hear the sounds"
                      : settings_name(id);
     value[0] = 0;
     if (id >= 0) settings_value_text(id, value, sizeof value);
@@ -370,11 +381,14 @@ static void preview(int setting)
         g_dirs = BIT(SONAR_N);
         g_tiles = 0;
         g_preview_until = GetTickCount64() + PREVIEW_MS;
-    } else if (level_source(setting) == AUDIO_HEARTS ||
-               level_source(setting) == AUDIO_ALIENS) {
+    } else if (level_source(setting) >= 0) {
+        // Every other source is a kind of heart, in the same order.
+        static const int KIND[AUDIO_SOURCES] = {
+            -1, HEART_ALLY, HEART_ALIEN, HEART_DOOR, HEART_WINDOW
+        };
         HeartSound s;
         heart_sound(0, 0, -1, -1, 0, SOLDIER_WOUND_NONE, &s);
-        s.kind = level_source(setting) == AUDIO_ALIENS ? HEART_ALIEN : HEART_ALLY;
+        s.kind = KIND[level_source(setting)];
         if (audio_hearts_available(s.kind)) audio_heart_once(&s);
         else speech_say("No sound for it yet.");
     }
@@ -415,8 +429,10 @@ static void menu_poll(const int* hit)
         int id = MENU[g_item];
         if (id == ITEM_PRACTICE) enter();
         else if (id == ITEM_HEAR) {
-            if (audio_hearts_available(HEART_ALLY) || audio_hearts_available(HEART_ALIEN))
-                hear_open();
+            int any = 0;
+            for (int kind = 0; kind < HEART_KINDS; kind++)
+                if (audio_hearts_available(kind)) any = 1;
+            if (any) hear_open();
             else speech_say_now("No heartbeat sound. It did not load.");
         }
         else if (settings_is_switch(id)) menu_change(1);

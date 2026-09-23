@@ -23,6 +23,10 @@ enum {
     SET_HEART_LEVEL,    // their loudness, notch 0..4 (AUDIO_HEARTS)
     SET_ALIENS,         // enemy heartbeats, on or off (heart.h)
     SET_ALIEN_LEVEL,    // their loudness, notch 0..4 (AUDIO_ALIENS)
+    SET_DOORS,          // doors within 10 tiles, on or off
+    SET_DOOR_LEVEL,     // their loudness, notch 0..4 (AUDIO_DOORS)
+    SET_WINDOWS,        // windows within 10 tiles, on or off
+    SET_WINDOW_LEVEL,   // their loudness, notch 0..4 (AUDIO_WINDOWS)
     SET_GLIDE,          // how fast a held numpad key moves: GLIDE_*
     SET_COMBAT,         // damage, misses and statuses
     SET_SIGHT,          // enemies coming into and going out of sight
