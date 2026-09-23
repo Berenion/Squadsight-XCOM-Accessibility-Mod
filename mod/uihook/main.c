@@ -353,6 +353,18 @@ static char      g_soldier_stats[128];
 static ULONGLONG g_soldier_info_at;
 #define SOLDIER_INFO_FRESH_MS 3000
 
+// The soldier summary's heading. Opening it draws the header first and the
+// menu after; every refresh -- back from Loadout, Tab, Left Shift -- does
+// UpdateData (menu, selection) and then UpdatePanels (header), in both
+// builds. So the soldier is said when it changes, from whichever comes
+// second: kept as the one last said, and forgotten on leaving the summary.
+static char      g_summary_said[256];
+static char      g_summary_dropship[64];   // "ON MISSION", or empty
+static void*     g_summary_obj;
+static int       g_summary_titled;         // this pass put the soldier in the heading
+static ULONGLONG g_summary_at;
+#define SUMMARY_HEADER_MS 1000
+
 // When each layer's HUD last drew. See capture_body.
 static volatile ULONGLONG g_seen_strategy_at;
 static volatile ULONGLONG g_seen_tactical_at;
@@ -2031,35 +2043,57 @@ static void capture_body(const char* tag, LONG n, void* stack)
                         "%s. %s. %s. %s", a.s[0], a.s[1], a.s[2], a.s[3]);
             logf_("[%ld] %s %s.%s  SOLDIER STATS \"%s\"\n", n, tag, obj_name, fn_name,
                   g_soldier_stats);
+            // The header after a summary refresh: said after the item, and
+            // only when it is another soldier than the one last said.
+            if (g_summary_obj && g_soldier_info[0] &&
+                GetTickCount64() - g_summary_at < SUMMARY_HEADER_MS &&
+                strcmp(g_soldier_info, g_summary_said) != 0) {
+                char head[FOCUS_MAX_LABEL];
+                _snprintf_s(head, sizeof head, _TRUNCATE, "%s. %s%s%s", g_soldier_info,
+                            g_soldier_stats, g_summary_dropship[0] ? ". " : "",
+                            g_summary_dropship);
+                strncpy_s(g_summary_said, sizeof g_summary_said, g_soldier_info, _TRUNCATE);
+                logf_("[%ld] %s %s.%s  SUMMARY soldier \"%s\"\n", n, tag, obj_name,
+                      fn_name, head);
+                if (g_speak && !muted()) speech_say(head);
+            }
             return;
         }
     }
-    // The soldier summary building: its heading is the soldier.
+    // The soldier summary building: its heading is the soldier, when the
+    // header came first (opening it) and is not the soldier already said.
+    // A refresh finds the previous header here -- after Tab, the previous
+    // soldier's -- and leaves it to the header that follows.
     if (strncmp(obj_name, "UISoldierSummary", 16) == 0 &&
-        strcmp(fn_name, "UpdateData") == 0 && g_soldier_info[0] &&
-        GetTickCount64() - g_soldier_info_at < SOLDIER_INFO_FRESH_MS) {
-        char head[FOCUS_MAX_LABEL];
-        _snprintf_s(head, sizeof head, _TRUNCATE, "%s%s%s", g_soldier_info,
-                    g_soldier_stats[0] ? ". " : "", g_soldier_stats);
-        focus_set_title(object, head);
+        strcmp(fn_name, "UpdateData") == 0) {
+        g_summary_obj = object;
+        g_summary_at = GetTickCount64();
+        g_summary_dropship[0] = 0;
+        g_summary_titled = g_soldier_info[0] &&
+                           GetTickCount64() - g_soldier_info_at < SOLDIER_INFO_FRESH_MS &&
+                           strcmp(g_soldier_info, g_summary_said) != 0;
+        if (g_summary_titled) {
+            char head[FOCUS_MAX_LABEL];
+            _snprintf_s(head, sizeof head, _TRUNCATE, "%s%s%s", g_soldier_info,
+                        g_soldier_stats[0] ? ". " : "", g_soldier_stats);
+            focus_set_title(object, head);
+            strncpy_s(g_summary_said, sizeof g_summary_said, g_soldier_info, _TRUNCATE);
+        }
     }
     // EW's "ON MISSION" marker, sent after the menu with one string (or
     // none). On the lone-line path it cleared Abilities, Loadout, Customize
     // and Dismiss and became item 0, so the first said "ON MISSION" and the
     // rest were unresolved. It belongs to the soldier, so it joins the
-    // heading.
+    // heading -- this pass's, or the header's still to come. Alone it said
+    // "ON MISSION. LOADOUT" on the way back from Loadout.
     if (strncmp(obj_name, "UISoldierSummary", 16) == 0 &&
         strcmp(fn_name, "AS_SetInDropship") == 0) {
         const char* label = p->nstrings ? p->strings[0] : "";
-        if (*label) {
+        strncpy_s(g_summary_dropship, sizeof g_summary_dropship, label, _TRUNCATE);
+        if (*label && g_summary_titled) {
             char head[FOCUS_MAX_LABEL];
-            int fresh = g_soldier_info[0] &&
-                        GetTickCount64() - g_soldier_info_at < SOLDIER_INFO_FRESH_MS;
-            _snprintf_s(head, sizeof head, _TRUNCATE, "%s%s%s%s%s",
-                        fresh ? g_soldier_info : "",
-                        fresh && g_soldier_stats[0] ? ". " : "",
-                        fresh ? g_soldier_stats : "",
-                        fresh ? ". " : "", label);
+            _snprintf_s(head, sizeof head, _TRUNCATE, "%s%s%s. %s", g_soldier_info,
+                        g_soldier_stats[0] ? ". " : "", g_soldier_stats, label);
             focus_set_title(object, head);
         }
         logf_("[%ld] %s %s.%s  IN DROPSHIP \"%s\"\n", n, tag, obj_name, fn_name, label);
@@ -2641,6 +2675,14 @@ static int rewrite_cmd(LONG n, void* stack)
     // worth hearing again -- so the quiet window ends here rather than only
     // when it times out.
     g_quiet_until = 0;
+
+    // Leaving the soldier summary: the next visit names its soldier again,
+    // even the same one.
+    if (strncmp(screen, "UISoldierSummary", 16) == 0 &&
+        (cmd == FXS_KEY_ESCAPE || cmd == FXS_BUTTON_B)) {
+        g_summary_said[0] = 0;
+        g_summary_obj = NULL;
+    }
 
     int to = input_remap(screen, cmd);
     if (to) {
