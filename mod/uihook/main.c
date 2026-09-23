@@ -6205,7 +6205,8 @@ static void scan_add_targets(void)
 typedef struct {
     void* actor;
     int   idx;      // its slot in the object table, for objects_still
-    int   kind;     // 0 interactive, 1 ladder, 2 Meld canister, 3 window
+    int   kind;     // 0 interactive, 1 ladder, 2 Meld canister, 3 window,
+                    // 4 a blast (its actor is the action, its owner explodes)
 } WorldActor;
 
 static WorldActor g_wactors[SCAN_MAX];
@@ -6253,6 +6254,75 @@ static void scan_describe_interactive(void* actor)
 
     float world[3];
     if (!actor_location(actor, &g_ilact_loc, world)) return;
+    if (scan_item_at(&it, world, 0.0f)) world_keep(&it);
+}
+
+// ---- what explodes ---------------------------------------------------------
+//
+// A destructible that explodes carries an XComDestructibleActor_Action_Radial
+// Damage in its DamagedEvents or DestroyedEvents: the blast, with its radius
+// (500 units, five tiles, by default) and damage. The events are structs with
+// an editor-only string in them, whose size in a cooked build cannot be taken
+// on trust, so they are not read. The action is walked for instead: it is
+// declared `within XComDestructibleActor`, so its Outer is the actor that
+// blows up. A car with a blast on being damaged and another on being destroyed
+// is one car (g_blast_owner). An owner already destroyed is left out; one
+// under three quarters of its toughness is "damaged", the game's own
+// DestructibleActorDamagedThreshold, which is where a car starts to burn.
+static FieldSlot g_blast_outer, g_blast_radius, g_blast_loc, g_blast_health,
+                 g_blast_tough, g_blast_tough_hp, g_blast_smc, g_blast_mesh;
+static void*     g_blast_owner[SCAN_MAX];
+static int       g_blast_owner_n;
+
+static void scan_describe_explosive(void* action)
+{
+    const void* v;
+    if (!field_ptr(action, "Outer", &g_blast_outer, sizeof(void*), &v)) return;
+    void* owner = *(void* const*)v;
+    if (!owner || !unit_is_live(owner) || !object_is_a(owner, "XComDestructibleActor")) return;
+    for (int i = 0; i < g_blast_owner_n; i++) if (g_blast_owner[i] == owner) return;
+    if (g_blast_owner_n < SCAN_MAX) g_blast_owner[g_blast_owner_n++] = owner;
+
+    int health = -1, most = -1;
+    if (field_ptr(owner, "Health", &g_blast_health, sizeof(int32_t), &v))
+        health = *(const int32_t*)v;
+    if (field_ptr(owner, "Toughness", &g_blast_tough, sizeof(void*), &v) && *(void* const*)v &&
+        field_ptr(*(void* const*)v, "Health", &g_blast_tough_hp, sizeof(int32_t), &v))
+        most = *(const int32_t*)v;
+    if (health == 0) return;                // already blown up
+
+    ScanItem it;
+    memset(&it, 0, sizeof it);
+    it.kind = SCAN_EXPLOSIVES;
+    char mesh[SCAN_NAME] = "";
+    if (field_ptr(owner, "StaticMeshComponent", &g_blast_smc, sizeof(void*), &v) &&
+        *(void* const*)v &&
+        field_ptr(*(void* const*)v, "StaticMesh", &g_blast_mesh, sizeof(void*), &v))
+        object_name(*(void* const*)v, mesh, sizeof mesh);
+    scan_mesh_words(mesh, "Explosive", it.name, sizeof it.name);
+
+    float radius = 0.0f;
+    if (field_ptr(action, "DamageRadius", &g_blast_radius, sizeof(float), &v))
+        radius = *(const float*)v;
+    int tiles = (int)(radius / CURSOR_TILE + 0.5f);
+    int damaged = health > 0 && most > 0 && health < most * 3 / 4;
+    if (tiles > 0)
+        _snprintf_s(it.detail, sizeof it.detail, _TRUNCATE, "blast %d tile%s%s",
+                    tiles, tiles == 1 ? "" : "s", damaged ? ", damaged" : "");
+    else
+        _snprintf_s(it.detail, sizeof it.detail, _TRUNCATE, "explodes%s",
+                    damaged ? ", damaged" : "");
+
+    // A blast on an archetype (ARC_...) has the archetype as its Outer, which
+    // is no car on the map: it stands at the origin, which can fall on a real
+    // tile. Those are left out by name and by place.
+    char owner_name[SCAN_NAME];
+    if (object_name(owner, owner_name, sizeof owner_name) &&
+        (!strncmp(owner_name, "ARC_", 4) || !strncmp(owner_name, "Default__", 9)))
+        return;
+    float world[3];
+    if (!actor_location(owner, &g_blast_loc, world)) return;
+    if (world[0] == 0.0f && world[1] == 0.0f && world[2] == 0.0f) return;
     if (scan_item_at(&it, world, 0.0f)) world_keep(&it);
 }
 
@@ -6313,12 +6383,14 @@ static void scan_describe_meld(void* actor)
 static void scan_world_items(void)
 {
     g_world_n = 0;
+    g_blast_owner_n = 0;
     for (int i = 0; i < g_wactor_n; i++) {
         switch (g_wactors[i].kind) {
         case 0:  scan_describe_interactive(g_wactors[i].actor); break;
         case 1:  scan_describe_ladder(g_wactors[i].actor);      break;
         case 2:  scan_describe_meld(g_wactors[i].actor);        break;
-        default: scan_describe_window(g_wactors[i].actor);      break;
+        case 3:  scan_describe_window(g_wactors[i].actor);      break;
+        default: scan_describe_explosive(g_wactors[i].actor);   break;
         }
     }
 }
@@ -6373,13 +6445,13 @@ static int scan_world_classes(const void** use, int* map)
 {
     static const char* const names[] = {
         "XComInteractiveLevelActor", "XComLadder", "XComMeldContainerActor",
-        "XComDestructibleActor",
+        "XComDestructibleActor", "XComDestructibleActor_Action_RadialDamage",
     };
-    const void* cls[4];
-    objects_classes(names, cls, 4);
+    const void* cls[5];
+    objects_classes(names, cls, 5);
 
     int n = 0;
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 5; i++)
         if (cls[i]) { use[n] = cls[i]; map[n] = i; n++; }
     return n;
 }
@@ -6397,8 +6469,10 @@ static void scan_world_full(const void* const* use, int nclasses)
     unsigned ms;
     int entries;
     objects_last_walk(&ms, &entries);
-    logf_("scan: full object walk %d entries in %u ms, %d actors kept\n",
-          entries, ms, g_wactor_n);
+    int blasts = 0;
+    for (int i = 0; i < g_wactor_n; i++) if (g_wactors[i].kind == 4) blasts++;
+    logf_("scan: full object walk %d entries in %u ms, %d actors kept, %d of them blasts\n",
+          entries, ms, g_wactor_n, blasts);
 }
 
 static void scan_world_catch_up(const void* const* use, int nclasses)
@@ -6440,8 +6514,8 @@ static int world_refresh(void)
         if (!got) return 0;
     }
 
-    const void* use[4];
-    int map[4];
+    const void* use[5];
+    int map[5];
     int nclasses = scan_world_classes(use, map);
     if (!nclasses) return 0;
     g_scan_kinds = map;
@@ -6712,7 +6786,8 @@ static int scan_rebuild(void)
     // Its own category only: "Everything" already has these enemies once,
     // under Enemies.
     if (c == SCAN_TARGETS) scan_add_targets();
-    if (c == SCAN_ALL || c == SCAN_DOORS || c == SCAN_OBJECTIVES || c == SCAN_INTERACT)
+    if (c == SCAN_ALL || c == SCAN_DOORS || c == SCAN_OBJECTIVES || c == SCAN_INTERACT ||
+        c == SCAN_EXPLOSIVES)
         scan_add_world();
     // Three field reads and no walk, so it costs nothing outside a tutorial
     // -- and inside one it is the only objective that matters.

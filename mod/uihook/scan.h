@@ -41,6 +41,7 @@ typedef enum {
     SCAN_SQUAD,
     SCAN_ENEMIES,
     SCAN_TARGETS,           // what the soldier can shoot, best shot first
+    SCAN_EXPLOSIVES,        // cars, tanks, anything that blows up when destroyed
     SCAN_CIVILIANS,
     SCAN_DOORS,
     SCAN_OBJECTIVES,
@@ -72,6 +73,13 @@ typedef struct {
 
 // "Everything", "Squad", "Enemies", ... -- as the category is spoken.
 const char* scan_category_name(ScanCategory c);
+
+// A static mesh's name as words for the scanner: "FlatBed" -> "Flat bed",
+// "SedanA_Damaged" -> "Sedan", "ForkLift" -> "Fork lift". Everything from the
+// first underscore goes, then trailing digits and a single trailing capital
+// (the maps' variant letter), then the words are split where a capital
+// follows a small letter. `fallback` when nothing is left.
+void scan_mesh_words(const char* mesh, const char* fallback, char* out, size_t out_sz);
 
 // ---- building a scan -------------------------------------------------------
 //

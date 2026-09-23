@@ -1953,6 +1953,14 @@ int main(void)
               "a category change with a storey filter");
         scan_floor_text(SCAN_ALL_FLOORS, say, sizeof say);
         check(strcmp(say, "All floors.") == 0, "the filter off");
+        scan_mesh_words("FlatBed", "Explosive", say, sizeof say);
+        check(strcmp(say, "Flat bed") == 0, "a mesh name split into words");
+        scan_mesh_words("SedanA_Damaged", "Explosive", say, sizeof say);
+        check(strcmp(say, "Sedan") == 0, "its variant letter and suffix dropped");
+        scan_mesh_words("GasTank02", "Explosive", say, sizeof say);
+        check(strcmp(say, "Gas tank") == 0, "and its number");
+        scan_mesh_words("", "Explosive", say, sizeof say);
+        check(strcmp(say, "Explosive") == 0, "no mesh: the fallback");
         scan_empty_text(SCAN_CIVILIANS, say, sizeof say);
         check(strcmp(say, "No civilians.") == 0, "an empty category");
         scan_empty_text(SCAN_ALL, say, sizeof say);

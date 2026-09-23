@@ -28,6 +28,7 @@ const char* scan_category_name(ScanCategory c)
     case SCAN_SQUAD:      return "Squad";
     case SCAN_ENEMIES:    return "Enemies";
     case SCAN_TARGETS:    return "Targets";
+    case SCAN_EXPLOSIVES: return "Explosives";
     case SCAN_CIVILIANS:  return "Civilians";
     case SCAN_DOORS:      return "Doors";
     case SCAN_OBJECTIVES: return "Objectives";
@@ -253,6 +254,32 @@ void scan_floor_text(int floor, char* out, size_t out_sz)
         _snprintf_s(out, out_sz, _TRUNCATE, "All floors.");
     else
         _snprintf_s(out, out_sz, _TRUNCATE, "Floor %d.", floor + 1);
+}
+
+void scan_mesh_words(const char* mesh, const char* fallback, char* out, size_t out_sz)
+{
+    if (!out || !out_sz) return;
+    out[0] = 0;
+    char base[SCAN_NAME];
+    size_t n = 0;
+    for (; mesh && mesh[n] && mesh[n] != '_' && n + 1 < sizeof base; n++) base[n] = mesh[n];
+    base[n] = 0;
+    while (n && base[n - 1] >= '0' && base[n - 1] <= '9') base[--n] = 0;
+    if (n >= 2 && base[n - 1] >= 'A' && base[n - 1] <= 'Z' &&
+        base[n - 2] >= 'a' && base[n - 2] <= 'z')
+        base[--n] = 0;
+    if (!n) {
+        _snprintf_s(out, out_sz, _TRUNCATE, "%s", fallback ? fallback : "");
+        return;
+    }
+    size_t used = 0;
+    for (size_t i = 0; i < n && used + 2 < out_sz; i++) {
+        char c = base[i];
+        int cap = c >= 'A' && c <= 'Z';
+        if (i && cap && base[i - 1] >= 'a' && base[i - 1] <= 'z') out[used++] = ' ';
+        out[used++] = (i && cap) ? (char)(c | 0x20) : c;
+    }
+    out[used] = 0;
 }
 
 void scan_empty_text(ScanCategory c, char* out, size_t out_sz)
