@@ -2271,6 +2271,66 @@ int main(void)
         hq_card_clean(card);
         check(strcmp(card, "TACTICAL INFO: Light armor. XCOM soldiers will appreciate it") == 0,
               "card bullets become sentences");
+
+        // The promotion tree, as a Heavy squaddie with Fire Rocket and one
+        // promotion to choose at Corporal.
+        char pr[512];
+        hq_promo_reset("HEAVY ABILITIES");
+        hq_promo_icon(0, 0, "FireRocket", 1);
+        hq_promo_column(0, "SQUADDIE", 0);
+        hq_promo_icon(1, 0, "ShredderRocket", 0);
+        hq_promo_icon(1, 1, "SuppressionIcon", 0);
+        hq_promo_column(1, "CORPORAL", 1);
+        hq_promo_icon(2, 0, "unknown", 0);
+        hq_promo_icon(2, 1, "unknown", 0);
+        hq_promo_column(2, "SERGEANT", 3);
+        hq_promo_select(1, 0);
+        hq_promo_describe("Shredder Rocket", "Targets take more damage.", pr, sizeof pr);
+        check(strcmp(pr, "HEAVY ABILITIES. CORPORAL, choose now. Shredder Rocket, right. "
+                         "Targets take more damage.") == 0, "arrival: title, rank, ability, side");
+        hq_promo_select(1, 1);
+        hq_promo_describe("Suppression", "Pins a target.", pr, sizeof pr);
+        check(strcmp(pr, "Suppression, left. Pins a target.") == 0,
+              "same rank: no title, no rank again");
+        hq_promo_select(0, 0);
+        hq_promo_describe("Fire Rocket", "", pr, sizeof pr);
+        check(strcmp(pr, "SQUADDIE, earned. Fire Rocket, chosen") == 0,
+              "a one-ability rank has no side, and says chosen");
+        hq_promo_select(2, 1);
+        hq_promo_describe("LOCKED", "", pr, sizeof pr);
+        check(strcmp(pr, "SERGEANT, not reached. LOCKED, left") == 0, "a rank not reached");
+
+        hq_abduction_line("PANIC:", 2, "MISSION DIFFICULTY:", "Easy", "REWARD:", "Scientists: 4",
+                          pr, sizeof pr);
+        check(strcmp(pr, "PANIC: 2 of 5. MISSION DIFFICULTY: Easy. REWARD: Scientists: 4") == 0,
+              "an abduction site's details");
+
+        hq_status_resources_clear();
+        hq_status_resource("CREDITS: \xC2\xA7" "265");
+        hq_status_resource("MONTHLY: +\xC2\xA7" "165");
+        hq_status_date("1 March", "2015", "1", "5");
+        void* next_list = (void*)0x10;     // "NEXT EVENT": one item
+        void* all_list = (void*)0x20;      // "UPCOMING EVENTS": all of them
+        hq_status_events_clear(all_list);
+        hq_status_event(all_list, "Council Report", "Days", "31");
+        hq_status_event(all_list, "Weapon Fragments", "Days", "1");
+        hq_status_events_clear(next_list);
+        hq_status_event(next_list, "Weapon Fragments", "Days", "1");
+        check(hq_status_line(pr, sizeof pr) &&
+              strcmp(pr, "1 March 2015, 1:05. CREDITS: 265. MONTHLY: +165. "
+                         "Council Report, 31 days. Weapon Fragments, 1 day") == 0,
+              "the base's status, without the section sign");
+
+        hq_squad_row("SQ. VARGAS", "", "Heavy",
+                     "img:///UILibrary_StrategyImages.InventoryIcons.Inv_FragGrenade", "",
+                     "PROMOTE", pr, sizeof pr);
+        check(strcmp(pr, "Squaddie VARGAS, Heavy, Frag Grenade, PROMOTE") == 0,
+              "a squad slot: rank word, class, item from its image, promotion");
+        hq_squad_row("RK. WHITE", "", "", "img:///x.Inv_AssaultRifleModern", "", "", pr, sizeof pr);
+        check(strcmp(pr, "Rookie WHITE, Assault Rifle Modern") == 0, "a rookie has no class");
+        hq_abduction_line("PANIC:", 1, "MISSION DIFFICULTY:", "Easy", "REWARD:",
+                          "\xC2\xA7" "200", pr, sizeof pr);
+        check(strstr(pr, "REWARD: 200") != NULL, "a money reward without the section sign");
     }
 
     printf("\nspeech debounce\n");

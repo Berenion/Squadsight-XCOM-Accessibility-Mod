@@ -82,6 +82,21 @@ static const Remap g_remaps[] = {
     // OnUnequip) or the letter X (538), and neither arrives from a keyboard
     // in the headquarters. The screen has no case for any digit.
     { "UISoldierLoadout",  FXS_KEY_1,   FXS_BUTTON_X,       "Remove item" },
+
+    // The squad for a mission. Launch is Y (303) on UISquadSelect, clearing a
+    // slot X (302) on its squad list, stripping the squad's gear RB (331);
+    // none of them has a keyboard key in the headquarters, and neither panel
+    // has a case for a digit. Matched on "UISquadSelect" so the keystroke is
+    // rewritten on both panels -- the screen hands it to the list first.
+    // Clear and strip have no description of their own: the tutorial
+    // refuses both (UnloadSoldier and case 331 return while ISCONTROLLED),
+    // and the game then leaves them off its bar -- AS_SetUnitHelp sends no
+    // CLEAR UNIT and "MAKE ITEMS AVAILABLE" is not added. So 0 lists them
+    // only when the bar names them, and they were offered in the tutorial
+    // doing nothing.
+    { "UISquadSelect",     FXS_KEY_1,   FXS_BUTTON_Y,       "Launch mission" },
+    { "UISquadSelect",     FXS_KEY_2,   FXS_BUTTON_X,       NULL },
+    { "UISquadSelect",     FXS_KEY_3,   FXS_BUTTON_RBUMPER, NULL },
 };
 
 int input_remap(const char* screen, int cmd)
@@ -130,6 +145,7 @@ const char* input_cmd_name(int cmd)
         case FXS_BUTTON_START:   return "Start";
         case FXS_BUTTON_LBUMPER: return "LB";
         case FXS_BUTTON_RBUMPER: return "RB";
+        case FXS_KEY_LEFT_SHIFT: return "Left Shift";
         case FXS_KEY_TAB:        return "Tab";
         case FXS_KEY_1:          return "1";
         case FXS_KEY_2:          return "2";

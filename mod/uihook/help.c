@@ -80,6 +80,9 @@ static const struct { const char* icon; int cmd; } g_icons[] = {
     { "Icon_LT_L2",        FXS_BUTTON_LTRIGGER },
     { "Icon_RT_R2",        FXS_BUTTON_RTRIGGER },
     { "Icon_KEY_TAB",      FXS_KEY_TAB         },
+    // Not the game's: main.c gives it to "Previous soldier", whose mouse-mode
+    // bar sends a frame number and no glyph.
+    { "Icon_KEY_LEFT_SHIFT", FXS_KEY_LEFT_SHIFT },
 };
 
 int help_icon_cmd(const char* icon)
@@ -128,6 +131,8 @@ static const char* key_for(const char* screen, int cmd)
         case FXS_KEY_SPACEBAR: return "Space";
         case FXS_BUTTON_B:     return "Escape";
         case FXS_KEY_ESCAPE:   return "Escape";
+        case FXS_KEY_TAB:        return "Tab";
+        case FXS_KEY_LEFT_SHIFT: return "Left Shift";
         default: break;
     }
     return input_cmd_name(input_key_for(screen, cmd));

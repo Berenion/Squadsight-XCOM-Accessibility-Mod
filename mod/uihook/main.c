@@ -353,6 +353,10 @@ static char      g_soldier_stats[128];
 static ULONGLONG g_soldier_info_at;
 #define SOLDIER_INFO_FRESH_MS 3000
 
+// When each layer's HUD last drew. See capture_body.
+static volatile ULONGLONG g_seen_strategy_at;
+static volatile ULONGLONG g_seen_tactical_at;
+
 // The loadout's inventory list and its last selection (loadout_leave_locker).
 static void*     g_loadout_inv;          // the inventory list, as focus keys it
 static int       g_loadout_inv_idx = -1; // its last selection
@@ -1135,6 +1139,46 @@ static void capture_body(const char* tag, LONG n, void* stack)
         prop = next;
     }
 
+    // Which layer the player is in, for keys read off the game's thread:
+    // Delete means the selected soldier in a mission and the base's status
+    // at the base, and the key thread cannot ask the game which it is.
+    if (strncmp(obj_name, "UIStrategyHUD", 13) == 0 ||
+        strncmp(obj_name, "UIStrategyComponent", 19) == 0)
+        g_seen_strategy_at = GetTickCount64();
+    else if (strncmp(obj_name, "UITacticalHUD", 13) == 0)
+        g_seen_tactical_at = GetTickCount64();
+
+    // The base's status panels. See hq.h. Kept for Delete; they were never
+    // said, and a lone resource line risked being spoken as an announcement.
+    // UIStrategyHUD_0 itself, not its panels (UIStrategyHUD_FacilityMenu_0
+    // and the rest share the prefix): the name's next character is a digit.
+    if (strncmp(obj_name, "UIStrategyHUD_", 14) == 0 &&
+        obj_name[14] >= '0' && obj_name[14] <= '9') {
+        if (strcmp(fn_name, "ClearResources") == 0) { hq_status_resources_clear(); return; }
+        if (strcmp(fn_name, "AS_AddResource") == 0 && p->nstrings) {
+            hq_status_resource(p->strings[0]);
+            return;
+        }
+    }
+    if (strncmp(obj_name, "UIStrategyComponent_Clock", 25) == 0 &&
+        strcmp(fn_name, "AS_SetDateTime") == 0) {
+        static FrameArgs a;
+        frame_args(node, locals, &a);
+        hq_status_date(a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
+                       a.ns > 2 ? a.s[2] : "", a.ns > 3 ? a.s[3] : "");
+        return;
+    }
+    if (strncmp(obj_name, "UIStrategyComponent_EventList", 29) == 0) {
+        if (strcmp(fn_name, "UpdateData") == 0) { hq_status_events_clear(object); return; }
+        if (strcmp(fn_name, "AS_AddEvent") == 0) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            hq_status_event(object, a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
+                            a.ns > 2 ? a.s[2] : "");
+            return;
+        }
+    }
+
     // The mission's objectives. See mission.h. Kept, and said once a burst
     // of changes is over (mission_poll).
     if (g_mission_due) mission_poll();
@@ -1355,12 +1399,18 @@ static void capture_body(const char* tag, LONG n, void* stack)
                 }
             }
             // A mouse-mode PC bar's frame number, standing in for a glyph.
-            // Back and Accept keep their keys; the rest are mouse buttons.
+            // Back and Accept keep their keys, and so do the soldier
+            // screens' Previous and Next soldier: Summary, Loadout,
+            // Promotion, Customize and Gene Mods all take `case 514`
+            // (Left Shift) and `case 571` (Tab), in both builds. The rest
+            // are mouse buttons.
             const char* pc = !*icon ? hq_pc_icon_label(label) : NULL;
             if (pc) {
                 label = pc;
                 if (strcmp(pc, "Back") == 0) icon = "Icon_B_CIRCLE";
                 else if (strcmp(pc, "Accept") == 0) icon = "Icon_A_X";
+                else if (strcmp(pc, "Previous soldier") == 0) icon = "Icon_KEY_LEFT_SHIFT";
+                else if (strcmp(pc, "Next soldier") == 0) icon = "Icon_KEY_TAB";
             }
             int slot = (int)p->numbers[0];
             int disabled = p->nbools ? p->bools[0] : 0;
@@ -1699,8 +1749,10 @@ static void capture_body(const char* tag, LONG n, void* stack)
                 char label[FOCUS_MAX_LABEL];
                 if (!focus_label_at(object, i, label, sizeof label)) continue;
                 size_t used = strlen(say);
+                const char* lead = !used ? "Options: "
+                                 : say[used - 1] == '.' ? " Options: " : ". Options: ";
                 _snprintf_s(say + used, sizeof say - used, _TRUNCATE, "%s%s",
-                            i == 0 ? (used ? ". Options: " : "Options: ") : ", ", label);
+                            i == 0 ? lead : ", ", label);
             }
             logf_("[%ld] %s %s.%s  ALERT \"%s\"\n", n, tag, obj_name, fn_name, say);
             speech_cancel_pending();
@@ -1769,6 +1821,170 @@ static void capture_body(const char* tag, LONG n, void* stack)
         }
     }
 
+    // An abduction site's details, after the widget helper has named the
+    // city. See hq_abduction_line. Filed as a slot before, and never said:
+    // the player heard "CHICAGO, UNITED STATES" and nothing of its panic,
+    // difficulty or reward, which are the whole of the choice.
+    if (strncmp(obj_name, "UIMissionControl_AbductionSelection", 35) == 0) {
+        static char s_labels[3][48];
+        static FrameArgs a;
+        if (strcmp(fn_name, "AS_SetHeaderLabels") == 0) {
+            frame_args(node, locals, &a);
+            for (int i = 0; i < 3; i++)
+                strncpy_s(s_labels[i], sizeof s_labels[i], a.ns > i + 1 ? a.s[i + 1] : "",
+                          _TRUNCATE);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetData") == 0 && p->nnumbers) {
+            frame_args(node, locals, &a);
+            char say[512];
+            hq_abduction_line(s_labels[0], (int)p->numbers[0], s_labels[1],
+                              a.ns > 1 ? a.s[1] : "", s_labels[2], a.ns > 2 ? a.s[2] : "",
+                              say, sizeof say);
+            logf_("[%ld] %s %s.%s  SITE \"%s\"\n", n, tag, obj_name, fn_name, say);
+            // With the city the widget helper has just named, as one line
+            // that interrupts: said after it, a quick run of presses queued
+            // a city-and-details pair per press.
+            char city[FOCUS_MAX_LABEL], both[FOCUS_MAX_LABEL + 512];
+            if (g_focus_obj && GetTickCount64() - g_focus_at < LIST_WINDOW_MS &&
+                focus_label_at(g_focus_obj, g_focus_idx, city, sizeof city))
+                _snprintf_s(both, sizeof both, _TRUNCATE, "%s. %s", city, say);
+            else
+                strncpy_s(both, sizeof both, say, _TRUNCATE);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(both);
+            return;
+        }
+    }
+
+    // The loading briefing before a mission (UIBriefing): the operation and
+    // its place, the intel, the objectives as bullets and a tip, then
+    // "LOADING..." and, once the map is in, "READY TO ENGAGE". Several
+    // strings per call, so each went into a list and nothing was said. The
+    // pieces are gathered -- StartBriefing sends them twice, the second time
+    // final -- and said as one event at "LOADING...", which follows the last
+    // of them; "READY TO ENGAGE" is said when it comes, since Enter then
+    // starts the mission.
+    if (strncmp(obj_name, "UIBriefing", 10) == 0) {
+        static char s_where[256], s_intel[1024], s_goals[512], s_tip[512];
+        char* dst = NULL;
+        size_t dst_sz = 0;
+        if (strcmp(fn_name, "AS_SetMissionInfo") == 0) { dst = s_where; dst_sz = sizeof s_where; }
+        else if (strcmp(fn_name, "AS_SetIntel") == 0)  { dst = s_intel; dst_sz = sizeof s_intel; }
+        else if (strcmp(fn_name, "AS_SetObjectives") == 0) { dst = s_goals; dst_sz = sizeof s_goals; }
+        else if (strcmp(fn_name, "AS_SetTip") == 0)    { dst = s_tip;   dst_sz = sizeof s_tip; }
+        if (dst) {
+            const char* parts[8];
+            int np = 0;
+            for (int i = 0; i < p->nstrings && np < 8; i++)
+                if (!looks_like_asset(p->strings[i])) parts[np++] = p->strings[i];
+            focus_join_detail(parts, np, dst, dst_sz);
+            hq_card_clean(dst);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetLoadingMessage") == 0 && p->nstrings) {
+            const char* msg = p->strings[0];
+            char say[2560];
+            if (s_where[0] || s_intel[0]) {
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s%s%s", s_where,
+                            s_intel[0] ? ". " : "", s_intel, s_goals[0] ? ". " : "", s_goals,
+                            s_tip[0] ? ". " : "", s_tip);
+                s_where[0] = s_intel[0] = s_goals[0] = s_tip[0] = 0;
+                logf_("[%ld] %s %s.%s  BRIEFING \"%s\"\n", n, tag, obj_name, fn_name, say);
+                announce(say);
+            }
+            // "LOADING..." is what the briefing is said under; the rest --
+            // "READY TO ENGAGE" -- is news.
+            if (!strstr(msg, "...")) {
+                logf_("[%ld] %s %s.%s  BRIEFING \"%s\"\n", n, tag, obj_name, fn_name, msg);
+                announce(msg);
+            }
+            return;
+        }
+        if (strcmp(fn_name, "StartBriefing") == 0) return;
+    }
+
+    // The squad for a mission. See hq_squad_row. Each slot is either a
+    // soldier (AS_SetUnitInfo with a status) or empty (status -1, then
+    // AS_SetAddUnitText with "ADD UNIT" and a "+", or the Officer Training
+    // School hint for a slot not yet bought). On the general path a soldier
+    // read "RK. WHITE, none" -- rank abbreviated, the class's icon name, and
+    // no gear.
+    if (strncmp(obj_name, "UISquadSelect_SquadList", 23) == 0) {
+        static FrameArgs a;
+        if (strcmp(fn_name, "AS_SetUnitInfo") == 0 && p->nnumbers >= 2) {
+            int idx = (int)p->numbers[0];
+            if ((int)p->numbers[1] == -1) return;          // empty: the add text names it
+            frame_args(node, locals, &a);
+            char row[FOCUS_MAX_LABEL];
+            hq_squad_row(a.s[0], a.ns > 1 ? a.s[1] : "", a.ns > 2 ? a.s[2] : "",
+                         a.ns > 4 ? a.s[4] : "", a.ns > 5 ? a.s[5] : "",
+                         a.ns > 6 ? a.s[6] : "", row, sizeof row);
+            focus_set(object, idx, row);
+            logf_("[%ld] %s %s.%s  SQUAD %d = \"%s\"\n", n, tag, obj_name, fn_name, idx, row);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetAddUnitText") == 0 && p->nnumbers) {
+            frame_args(node, locals, &a);
+            if (!a.ns || !a.s[0][0]) return;               // a soldier's slot
+            char row[FOCUS_MAX_LABEL];
+            int add = a.ns > 1 && strcmp(a.s[1], "+") == 0;
+            _snprintf_s(row, sizeof row, _TRUNCATE, "%s%s", add ? "Empty slot, " : "Locked: ",
+                        a.s[0]);
+            focus_set(object, (int)p->numbers[0], row);
+            logf_("[%ld] %s %s.%s  SQUAD %d = \"%s\"\n", n, tag, obj_name, fn_name,
+                  (int)p->numbers[0], row);
+            return;
+        }
+        // (icon0, EDIT UNIT, icon1, CLEAR UNIT), into 0's list.
+        if (strcmp(fn_name, "AS_SetUnitHelp") == 0) {
+            frame_args(node, locals, &a);
+            if (a.ns > 1 && a.s[1][0]) help_set(object, 0, a.s[1], a.s[0], 0);
+            if (a.ns > 3 && a.s[3][0]) help_set(object, 1, a.s[3], a.s[2], 0);
+            return;
+        }
+    }
+
+    // The promotion tree. See hq.h: the grid is kept from its per-rank
+    // calls, and each move is said from the description that ends it. On
+    // the general path each icon name ("FireRocket", "unknown") was filed as
+    // a label and every move read a rank or an icon name.
+    if (strncmp(obj_name, "UISoldierPromotion", 18) == 0) {
+        static FrameArgs a;
+        if (strcmp(fn_name, "AS_InitializeTree") == 0) {
+            frame_args(node, locals, &a);
+            hq_promo_reset(a.ns ? a.s[0] : "");
+            logf_("[%ld] %s %s.%s  PROMOTION tree \"%s\"\n", n, tag, obj_name, fn_name,
+                  a.ns ? a.s[0] : "");
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetAbilityIcon") == 0 && p->nnumbers >= 2) {
+            frame_args(node, locals, &a);
+            hq_promo_icon((int)p->numbers[0], (int)p->numbers[1], a.ns ? a.s[0] : "",
+                          a.nb && a.b[0]);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetColumnData") == 0 && p->nnumbers >= 2) {
+            frame_args(node, locals, &a);
+            hq_promo_column((int)p->numbers[0], a.ns ? a.s[0] : "", (int)p->numbers[1]);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetSelectedIcon") == 0 && p->nnumbers >= 2) {
+            hq_promo_select((int)p->numbers[0], (int)p->numbers[1]);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetAbilityDescription") == 0) {
+            frame_args(node, locals, &a);
+            char say[1400];
+            hq_promo_describe(a.ns ? a.s[0] : "", a.ns > 1 ? a.s[1] : "", say, sizeof say);
+            logf_("[%ld] %s %s.%s  PROMOTION \"%s\"\n", n, tag, obj_name, fn_name, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetSoldierStats") == 0) return;
+    }
+
     // A facility submenu's line of help for the option under the cursor,
     // sent by RealizeSelected just before it moves the focus:
     //
@@ -1802,7 +2018,7 @@ static void capture_body(const char* tag, LONG n, void* stack)
             else
                 _snprintf_s(who, sizeof who, _TRUNCATE, "%s %s", a.s[7], a.s[0]);
             _snprintf_s(g_soldier_info, sizeof g_soldier_info, _TRUNCATE,
-                        "%s, %s%s. %s. %s. %s", who, a.s[5],
+                        "%s%s%s%s. %s. %s. %s", who, a.s[5][0] ? ", " : "", a.s[5],
                         a.nb && a.b[0] ? ", promotion" : "", a.s[2], a.s[8], a.s[9]);
             g_soldier_stats[0] = 0;
             g_soldier_info_at = GetTickCount64();
@@ -1826,6 +2042,28 @@ static void capture_body(const char* tag, LONG n, void* stack)
         _snprintf_s(head, sizeof head, _TRUNCATE, "%s%s%s", g_soldier_info,
                     g_soldier_stats[0] ? ". " : "", g_soldier_stats);
         focus_set_title(object, head);
+    }
+    // EW's "ON MISSION" marker, sent after the menu with one string (or
+    // none). On the lone-line path it cleared Abilities, Loadout, Customize
+    // and Dismiss and became item 0, so the first said "ON MISSION" and the
+    // rest were unresolved. It belongs to the soldier, so it joins the
+    // heading.
+    if (strncmp(obj_name, "UISoldierSummary", 16) == 0 &&
+        strcmp(fn_name, "AS_SetInDropship") == 0) {
+        const char* label = p->nstrings ? p->strings[0] : "";
+        if (*label) {
+            char head[FOCUS_MAX_LABEL];
+            int fresh = g_soldier_info[0] &&
+                        GetTickCount64() - g_soldier_info_at < SOLDIER_INFO_FRESH_MS;
+            _snprintf_s(head, sizeof head, _TRUNCATE, "%s%s%s%s%s",
+                        fresh ? g_soldier_info : "",
+                        fresh && g_soldier_stats[0] ? ". " : "",
+                        fresh ? g_soldier_stats : "",
+                        fresh ? ". " : "", label);
+            focus_set_title(object, head);
+        }
+        logf_("[%ld] %s %s.%s  IN DROPSHIP \"%s\"\n", n, tag, obj_name, fn_name, label);
+        return;
     }
 
     // A selection sent as text. See string_index.
@@ -6709,12 +6947,39 @@ static int review_poll(void)
 // by rewrite_cmd in a menu and by hook_moviecheck in a mission.
 #define REVIEW_POLL_MS 15
 static volatile LONG g_review_stop;
+// Delete at the base: the date, the resources and what is coming. The same
+// key says everything about the selected soldier in a mission (nav_poll), so
+// it acts here only while the strategy HUD has drawn more recently than the
+// tactical one.
+static int g_status_was;
+static void status_poll(void)
+{
+    int down = (GetAsyncKeyState(VK_DELETE) & 0x8000) != 0;
+    int pressed = down && !g_status_was;
+    g_status_was = down;
+    if (!pressed || history_is_open()) return;
+    if (!g_seen_strategy_at || g_seen_tactical_at > g_seen_strategy_at) return;
+    char say[1024];
+    if (!hq_status_line(say, sizeof say))
+        strncpy_s(say, sizeof say, "Nothing known about the base yet.", _TRUNCATE);
+    logf_("status: \"%s\"\n", say);
+    speech_cancel_pending();
+    if (g_speak) speech_say_now(say);
+}
+
 static DWORD WINAPI review_pump(LPVOID unused)
 {
     (void)unused;
     while (!g_review_stop) {
         Sleep(REVIEW_POLL_MS);
         if (!game_has_focus()) continue;
+        {
+            Fault f;
+            __try { status_poll(); }
+            __except (fault_note(GetExceptionInformation(), &f)) {
+                fault_log("status: poll", &f, NULL);
+            }
+        }
         Fault f;
         __try { review_poll(); }
         __except (fault_note(GetExceptionInformation(), &f)) {
