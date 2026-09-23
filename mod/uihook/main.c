@@ -67,6 +67,7 @@
 #include "sonar.h"
 #include "audio.h"
 #include "learn.h"
+#include "settings.h"
 #include "props.h"
 #include "input.h"
 #include "../../tools/vendor/MinHook/include/MinHook.h"
@@ -889,6 +890,7 @@ static void unit_note(void* flag, const char* name, const char* nick);
 static void unit_flag_drew(void* flag, const char* fn, const Payload* p);
 static void combat_message(LONG n, void* stack, const Payload* p);
 static void announce(const char* text);
+static void announce_as(int setting, const char* text);
 static void soldier_stats_note(LONG n, const Payload* p);
 static int weapon_note(LONG n, const char* obj, const char* fn, const Payload* p);
 static void soldier_selected(void* flag);
@@ -1051,7 +1053,7 @@ static void mission_poll(void)
             if (vis > 0 && g_mission_vis == 0 && !g_mission_due) {
                 mission_list(say, sizeof say);
                 logf_("mission: shown -> \"%s\"\n", say);
-                announce(say);
+                announce_as(SET_OBJECTIVES, say);
             }
             g_mission_vis = vis;
         }
@@ -1065,7 +1067,7 @@ static void mission_poll(void)
     if (!say[0]) return;
     int vis = mission_visible();
     logf_("mission: -> \"%s\"%s\n", say, vis == 0 ? "  (hidden -- not said)" : "");
-    if (vis != 0) announce(say);
+    if (vis != 0) announce_as(SET_OBJECTIVES, say);
 }
 
 static void capture_body(const char* tag, LONG n, void* stack)
@@ -1242,7 +1244,7 @@ static void capture_body(const char* tag, LONG n, void* stack)
         char say[80];
         if (combat_turn(fn_name, strs, ns, say, sizeof say)) {
             logf_("[%ld] %s %s.%s  TURN \"%s\"\n", n, tag, obj_name, fn_name, say);
-            announce(say);
+            announce_as(SET_TURN, say);
         } else {
             logf_("[%ld] %s %s.%s  (turn banner)\n", n, tag, obj_name, fn_name);
         }
@@ -1265,7 +1267,7 @@ static void capture_body(const char* tag, LONG n, void* stack)
             }
         if (title) {
             logf_("[%ld] %s %s.%s  TICKER \"%s\"\n", n, tag, obj_name, fn_name, title);
-            announce(title);
+            announce_as(SET_TICKER, title);
         }
         return;
     }
@@ -1574,7 +1576,7 @@ static void capture_body(const char* tag, LONG n, void* stack)
         strncpy_s(s_said, sizeof s_said, say, _TRUNCATE);
         s_said_at = t;
         logf_("[%ld] %s %s.%s  NARRATIVE \"%s\"\n", n, tag, obj_name, fn_name, say);
-        announce(say);
+        announce_as(obj_name[2] == 'N' ? SET_NARRATIVE : -1, say);
         return;
     }
 
@@ -2768,8 +2770,8 @@ static int       g_walls_down;          // numpad *
 // -- or who is working next to someone -- has no other way out. Like the
 // digits and the radar keys, numpad * is bound to nothing in a mission:
 // DefaultInput.ini mentions Multiply only in the alias lists of edit boxes and
-// sliders.
-static int       g_walls_on = 1;
+// sliders. The switch is the options menu's (settings.h, SET_FIELD), so the
+// choice is saved and either key reaches it.
 static void*     g_nav_cursor;          // the cursor navigation began on
 static void*     g_nav_pawn;            // ChainedPawn when navigation began
 static POINT     g_nav_mouse;           // where the mouse was, to notice it moving
@@ -3609,7 +3611,7 @@ static void unit_flag_drew(void* flag, const char* fn, const Payload* p)
                         hp[0] ? " " : "", hp);
             g_unnamed[0] = 0;
             logf_("combat: the damage was %s's -> \"%s\"\n", u->name, say);
-            announce(say);
+            announce_as(SET_COMBAT, say);
             return;
         }
         if (u == g_hurt && u->hp != was && now - g_hurt_at <= COMBAT_HP_WAIT_MS) {
@@ -3781,13 +3783,13 @@ static void combat_message(LONG n, void* stack, const Payload* p)
         // Only a figure: without one ("Missed!" over nobody known) there is
         // no hit-point drop to wait for.
         if (isdigit((unsigned char)say[0])) {
-            if (g_unnamed[0]) announce(g_unnamed);
+            if (g_unnamed[0]) announce_as(SET_COMBAT, g_unnamed);
             strncpy_s(g_unnamed, sizeof g_unnamed, say, _TRUNCATE);
             g_unnamed_at = now;
             return;
         }
     }
-    announce(say);
+    announce_as(SET_COMBAT, say);
     if (damage && who) {
         g_hurt = who;
         g_hurt_flag = who->flag;
@@ -3803,6 +3805,17 @@ static void announce(const char* text)
     if (!text || !*text) return;
     history_add(text);
     if (g_speak && !muted()) speech_say(text);
+}
+
+// An announcement the options menu can silence (settings.h). Switched off it
+// is still kept for Insert, so nothing is lost -- only not said as it comes.
+// -1 is a line no setting covers.
+static void announce_as(int setting, const char* text)
+{
+    if (!text || !*text) return;
+    if (setting < 0 || settings_get(setting)) { announce(text); return; }
+    history_add(text);
+    logf_("options: %s is off -- kept for Insert, not said\n", settings_name(setting));
 }
 
 // Whether a unit the game was showing is gone: its flag has been destroyed or
@@ -3826,7 +3839,7 @@ static void combat_poll(void)
     ULONGLONG now = GetTickCount64();
     if (g_unnamed[0] && now - g_unnamed_at > COMBAT_NAME_WAIT_MS) {
         logf_("combat: no flag took the damage -- \"%s\" said as it is\n", g_unnamed);
-        announce(g_unnamed);
+        announce_as(SET_COMBAT, g_unnamed);
         g_unnamed[0] = 0;
     }
     if (g_hurt && now - g_hurt_at > COMBAT_HP_WAIT_MS) {
@@ -3845,7 +3858,7 @@ static void combat_poll(void)
             char say[96];
             _snprintf_s(say, sizeof say, _TRUNCATE, "%s down.", name);
             logf_("combat: no redraw after the hit, and %s is gone -> \"%s\"\n", name, say);
-            announce(say);
+            announce_as(SET_COMBAT, say);
         }
     }
 }
@@ -4335,7 +4348,13 @@ static void walls_poll(void)
     int tx, ty;
     float floor;
 
-    if (!g_walls_on || !audio_available()) return;
+    // Switched off from here or from the options menu: quiet once, on the
+    // change, since the menu's thread must not touch the field itself.
+    static int was_on = 1;
+    int on = settings_get(SET_FIELD);
+    if (!on && was_on) walls_quiet();
+    was_on = on;
+    if (!on || !audio_available()) return;
     if (!cursor_grid(&g)) { walls_quiet(); return; }
 
     if (nav_active() && nav_target(&tx, &ty)) {
@@ -4792,8 +4811,10 @@ static void nav_confirm(void)
 // game and there is nothing to read a repeat off; GetAsyncKeyState says only
 // that the key is down now.
 #define NAV_HOLD_MS       260   // held this long before it starts to repeat
-#define NAV_GLIDE_MS      110   // the first repeat
-#define NAV_GLIDE_FAST_MS  50   // where it settles
+// The first repeat and where it settles, per speed in the options menu
+// (settings.h, GLIDE_*). Normal is the speed verified live.
+static const int NAV_GLIDE_MS[3]      = { 170, 110, 75 };
+static const int NAV_GLIDE_FAST_MS[3] = {  85,  50, 30 };
 #define NAV_GLIDE_RAMP     10   // repeats spent getting there
 
 static int       g_glide_digit;      // the direction being held, 0 for none
@@ -4803,9 +4824,10 @@ static ULONGLONG g_numpad_at[10];    // when each key last went down
 
 static int glide_interval(int steps)
 {
-    if (steps >= NAV_GLIDE_RAMP) return NAV_GLIDE_FAST_MS;
-    return NAV_GLIDE_MS +
-           (NAV_GLIDE_FAST_MS - NAV_GLIDE_MS) * steps / NAV_GLIDE_RAMP;
+    int sp = settings_get(SET_GLIDE);
+    if (steps >= NAV_GLIDE_RAMP) return NAV_GLIDE_FAST_MS[sp];
+    return NAV_GLIDE_MS[sp] +
+           (NAV_GLIDE_FAST_MS[sp] - NAV_GLIDE_MS[sp]) * steps / NAV_GLIDE_RAMP;
 }
 
 // What a step arrives to: who is standing on the tile, the floor under it, the
@@ -5846,7 +5868,7 @@ static void sight_poll(void)
     sight_text(ev, m, say, sizeof say);
     if (!say[0]) return;
     logf_("sight: %d in sight -> \"%s\"\n", n, say);
-    announce(say);
+    announce_as(SET_SIGHT, say);
 }
 
 static int soldier_aiming(void)
@@ -7197,10 +7219,9 @@ static void nav_poll(void)
     // feature that has just gone quiet cannot announce itself with a sound.
     int walls = (GetAsyncKeyState(VK_MULTIPLY) & 0x8000) != 0;
     if (walls && !g_walls_down) {
-        g_walls_on = !g_walls_on;
-        if (!g_walls_on) walls_quiet();
-        logf_("walls: field %s\n", g_walls_on ? "on" : "off");
-        speech_say_now(g_walls_on ? "Wall sound on." : "Wall sound off.");
+        int on = settings_step(SET_FIELD, 1);
+        logf_("walls: field %s\n", on ? "on" : "off");
+        speech_say_now(on ? "Wall sound on." : "Wall sound off.");
     }
     g_walls_down = walls;
 
@@ -8442,6 +8463,9 @@ static DWORD WINAPI init(LPVOID param)
         GetModuleFileNameA(NULL, exe, MAX_PATH);
         char* base = strrchr(exe, '\\');
         weapon_costs_load(dir, _stricmp(base ? base + 1 : exe, "XComEW.exe") == 0);
+        char set_why[MAX_PATH + 64];
+        settings_load(dir, set_why, sizeof set_why);
+        logf_("options: %s\n", set_why);
     }
 
     char why[256];
@@ -8463,6 +8487,14 @@ static DWORD WINAPI init(LPVOID param)
     char audio_why[256];
     audio_start(audio_why, sizeof audio_why);
     logf_("audio: %s\n", audio_why);
+    {
+        // The saved level. settings.c names five notches; the mixer is asked
+        // rather than trusted to still have five.
+        int want = settings_get(SET_LEVEL);
+        int got = audio_volume_set(want);
+        logf_("audio: level notch %d of %d%s\n", got + 1, audio_volume_notches(),
+              got != want ? " -- the mixer clamped the saved one" : "");
+    }
 
     // Sound practice, on a thread of its own so that it works at the main menu
     // and not only in a mission. It uses the mixer and speech, so it starts

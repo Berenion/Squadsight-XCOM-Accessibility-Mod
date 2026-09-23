@@ -31,6 +31,7 @@
 #include "tile.h"
 #include "scan.h"
 #include "hq.h"
+#include "settings.h"
 
 static int failures;
 
@@ -2331,6 +2332,48 @@ int main(void)
         hq_abduction_line("PANIC:", 1, "MISSION DIFFICULTY:", "Easy", "REWARD:",
                           "\xC2\xA7" "200", pr, sizeof pr);
         check(strstr(pr, "REWARD: 200") != NULL, "a money reward without the section sign");
+    }
+
+    printf("\noptions\n");
+    {
+        char v[32];
+        settings_reset();
+        check(settings_get(SET_FIELD) == 1 && settings_get(SET_COMBAT) == 1,
+              "switches start on");
+        settings_value_text(SET_LEVEL, v, sizeof v);
+        check(settings_get(SET_LEVEL) == 2 && strcmp(v, "Normal") == 0,
+              "the level starts in the middle, Normal");
+        check(settings_step(SET_COMBAT, -1) == 0 && settings_step(SET_COMBAT, -1) == 1,
+              "a switch flips either way");
+        check(settings_step(SET_GLIDE, 1) == GLIDE_FAST &&
+              settings_step(SET_GLIDE, 1) == GLIDE_FAST,
+              "a scale stops at its top");
+        check(settings_set(SET_LEVEL, -3) == 0, "a scale is clamped at its bottom");
+        settings_value_text(SET_LEVEL, v, sizeof v);
+        check(strcmp(v, "Quietest") == 0, "the level's bottom is named");
+        check(settings_is_switch(SET_FIELD) && !settings_is_switch(SET_GLIDE),
+              "switches and scales told apart");
+
+        // Saved as it changes, and read back.
+        char dir[MAX_PATH], path[MAX_PATH], why[MAX_PATH + 64];
+        GetTempPathA(sizeof dir, dir);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%sxcom_uihook_settings.ini", dir);
+        DeleteFileA(path);
+        settings_load(dir, why, sizeof why);
+        check(strncmp(why, "0 of", 4) == 0, "no file: every default kept");
+        settings_set(SET_SIGHT, 0);
+        settings_set(SET_GLIDE, GLIDE_SLOW);
+        settings_set(SET_LEVEL, 4);
+        settings_reset();
+        settings_load(dir, why, sizeof why);
+        check(settings_get(SET_SIGHT) == 0 && settings_get(SET_GLIDE) == GLIDE_SLOW &&
+              settings_get(SET_LEVEL) == 4 && settings_get(SET_TURN) == 1,
+              "changes saved and read back, the rest default");
+        WritePrivateProfileStringA("settings", "WallLevel", "9", path);
+        settings_load(dir, why, sizeof why);
+        check(settings_get(SET_LEVEL) == 4, "an out-of-range value in the file is clamped");
+        DeleteFileA(path);
+        settings_load(NULL, why, sizeof why);
     }
 
     printf("\nspeech debounce\n");

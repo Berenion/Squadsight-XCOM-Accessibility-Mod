@@ -72,7 +72,8 @@ static void hold(const char* what, const SonarField* f, int ms)
     }
 }
 
-// The practice menu, driven by its own thread exactly as it is in the game.
+// The options menu and practice, driven by their own thread exactly as in the
+// game. settings_load is never called, so nothing chosen here is saved.
 // Nothing here talks to it but the wait: the keys are its own.
 static int practice(void)
 {
@@ -95,7 +96,9 @@ static int practice(void)
     }
     printf("practice: %s\n\n", why);
 
-    printf("  Numpad /      practice on and off\n"
+    printf("  Numpad /      the options menu open and closed\n"
+           "  In the menu: 8 2 move, 4 6 change, 5 opens Sound practice (the last entry)\n\n"
+           "  In practice, / goes back to the menu:\n"
            "  Numpad 8 2 4 6   north, south, west, east, one at a time\n"
            "  Numpad 7 9 1 3   the corners, two at a time\n"
            "  Numpad 5      all four\n"

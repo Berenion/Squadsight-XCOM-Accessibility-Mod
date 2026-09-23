@@ -1,5 +1,18 @@
 #pragma once
 
+// The mod's options menu, and sound practice inside it.
+//
+// Numpad / opens and closes the menu, anywhere: the shell, the base or a
+// mission. It is a list of the settings in settings.h, then Sound practice:
+//
+//   8 2         up and down the list (it wraps; each entry says "n of 10")
+//   4 6         change the entry: a switch flips, a scale steps and stops
+//   5           open Sound practice; on a switch, flip it
+//   /           close
+//
+// Each change is saved at once (settings.h). The wall level is also set from
+// practice, below, and the two are the same setting.
+//
 // Sound practice: the wall field, one direction at a time, on demand.
 //
 // The field says four things at once and says them quietly, which is the right
@@ -9,7 +22,7 @@
 // four can be played on their own, by name, as loudly and as long as the player
 // likes, with nothing else sounding.
 //
-// Numpad / turns practice on and off. While it is on:
+// Opened with 5 on its menu entry. While it is on:
 //
 //   8 2 4 6     one side on its own: north, south, west, east
 //   7 9 1 3     two at once, the corners: NW, NE, SW, SE
@@ -18,7 +31,7 @@
 //   + -         the wall further off and nearer, nought to six tiles
 //   * .         the whole field louder and quieter, and this one sticks:
 //               it is the level the game will use afterwards
-//   /           leave
+//   /           back to the menu
 //
 // Every one of them is spoken as it is chosen, so the sound and its name
 // arrive together. That is the whole design: the player is not being asked to
@@ -27,8 +40,8 @@
 // The level belongs here for a reason. It is the one setting that cannot be
 // chosen in advance, because what it has to compete with is whatever the game is
 // playing -- rain, wind, gunfire -- and practice does not silence any of that.
-// So it is set where it can be heard against the real thing, and it is the only
-// choice in this menu that outlives the menu.
+// So it is set where it can be heard against the real thing, as well as from
+// the menu's list.
 //
 // ---- why this runs on its own thread ---------------------------------------
 //
@@ -41,9 +54,9 @@
 // everywhere, including at the main menu.
 //
 // That thread and the game thread both read the numpad, so only one of them may
-// act on it at a time: while practice is on, the navigation poll stands aside
-// (it checks learn_active and returns), and while it is off, practice watches
-// nothing but numpad /.
+// act on it at a time: while the menu or practice is open, the navigation poll
+// stands aside (it checks learn_active and returns), and while both are closed
+// this thread watches nothing but numpad /.
 //
 // Numpad / is safe to take. Like Multiply, DefaultInput.ini mentions Divide
 // only in the alias lists of edit boxes and numeric edit boxes, so the game
@@ -58,7 +71,7 @@
 // costs the mod nothing else.
 int learn_start(char* why, size_t why_sz);
 
-// Whether practice has the numpad. The navigation poll must check this and do
+// Whether the menu or practice has the numpad. The navigation poll must check this and do
 // nothing while it is set, or a key press would both move the cursor and change
 // the demonstration.
 int learn_active(void);

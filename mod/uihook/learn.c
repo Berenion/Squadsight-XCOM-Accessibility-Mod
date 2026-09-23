@@ -1,6 +1,7 @@
-// Sound practice.  See learn.h.
+// The options menu and sound practice.  See learn.h.
 
 #include "learn.h"
+#include "settings.h"
 #include "sonar.h"
 #include "audio.h"
 #include "speech.h"
@@ -22,7 +23,15 @@
 static HANDLE        g_thread;
 static HANDLE        g_wake;
 static volatile LONG g_quit;
-static volatile LONG g_on;
+static volatile LONG g_mode;    // MODE_*: who has the numpad
+
+enum { MODE_OFF, MODE_MENU, MODE_PRACTICE };
+
+// The menu's entries: every setting, in settings.h's order, then practice.
+#define ITEM_PRACTICE SET_COUNT
+#define ITEMS         (SET_COUNT + 1)
+static int g_item;              // where the menu's cursor is; kept between visits
+static int g_hinted;            // the keys have been named once this run
 
 // What is being demonstrated: a set of directions, and how far off. Touched
 // only by the poll thread.
@@ -142,7 +151,7 @@ static int dirs_for_digit(int digit)
 
 static void enter(void)
 {
-    InterlockedExchange(&g_on, 1);
+    InterlockedExchange(&g_mode, MODE_PRACTICE);
     // Something audible from the first moment, so that "it is on" and "this is
     // what it sounds like" are not two separate discoveries. North on its own,
     // against the tile, is the loudest and plainest thing the field can do.
@@ -152,16 +161,87 @@ static void enter(void)
     speech_say_now(
         "Sound practice. 8, 2, 4 and 6 for one side. 7, 9, 1 and 3 for corners. "
         "5 for all four. 0 for silence. Plus and minus for distance. "
-        "Star and dot for the level. Slash to leave. "
+        "Star and dot for the level. Slash to go back. "
         "North, against you.");
 }
 
+// Practice ends back in the menu, on its own entry, rather than closing
+// everything: it was opened from there.
 static void leave(void)
 {
-    InterlockedExchange(&g_on, 0);
+    InterlockedExchange(&g_mode, MODE_MENU);
     g_dirs = 0;
     audio_field_off();
-    speech_say_now("Sound practice off.");
+}
+
+// ---- the menu ---------------------------------------------------------------
+
+// "Glide speed, Normal. 3 of 10". The position is said every time, because
+// the list wraps and nothing else tells the player they went round.
+static void menu_say_item(const char* before)
+{
+    char say[256], value[32];
+    const char* name = g_item == ITEM_PRACTICE ? "Sound practice" : settings_name(g_item);
+    value[0] = 0;
+    if (g_item != ITEM_PRACTICE) settings_value_text(g_item, value, sizeof value);
+    _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s. %d of %d",
+                before ? before : "", before ? " " : "", name,
+                value[0] ? ", " : "", value, g_item + 1, ITEMS);
+    speech_say_now(say);
+}
+
+static void menu_open(void)
+{
+    InterlockedExchange(&g_mode, MODE_MENU);
+    menu_say_item("Mod options.");
+    if (!g_hinted) {
+        g_hinted = 1;
+        speech_say("8 and 2 to move, 4 and 6 to change, 5 to open, slash to close.");
+    }
+}
+
+static void menu_close(void)
+{
+    InterlockedExchange(&g_mode, MODE_OFF);
+    speech_say_now("Mod options closed.");
+}
+
+// The level goes to the mixer as well as the file: it is the one setting the
+// mixer holds itself.
+static int level_apply(int notch)
+{
+    return audio_volume_set(settings_set(SET_LEVEL, notch));
+}
+
+// 4 and 6 on the entry under the cursor. A switch flips either way; a scale
+// moves and says its end again when pressed past it.
+static void menu_change(int delta)
+{
+    if (g_item == ITEM_PRACTICE) {
+        speech_say_now("5 to open.");
+        return;
+    }
+    if (g_item == SET_LEVEL) level_apply(settings_get(SET_LEVEL) + delta);
+    else settings_step(g_item, delta);
+    char value[32];
+    settings_value_text(g_item, value, sizeof value);
+    speech_say_now(value);
+}
+
+static void menu_poll(const int* hit)
+{
+    // hit[] follows WATCH in poll(): 5 + d is numpad digit d.
+    if (hit[5 + 8] || hit[5 + 2]) {
+        int step = hit[5 + 8] ? -1 : 1;
+        g_item = (g_item + step + ITEMS) % ITEMS;
+        menu_say_item(NULL);
+    } else if (hit[5 + 4] || hit[5 + 6]) {
+        menu_change(hit[5 + 6] ? 1 : -1);
+    } else if (hit[5 + 5]) {
+        if (g_item == ITEM_PRACTICE) enter();
+        else if (settings_is_switch(g_item)) menu_change(1);
+        else menu_say_item(NULL);
+    }
 }
 
 // One pass over the keys. `down` is the previous state, updated in place.
@@ -191,13 +271,15 @@ static void poll(int* down)
     }
 
     // Numpad / first, and on its own: it is the only key that means anything
-    // while practice is off.
+    // while the menu is closed. From practice it goes back to the menu.
     if (hit[0]) {
-        if (g_on) leave();
-        else      enter();
+        if (g_mode == MODE_OFF)       menu_open();
+        else if (g_mode == MODE_MENU) menu_close();
+        else { leave(); menu_say_item("Sound practice off."); }
         return;
     }
-    if (!g_on) return;
+    if (g_mode == MODE_OFF) return;
+    if (g_mode == MODE_MENU) { menu_poll(hit); return; }
 
     char how_far[32];
     if (hit[1] && g_tiles < MAX_TILES) {            // further
@@ -211,7 +293,7 @@ static void poll(int* down)
         say_distance(how_far, sizeof how_far);
         speech_say_now(how_far);
     } else if (hit[3] || hit[4]) {                   // louder, quieter
-        say_volume(audio_volume_set(audio_volume() + (hit[3] ? 1 : -1)));
+        say_volume(level_apply(audio_volume() + (hit[3] ? 1 : -1)));
     } else {
         for (int d = 0; d <= 9; d++) {
             if (!hit[5 + d]) continue;
@@ -241,7 +323,7 @@ static DWORD WINAPI pump(LPVOID arg)
         // all of that, because nothing was switched off -- which is right, since
         // with no focus there is no way to press the key that would switch it
         // back on.
-        if (g_on && has_focus()) push();
+        if (g_mode == MODE_PRACTICE && has_focus()) push();
         WaitForSingleObject(g_wake, POLL_MS);
     }
     return 0;
@@ -274,7 +356,7 @@ int learn_start(char* why, size_t why_sz)
     return 1;
 }
 
-int learn_active(void) { return g_on != 0; }
+int learn_active(void) { return g_mode != MODE_OFF; }
 
 void learn_stop(void)
 {
@@ -286,5 +368,5 @@ void learn_stop(void)
     g_thread = NULL;
     CloseHandle(g_wake);
     g_wake = NULL;
-    InterlockedExchange(&g_on, 0);
+    InterlockedExchange(&g_mode, MODE_OFF);
 }
