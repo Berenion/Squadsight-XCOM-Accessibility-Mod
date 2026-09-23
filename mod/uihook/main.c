@@ -309,6 +309,26 @@ static int is_option_list_fn(const char* fn)
 
 #define LIST_WINDOW_MS 400   // repeats closer than this are one list
 #define SETTLE_MS      250   // how long a lone line waits to see if more follow
+#define TITLE_FRESH_MS 2000  // a heading older than this belongs to no move
+
+// A screen's heading, sent on a call of its own with one string:
+//
+//     UIContinentSelect.AS_SetTitle(string displayString)
+//     UIMissionControl_MissionList.AS_SetTitle(...)
+//
+// Matched on the ending, since the name comes both AS_-prefixed and bare. A
+// title call carrying two strings (UIStrategyComponent_EventList sends
+// "UPCOMING EVENTS" and "DAYS", a heading per column) is not taken here.
+static int is_title_fn(const char* fn)
+{
+    size_t n = strlen(fn);
+    return n >= 8 && strcmp(fn + n - 8, "SetTitle") == 0;
+}
+
+// The last move said, so a panel arriving just after it can follow it.
+static void*     g_focus_obj;
+static ULONGLONG g_focus_at;
+static int       g_focus_had_panel;
 
 // A screen redrawing because of a key the game itself ignored has nothing to
 // say, and saying it anyway talks over the answer.
@@ -503,13 +523,53 @@ typedef struct {
     // only, and a setter passes the same flag both ways.
     int   abools[8];
     int   nabools;
+    // The colour each string was drawn in, 0xRRGGBB, or -1: see font_hue.
+    int   hues[FOCUS_MAX_LABELS];
 } Payload;
 
 static void payload_add_string(Payload* p, const char* s)
 {
     if (p->nstrings >= FOCUS_MAX_LABELS) return;
     strncpy_s(p->strings[p->nstrings], FOCUS_MAX_LABEL, s, _TRUNCATE);
+    p->hues[p->nstrings] = -1;
     p->nstrings++;
+}
+
+// The colour a string's markup gives it, read before strip_markup throws the
+// markup away. For some lists the colour is the only thing that says an item
+// cannot be chosen: UIContinentSelect.UpdateLayout sends every continent with
+// the same iState of 0 and marks a locked one only by drawing it through
+// GetHTMLColoredText(label, 3) -- "<font color='#EE1C25'>ASIA</font>".
+static int font_hue(const char* raw)
+{
+    const char* c = strstr(raw, "color='#");
+    if (!c) return -1;
+    unsigned v = 0;
+    c += 8;
+    for (int i = 0; i < 6; i++, c++) {
+        int d = (*c >= '0' && *c <= '9') ? *c - '0'
+              : (*c >= 'A' && *c <= 'F') ? *c - 'A' + 10
+              : (*c >= 'a' && *c <= 'f') ? *c - 'a' + 10 : -1;
+        if (d < 0) return -1;
+        v = v * 16 + (unsigned)d;
+    }
+    return (int)v;
+}
+
+// Whether a list item drawn in `hue` is one the game will refuse.
+//
+// The continent screen, in the tutorial's campaign: XGContinentUI.
+// UpdateMainMenu enables only North America and Europe when ISCONTROLLED(),
+// giving the other three iState 1, and UpdateLayout draws those in state 3's
+// red. Enter on one runs OnChooseCont, which plays the bad sound and nothing
+// else -- no text anywhere says why. Scoped to the one screen: red elsewhere
+// is a warning, not a lock.
+#define HUE_BAD 0xEE1C25
+static int hue_unavailable(const char* obj_name, const char* fn_name, int hue)
+{
+    return hue == HUE_BAD &&
+           strncmp(obj_name, "UIContinentSelect", 17) == 0 &&
+           strcmp(fn_name, "AS_AddOption") == 0;
 }
 
 static void payload_add_number(Payload* p, float v)
@@ -905,8 +965,12 @@ static void capture_body(const char* tag, LONG n, void* stack)
             } else {
                 char val[MAX_STR];
                 if (read_fstring((const FString*)slot, val, sizeof val)) {
+                    int hue = font_hue(val);
                     strip_markup(val);
-                    if (*val) payload_add_string(p, val);
+                    if (*val) {
+                        payload_add_string(p, val);
+                        p->hues[p->nstrings - 1] = hue;
+                    }
                 } else {
                     read_array((const FArray*)slot, p);
                 }
@@ -1144,6 +1208,57 @@ static void capture_body(const char* tag, LONG n, void* stack)
         }
     }
 
+    // A screen that draws its own two buttons instead of using a help bar:
+    //
+    //     UIContinentSelect.AS_SetAcceptButton(string Text, string iconLabel)
+    //     UIContinentSelect.AS_SetBackButton(string Text, string iconLabel)
+    //
+    // Neither name says "Help", so the buttons never reached the list 0
+    // reads, and on the continent screen -- where Enter picks the base and
+    // nothing asks again -- 0 read the tactical HUD's leftover bar instead.
+    // Filed as the screen's own bar, accept first. An empty back button is
+    // the game switching Escape off (m_bDisableCancel at a campaign's start),
+    // and clearing the slot says exactly that. Exact names: both are declared
+    // on UIContinentSelect alone, in both builds (EU has no back button).
+    if (strcmp(fn_name, "AS_SetAcceptButton") == 0 ||
+        strcmp(fn_name, "AS_SetBackButton") == 0) {
+        const char* label = "";
+        const char* icon  = "";
+        for (int i = 0; i < p->nstrings; i++) {
+            if (strncmp(p->strings[i], "Icon_", 5) == 0) {
+                if (!*icon) icon = p->strings[i];
+            } else if (!*label && !looks_like_asset(p->strings[i])) {
+                label = p->strings[i];
+            }
+        }
+        int slot = fn_name[6] == 'A' ? 0 : 1;
+        help_set(object, slot, label, icon, 0);
+        logf_("[%ld] %s %s.%s  HELP %d = \"%s\" on %s\n", n, tag, obj_name,
+              fn_name, slot, label, *icon ? icon : "(no icon)");
+        return;
+    }
+
+    // The panel beside a list, describing the item under the cursor. See
+    // focus_set_detail. Kept, not filed as a list: it replaced the list it
+    // describes. Said with the item's label when the cursor moves; if it
+    // arrives just after the move was said, it follows on its own.
+    if (strcmp(fn_name, "AS_UpdateInfo") == 0 && p->nstrings) {
+        const char* parts[FOCUS_MAX_LABELS];
+        int np = 0;
+        for (int i = 0; i < p->nstrings && np < FOCUS_MAX_LABELS; i++)
+            if (!looks_like_asset(p->strings[i])) parts[np++] = p->strings[i];
+        char detail[FOCUS_MAX_DETAIL];
+        focus_join_detail(parts, np, detail, sizeof detail);
+        focus_set_detail(object, detail);
+        logf_("[%ld] %s %s.%s  PANEL \"%s\"\n", n, tag, obj_name, fn_name, detail);
+        if (object == g_focus_obj && !g_focus_had_panel && detail[0] &&
+            GetTickCount64() - g_focus_at < LIST_WINDOW_MS) {
+            g_focus_had_panel = 1;
+            if (g_speak && !muted()) speech_say(detail);
+        }
+        return;
+    }
+
     // A modal prompt is composed rather than narrated call by call.  It
     // arrives unasked, takes the keyboard from whatever was underneath it,
     // and has no cursor to move, so nothing will read it a second time --
@@ -1299,9 +1414,11 @@ static void capture_body(const char* tag, LONG n, void* stack)
         // resolution strings and overran this.
         char joined[FOCUS_MAX_LABEL];
         size_t used = 0;
+        int locked = 0;
         joined[0] = 0;
         for (int i = 0; i < p->nstrings; i++) {
             if (looks_like_asset(p->strings[i])) continue;
+            if (hue_unavailable(obj_name, fn_name, p->hues[i])) locked = 1;
             // The frame walk sees every property, so a setter's parameter and
             // the local it was copied into both arrive -- one call, the same
             // text twice, joined into "Mode:, Mode:". Repeats within a single
@@ -1318,6 +1435,13 @@ static void capture_body(const char* tag, LONG n, void* stack)
             memcpy(joined + used, p->strings[i], want);
             used += want;
             joined[used] = 0;
+        }
+        if (locked && joined[0]) {
+            const char* tag = ", unavailable";
+            if (used + strlen(tag) < sizeof joined) {
+                memcpy(joined + used, tag, strlen(tag) + 1);
+                used += strlen(tag);
+            }
         }
         // Drop any lone line still waiting to be spoken before deciding what
         // this call should say; otherwise the cancel below would swallow the
@@ -1346,6 +1470,15 @@ static void capture_body(const char* tag, LONG n, void* stack)
                   changed ? "  (changed)" : "");
             if (changed) speak_slot(object, idx);
         }
+    } else if (p->nstrings == 1 && is_title_fn(fn_name)) {
+        // A heading. Kept apart from the list, which it used to open -- and
+        // opening a list means clearing it, so a screen retitling itself
+        // wiped what it had published. Still said on its own if nothing
+        // follows; a list arriving cancels that, and the heading is then
+        // said before the first item the cursor lands on.
+        if (focus_set_title(object, p->strings[0]) &&
+            !looks_like_asset(p->strings[0]) && !muted())
+            speech_say_after(p->strings[0], SETTLE_MS);
     } else if (p->nstrings) {
         // No index given. Several strings at once is a screen publishing its
         // contents; repeated single-string calls are the same thing spread
@@ -1373,10 +1506,30 @@ static void capture_body(const char* tag, LONG n, void* stack)
         int idx = (int)p->numbers[0];
         char label[FOCUS_MAX_LABEL];
         if (focus_label_at(object, idx, label, sizeof label)) {
+            // The heading, the first time the cursor lands after it, and the
+            // panel describing this item if the move just redrew it.
+            char title[FOCUS_MAX_LABEL], detail[FOCUS_MAX_DETAIL];
+            char say[FOCUS_MAX_LABEL * 2 + FOCUS_MAX_DETAIL];
+            ULONGLONG t_at, d_at;
+            if (!focus_take_title(object, title, sizeof title, &t_at) ||
+                now - t_at > TITLE_FRESH_MS)
+                title[0] = 0;
+            if (!focus_detail(object, detail, sizeof detail, &d_at) ||
+                now - d_at > LIST_WINDOW_MS)
+                detail[0] = 0;
+            focus_compose(title, label, detail, say, sizeof say);
+            g_focus_obj = object;
+            g_focus_at = now;
+            g_focus_had_panel = detail[0] != 0;
             logf_("[%ld] %s %s.%s  FOCUS %d -> \"%s\"\n",
-                  n, tag, obj_name, fn_name, idx, label);
+                  n, tag, obj_name, fn_name, idx, say);
             speech_cancel_pending();
-            if (g_speak && !muted()) speech_say(label);
+            // A panel makes this long, so the next move must cut it off
+            // rather than queue behind it.
+            if (g_speak && !muted()) {
+                if (detail[0]) speech_say_now(say);
+                else speech_say(say);
+            }
         } else {
             logf_("[%ld] %s %s.%s  FOCUS %d unresolved\n",
                   n, tag, obj_name, fn_name, idx);

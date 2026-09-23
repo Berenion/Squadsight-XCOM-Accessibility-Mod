@@ -2156,6 +2156,55 @@ int main(void)
         while (scan_category() != SCAN_ALL) scan_cycle_category(1);
     }
 
+    printf("\nthe panel beside a list (continent select)\n");
+    {
+        void* cont = (void*)0x7000;
+        char say[FOCUS_MAX_LABEL * 2 + FOCUS_MAX_DETAIL];
+        char detail[FOCUS_MAX_DETAIL];
+        char title[FOCUS_MAX_LABEL];
+        ULONGLONG at;
+
+        check(focus_set_title(cont, "IDENTIFY BASE LOCATION:"), "a new heading is armed");
+        focus_set(cont, 0, "NORTH AMERICA");
+        focus_set(cont, 1, "EUROPE");
+        focus_set(cont, 4, "AFRICA");
+
+        // As logged 2026-09-22: the panel's three strings, no index.
+        const char* parts[] = { "CONTINENT BONUS:", "\"AIR AND SPACE\"",
+            "All aircraft and aircraft weapons cost 50% less to purchase, build and maintain." };
+        check(focus_join_detail(parts, 3, detail, sizeof detail) == 3, "three panel parts kept");
+        check(strcmp(detail, "CONTINENT BONUS: \"AIR AND SPACE\". All aircraft and aircraft "
+                             "weapons cost 50% less to purchase, build and maintain.") == 0,
+              "a heading with a colon runs on, the rest are sentences");
+        focus_set_detail(cont, detail);
+
+        check(focus_count(cont) == 5 && focus_label_at(cont, 4, buf, sizeof buf) &&
+              strcmp(buf, "AFRICA") == 0, "the panel leaves the continents alone");
+        check(focus_detail(cont, detail, sizeof detail, &at) && at != 0, "the panel is kept");
+
+        check(focus_take_title(cont, title, sizeof title, &at) &&
+              strcmp(title, "IDENTIFY BASE LOCATION:") == 0, "the heading is taken");
+        check(!focus_take_title(cont, title, sizeof title, &at), "and only once");
+        check(!focus_set_title(cont, "IDENTIFY BASE LOCATION:"),
+              "a re-sent heading is not armed again");
+
+        focus_compose("IDENTIFY BASE LOCATION:", "NORTH AMERICA", detail, say, sizeof say);
+        check(strncmp(say, "IDENTIFY BASE LOCATION: NORTH AMERICA. CONTINENT BONUS: "
+                           "\"AIR AND SPACE\". All aircraft", 76) == 0,
+              "arrival: heading, continent, bonus");
+        focus_compose("", "EUROPE", "CONTINENT BONUS: x", say, sizeof say);
+        check(strcmp(say, "EUROPE. CONTINENT BONUS: x") == 0, "a move: continent, bonus");
+        focus_compose("", "LASER WEAPONS", "LASER WEAPONS. 10 days. Better guns", say, sizeof say);
+        check(strcmp(say, "LASER WEAPONS. 10 days. Better guns") == 0,
+              "a panel opening with the item's name says it once");
+        focus_compose("", "ARMOR", "", say, sizeof say);
+        check(strcmp(say, "ARMOR") == 0, "no panel, just the label");
+
+        const char* dupes[] = { "A", "", "A", "B" };
+        focus_join_detail(dupes, 4, detail, sizeof detail);
+        check(strcmp(detail, "A. B") == 0, "empties and repeats dropped");
+    }
+
     printf("\nspeech debounce\n");
     char dir[MAX_PATH];
     GetModuleFileNameA(NULL, dir, MAX_PATH);

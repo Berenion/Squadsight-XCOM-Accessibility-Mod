@@ -78,3 +78,39 @@ int  focus_label_at(void* obj, int index, char* out, size_t out_sz);
 
 // How many labels are currently held for `obj`.
 int  focus_count(void* obj);
+
+// A screen whose list has a panel beside it, describing the item under the
+// cursor, sends that panel as a call of its own with no index:
+//
+//     UIContinentSelect.AS_UpdateInfo(string continentName, string bonusName,
+//                                     string infoText)
+//
+// (the first argument is misnamed: it carries "CONTINENT BONUS:", and the
+// continent's own name is only ever in the list).  Several strings in one
+// call look exactly like a screen publishing a list, so it used to replace
+// the list -- the five continents became "CONTINENT BONUS:", the bonus and
+// its description, and moving the cursor read those back by position.  The
+// panel is kept beside the list instead, with when it arrived, and said
+// after the label of the item it describes.
+#define FOCUS_MAX_DETAIL 1024
+
+void focus_set_detail(void* obj, const char* text);
+int  focus_detail(void* obj, char* out, size_t out_sz, ULONGLONG* at);
+
+// A screen's heading ("IDENTIFY BASE LOCATION:"), kept to be said before the
+// first item the cursor lands on.  Taken once: every later move is the
+// player walking the list, and hearing the heading again would be noise.
+// Returns 0, and arms nothing, when the object already had this heading: a
+// screen redrawing itself re-sends it.
+int  focus_set_title(void* obj, const char* text);
+int  focus_take_title(void* obj, char* out, size_t out_sz, ULONGLONG* at);
+
+// Joins a panel's strings into one line, dropping empties and repeats (the
+// frame walk sees a parameter and its copy).  Returns how many were kept.
+int  focus_join_detail(const char* const* parts, int n, char* out, size_t out_sz);
+
+// "IDENTIFY BASE LOCATION: EUROPE. CONTINENT BONUS: ...": title, label and
+// panel, any of which may be empty.  A panel that opens with the label (the
+// item's name as its heading) has it dropped, so the name is said once.
+void focus_compose(const char* title, const char* label, const char* detail,
+                   char* out, size_t out_sz);
