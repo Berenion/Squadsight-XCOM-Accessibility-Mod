@@ -4933,9 +4933,44 @@ static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
 // Defined with the pick, below: the interface lent to the mouse's own pick.
 static void nav_forget_interface(void);
 
+// ---- a step up or down a floor ---------------------------------------------
+//
+// "You just stepped from the roof to the ground": a cue when a described step
+// stands on a different floor from the one before -- rising for up, falling
+// for down, once a storey (192 units, the game's floor), so a roof two
+// storeys up is two. Less than a third of a storey (a kerb, a ramp) is
+// nothing. Only a described tile has a settled floor, so a glide is heard
+// where it stops, against where it started; a tile no path reaches has no
+// floor and sounds nothing.
+#define HEIGHT_MIN      64.0f
+#define HEIGHT_STOREY   192.0f
+#define HEIGHT_MAX_CUES 4
+
+static int   g_floor_prev_ok;
+static float g_floor_prev;
+
+static void height_step(int tx, int ty, float floor)
+{
+    if (g_floor_prev_ok && settings_get(SET_STEPS)) {
+        float dz = floor - g_floor_prev;
+        float up = dz < 0.0f ? -dz : dz;
+        if (up >= HEIGHT_MIN) {
+            int n = (int)(up / HEIGHT_STOREY + 0.5f);
+            if (n < 1) n = 1;
+            if (n > HEIGHT_MAX_CUES) n = HEIGHT_MAX_CUES;
+            audio_cue(dz > 0.0f ? HEART_STEP_UP : HEART_STEP_DOWN, n);
+            logf_("height: %d, %d floor %.1f from %.1f -- %d %s\n", tx, ty, floor,
+                  g_floor_prev, n, dz > 0.0f ? "up" : "down");
+        }
+    }
+    g_floor_prev = floor;
+    g_floor_prev_ok = 1;
+}
+
 static void nav_stop(const char* why)
 {
     if (!nav_active()) return;
+    g_floor_prev_ok = 0;
     nav_end();
     nav_forget_interface();
     // The field is not silenced. With no target held it simply goes back to
@@ -5182,6 +5217,9 @@ static void nav_press(int digit, int gliding)
         g_aim_floor = z - NAV_CURSOR_LIFT;
         logf_("nav: begins on %d, %d, ground estimate %.1f%s\n", tx, ty, navh_ground(),
               aiming ? ", aiming" : "");
+        // The soldier's floor, so the first step off a roof is heard too.
+        g_floor_prev = navh_ground();
+        g_floor_prev_ok = 1;
     }
 
     char say[NAV_MAX_TEXT + TILE_MAX_TEXT];
@@ -7392,6 +7430,7 @@ static void nav_poll(void)
                     fault_log("tile: report", &f, NULL);
                     what[0] = 0;
                 }
+                height_step(tx, ty, navh_ground());
                 if (!nav_step_say(what) && g_step_late && what[0] &&
                     tx == g_step_late_at[0] && ty == g_step_late_at[1]) {
                     g_step_late = 0;
@@ -8794,10 +8833,12 @@ static DWORD WINAPI init(LPVOID param)
         learn_apply_levels(levels, sizeof levels);
         logf_("audio: %s\n", levels);
         // The heartbeats ship beside the DLL, as the NVDA client does.
+        // The height cues are made in audio.c and have no file.
         static const char* const BEAT_FILE[HEART_KINDS] = { "ekgbeep.wav", "alienbeat.wav",
                                                              "doorsound.wav",
-                                                             "windowsound.wav" };
+                                                             "windowsound.wav", NULL, NULL };
         for (int kind = 0; kind < HEART_KINDS; kind++) {
+            if (!BEAT_FILE[kind]) continue;
             char beat[MAX_PATH];
             _snprintf_s(beat, sizeof beat, _TRUNCATE, "%s%s", dll_dir, BEAT_FILE[kind]);
             audio_heart_load(kind, beat, audio_why, sizeof audio_why);

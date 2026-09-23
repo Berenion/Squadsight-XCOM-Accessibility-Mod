@@ -62,6 +62,7 @@ enum {
     AUDIO_ALIENS,       // enemy heartbeats
     AUDIO_DOORS,        // doors nearby
     AUDIO_WINDOWS,      // windows nearby
+    AUDIO_STEPS,        // a step up or down a floor
     AUDIO_SOURCES
 };
 
@@ -105,6 +106,11 @@ void audio_hearts_off(void);
 // One beat on a voice of its own, outside the set: the options menu's
 // demonstration.
 void audio_heart_once(const HeartSound* s);
+
+// A short cue, `count` times in quick succession, in the middle, on a voice of
+// its own: the height cues (HEART_STEP_UP, HEART_STEP_DOWN), once a storey. A
+// new cue replaces one still playing.
+void audio_cue(int kind, int count);
 
 // Closes the device. The mod does not call this: the DLL lives as long as the
 // game does, and tearing down an audio thread on process exit is a good way

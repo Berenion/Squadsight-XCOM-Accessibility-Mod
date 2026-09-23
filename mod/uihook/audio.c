@@ -279,8 +279,8 @@ static int              g_stale;        // frames since the field was renewed
 // Per source (AUDIO_*), read once per buffer by the mixer.
 static int              g_notch[AUDIO_SOURCES] = { VOLUME_MIDDLE, VOLUME_MIDDLE,
                                                    VOLUME_MIDDLE, VOLUME_MIDDLE,
-                                                   VOLUME_MIDDLE };
-static float            g_volume[AUDIO_SOURCES] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+                                                   VOLUME_MIDDLE, VOLUME_MIDDLE };
+static float            g_volume[AUDIO_SOURCES] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
 
 // ---- heartbeats ---------------------------------------------------------------
 //
@@ -307,6 +307,8 @@ static float            g_volume[AUDIO_SOURCES] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f
 // mid-beat would smear it -- and the next one picks up any change.
 #define HEARTS_MAX   48               // a squad, the aliens in sight, the doors near
 #define HEART_DEMO   HEARTS_MAX         // the extra voice the menu plays through
+#define HEART_CUE    (HEARTS_MAX + 1)   // and the one the height cues play on
+#define CUE_GAP_S    0.16f              // between two cues of one change
 // Doubled from 0.30 after the first run, where hearts were too quiet even at
 // Loud. A near heart peaks at about half scale at Normal; at Loudest several
 // together reach the limiter, which rounds them off as it does the field.
@@ -350,7 +352,7 @@ static float*     g_heart[HEART_KINDS];     // each kind's sample, mono, -1..1
 static int        g_heart_len[HEART_KINDS];
 // Each kind's level (AUDIO_*): allies and aliens are turned up and down apart.
 static const int  HEART_SOURCE[HEART_KINDS] = { AUDIO_HEARTS, AUDIO_ALIENS, AUDIO_DOORS,
-                                                AUDIO_WINDOWS };
+                                                AUDIO_WINDOWS, AUDIO_STEPS, AUDIO_STEPS };
 // And a trim, so the kinds sit together at the same notch. The alien beat's
 // murmur fills its gaps: 0.353 rms against the old lub-dub's 0.262, so 0.74
 // matched them. The beep carries about the lub-dub's energy, but at 1600 Hz,
@@ -361,8 +363,11 @@ static const int  HEART_SOURCE[HEART_KINDS] = { AUDIO_HEARTS, AUDIO_ALIENS, AUDI
 // its peak reaching far into the limiter. The window is quieter still, 0.056
 // rms -- a soft slide and a 30 ms click -- and is given the same 1.6, as far
 // as the click can go at Normal without the limiter.
-static const float HEART_TRIM[HEART_KINDS] = { 0.5f, 0.74f, 1.6f, 1.6f };
-static HeartVoice g_voice[HEARTS_MAX + 1];
+// The height cues are pure tones like the beep, and a sweep through the
+// ear's most sensitive octave, so they start at the beep's half.
+static const float HEART_TRIM[HEART_KINDS] = { 0.5f, 0.74f, 1.6f, 1.6f, 0.5f, 0.5f };
+static HeartVoice g_voice[HEARTS_MAX + 2];
+static int        g_cue_left;       // cues still to play on HEART_CUE
 static int        g_hearts_stale;   // samples since the set was renewed
 static long long  g_clock;          // samples mixed, for the spacing
 // The rounds of turns, each over a set of kinds: allies two beats each, a
@@ -560,9 +565,9 @@ static void hearts_mix(void)
         g_hearts_stale = HEARTS_STALE_MS * RATE / 1000 + 1;
     }
     for (int k = 0; k < TURN_KINDS; k++) turns_run(&g_turns[k]);
-    for (int i = 0; i <= HEARTS_MAX; i++) {
+    for (int i = 0; i <= HEART_CUE; i++) {
         HeartVoice* v = &g_voice[i];
-        if (!v->live && !v->playing) {
+        if (!v->live && !v->playing && !(i == HEART_CUE && g_cue_left > 0)) {
             if (i < HEARTS_MAX) v->id = NULL;
             continue;
         }
@@ -576,7 +581,13 @@ static void hearts_mix(void)
         float amp = HEART_VOLUME * HEART_TRIM[kind] * g_volume[HEART_SOURCE[kind]];
         int turned = i < HEARTS_MAX && kind_takes_turns(kind);
         for (int f = 0; f < FRAMES; f++) {
-            if (turned) {
+            if (i == HEART_CUE) {
+                if (g_cue_left > 0 && (v->countdown -= 1.0f) <= 0.0f) {
+                    heart_start(v);
+                    g_cue_left--;
+                    v->countdown = CUE_GAP_S * RATE;
+                }
+            } else if (turned) {
                 // An ally beats when hearts_turns says, not on its own clock.
                 if (v->armed && (v->countdown -= 1.0f) <= 0.0f) {
                     v->armed = 0;
@@ -761,6 +772,38 @@ static void bands_init(void)
     g_glide = 1.0f - expf(-1.0f / (GLIDE_SECONDS * RATE));
 }
 
+// The height cues, made rather than recorded: a sine swept an octave in
+// 90 ms, up for a step up and down for a step down, 400-800 Hz -- below the
+// ally beep (1060-2420 Hz) and a clean tone against the field's noise bands.
+// 4 ms in, a cosine fade over the last 30 ms, so a cue repeated once a storey
+// never clicks.
+#define STEP_LO_HZ   400.0f
+#define STEP_HI_HZ   800.0f
+#define STEP_S       0.09f
+
+static void steps_synth(void)
+{
+    int n = (int)(STEP_S * RATE);
+    for (int dir = 0; dir < 2; dir++) {
+        float* s = (float*)malloc(n * sizeof(float));
+        if (!s) return;
+        double phase = 0.0;
+        for (int i = 0; i < n; i++) {
+            float u = (float)i / (float)(n - 1);
+            float f = dir == 0 ? STEP_LO_HZ * powf(2.0f, u) : STEP_HI_HZ * powf(0.5f, u);
+            phase += 2.0 * 3.14159265358979 * f / RATE;
+            float env = 1.0f;
+            float t = (float)i / RATE;
+            if (t < 0.004f) env = t / 0.004f;
+            if (t > STEP_S - 0.03f) env = 0.5f + 0.5f * cosf(PI_F * (t - (STEP_S - 0.03f)) / 0.03f);
+            s[i] = 0.9f * env * (float)sin(phase);
+        }
+        int kind = dir == 0 ? HEART_STEP_UP : HEART_STEP_DOWN;
+        g_heart_len[kind] = n;
+        g_heart[kind] = s;
+    }
+}
+
 int audio_start(char* why, size_t why_sz)
 {
     if (why && why_sz) why[0] = 0;
@@ -798,6 +841,7 @@ int audio_start(char* why, size_t why_sz)
 
     InitializeCriticalSection(&g_lock);
     bands_init();
+    steps_synth();
     for (int b = 0; b < BUFFERS; b++) {
         memset(&g_hdr[b], 0, sizeof g_hdr[b]);
         g_hdr[b].lpData         = (LPSTR)g_buf[b];
@@ -989,6 +1033,21 @@ void audio_hearts_off(void)
     if (!g_ready) return;
     EnterCriticalSection(&g_lock);
     for (int i = 0; i < HEARTS_MAX; i++) g_voice[i].live = 0;
+    LeaveCriticalSection(&g_lock);
+}
+
+void audio_cue(int kind, int count)
+{
+    if (!g_ready || !audio_hearts_available(kind) || count <= 0) return;
+    EnterCriticalSection(&g_lock);
+    HeartVoice* v = &g_voice[HEART_CUE];
+    memset(&v->next, 0, sizeof v->next);
+    v->next.kind = kind;
+    v->next.pitch = 1.0f;
+    v->next.gain = 1.0f;
+    v->live = 0;
+    v->countdown = 1.0f;
+    g_cue_left = count;
     LeaveCriticalSection(&g_lock);
 }
 

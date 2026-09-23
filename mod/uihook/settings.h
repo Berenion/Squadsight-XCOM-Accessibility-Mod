@@ -27,6 +27,8 @@ enum {
     SET_DOOR_LEVEL,     // their loudness, notch 0..4 (AUDIO_DOORS)
     SET_WINDOWS,        // windows within 10 tiles, on or off
     SET_WINDOW_LEVEL,   // their loudness, notch 0..4 (AUDIO_WINDOWS)
+    SET_STEPS,          // a cue on a step up or down a floor, on or off
+    SET_STEP_LEVEL,     // its loudness, notch 0..4 (AUDIO_STEPS)
     SET_GLIDE,          // how fast a held numpad key moves: GLIDE_*
     SET_COMBAT,         // damage, misses and statuses
     SET_SIGHT,          // enemies coming into and going out of sight

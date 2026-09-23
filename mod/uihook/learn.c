@@ -36,7 +36,8 @@ enum { MODE_OFF, MODE_MENU, MODE_PRACTICE, MODE_HEARTS };
 static const int MENU[] = {
     SET_FIELD, SET_WALL_LEVEL, ITEM_PRACTICE,
     SET_HEARTS, SET_HEART_SOLO, SET_HEART_LEVEL, SET_ALIENS, SET_ALIEN_LEVEL,
-    SET_DOORS, SET_DOOR_LEVEL, SET_WINDOWS, SET_WINDOW_LEVEL, ITEM_HEAR,
+    SET_DOORS, SET_DOOR_LEVEL, SET_WINDOWS, SET_WINDOW_LEVEL,
+    SET_STEPS, SET_STEP_LEVEL, ITEM_HEAR,
     SET_GLIDE,
     SET_COMBAT, SET_SIGHT, SET_TURN, SET_TICKER, SET_OBJECTIVES, SET_NARRATIVE,
 };
@@ -49,6 +50,7 @@ static const struct { int setting, source; } LEVELS[] = {
     { SET_ALIEN_LEVEL, AUDIO_ALIENS },
     { SET_DOOR_LEVEL,  AUDIO_DOORS  },
     { SET_WINDOW_LEVEL, AUDIO_WINDOWS },
+    { SET_STEP_LEVEL,  AUDIO_STEPS  },
 };
 #define NLEVELS ((int)(sizeof LEVELS / sizeof LEVELS[0]))
 
@@ -219,6 +221,7 @@ static void leave(void)
 typedef struct {
     const char* say;
     int kind, dx, dy, hp, hp_max, panicked, wounded;
+    int cues;           // a height cue: how many storeys; 0 for everything else
 } HeartDemo;
 
 static const HeartDemo DEMO[] = {
@@ -250,6 +253,10 @@ static const HeartDemo DEMO[] = {
     { "Window, 5 east",             HEART_WINDOW,  5,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
     { "Window, 8 west, 4 south",    HEART_WINDOW, -8,  -4, 6, 6, 0, SOLDIER_WOUND_NONE },
     { "Window, 10 north",           HEART_WINDOW,  0,  10, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Up one floor",               HEART_STEP_UP,   0, 0, 0, 0, 0, 0, 1 },
+    { "Down one floor",             HEART_STEP_DOWN, 0, 0, 0, 0, 0, 0, 1 },
+    { "Down two floors, a roof to the ground", HEART_STEP_DOWN, 0, 0, 0, 0, 0, 0, 2 },
+    { "Up three floors",            HEART_STEP_UP,   0, 0, 0, 0, 0, 0, 3 },
 };
 #define DEMO_ITEMS ((int)(sizeof DEMO / sizeof DEMO[0]))
 // Three of a steady heart -- at the calm pace that is already five seconds
@@ -291,6 +298,11 @@ static void hear_play(void)
     g_demo_sound.kind = d->kind;
     if (!audio_hearts_available(d->kind)) {
         speech_say_now("No sound for it yet.");
+        return;
+    }
+    if (d->cues) {
+        g_demo_left = 0;
+        audio_cue(d->kind, d->cues);
         return;
     }
     g_demo_total = g_demo_sound.irregular > 0.0f ? DEMO_PANIC_BEATS : DEMO_BEATS;
@@ -384,7 +396,7 @@ static void preview(int setting)
     } else if (level_source(setting) >= 0) {
         // Every other source is a kind of heart, in the same order.
         static const int KIND[AUDIO_SOURCES] = {
-            -1, HEART_ALLY, HEART_ALIEN, HEART_DOOR, HEART_WINDOW
+            -1, HEART_ALLY, HEART_ALIEN, HEART_DOOR, HEART_WINDOW, HEART_STEP_DOWN
         };
         HeartSound s;
         heart_sound(0, 0, -1, -1, 0, SOLDIER_WOUND_NONE, &s);

@@ -29,7 +29,10 @@
 // Which recording a heart plays. Doors and windows are not hearts, but they
 // are placed, levelled and taken in turns the same way, so they are kinds here
 // too.
-enum { HEART_ALLY, HEART_ALIEN, HEART_DOOR, HEART_WINDOW, HEART_KINDS };
+// The two height cues are generated, not recorded, and played as a cue
+// (audio_cue) rather than placed.
+enum { HEART_ALLY, HEART_ALIEN, HEART_DOOR, HEART_WINDOW,
+       HEART_STEP_UP, HEART_STEP_DOWN, HEART_KINDS };
 
 typedef struct {
     int   kind;     // HEART_*
