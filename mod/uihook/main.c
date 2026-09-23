@@ -4657,24 +4657,30 @@ static int nav_step_say(const char* body)
 // cannot be asked.
 #define REFUSAL_LAYERS 3
 
-static void tile_refusal_probe(int tx, int ty, float ground, char* say, size_t say_sz)
+// The game's own flags for the layers of a tile's column, `span` either side
+// of the ground's layer: floor, a valid destination, occupied. Returns how
+// many layers were asked, or -1 when the game cannot be asked; `seen` gets
+// them for the log, "7:FD-" per layer, and `mid` the ground's layer.
+#define QUICK_LAYERS 6
+
+static int tile_layers(int tx, int ty, float ground, int span, TileLayerFlags* layers,
+                       int max, char* seen, size_t seen_sz, int* mid_out)
 {
-    _snprintf_s(say, say_sz, _TRUNCATE, "%s", tile_refusal_text(TILE_REFUSE_NO_PATH));
     void* world = cursor_world();
     CursorGrid g;
-    if (!world || !cursor_grid(&g)) return;
+    if (!world || !cursor_grid(&g)) return -1;
     PositionTestFn on_floor = (PositionTestFn)tile_vfn(world, g_tile_slot_onfloor);
     PositionTestFn standable = (PositionTestFn)tile_vfn(world, g_tile_slot_standable);
     TileTestFn occupied = (TileTestFn)tile_vfn(world, g_tile_slot_occupied);
-    if (!on_floor || !standable) return;
+    if (!on_floor || !standable) return -1;
 
     // The layer is found as tile_report finds it, from the floor plus 4.
     int mid = cursor_tile_axis(ground + 4.0f, g.min_z, 64.0f);
-    TileLayerFlags layers[2 * REFUSAL_LAYERS + 1];
-    char seen[(2 * REFUSAL_LAYERS + 1) * 16] = "";
+    if (mid_out) *mid_out = mid;
     size_t used = 0;
     int n = 0;
-    for (int tz = mid - REFUSAL_LAYERS; tz <= mid + REFUSAL_LAYERS; tz++) {
+    seen[0] = 0;
+    for (int tz = mid - span; tz <= mid + span && n < max; tz++) {
         if (tz < 0 || (g.num_z > 0 && tz >= g.num_z)) continue;
         // The middle of the layer: the natives make a tile of it themselves,
         // and the middle is as far as can be from either edge's rounding.
@@ -4689,14 +4695,51 @@ static void tile_refusal_probe(int tx, int ty, float ground, char* say, size_t s
         l->occupied = occupied ? occupied(world, NULL, tx, ty, tz) != 0 : 0;
         l->below = tz < mid;
         // "7:FD-" -- floor, destination, occupied, per layer, for the log.
-        int w = _snprintf_s(seen + used, sizeof seen - used, _TRUNCATE, "%s%d:%c%c%c",
+        int w = _snprintf_s(seen + used, seen_sz - used, _TRUNCATE, "%s%d:%c%c%c",
                             used ? " " : "", tz, l->floor ? 'F' : '-',
                             l->destination ? 'D' : '-', l->occupied ? 'O' : '-');
         if (w > 0) used += (size_t)w;
     }
+    return n;
+}
+
+static void tile_refusal_probe(int tx, int ty, float ground, char* say, size_t say_sz)
+{
+    _snprintf_s(say, say_sz, _TRUNCATE, "%s", tile_refusal_text(TILE_REFUSE_NO_PATH));
+    TileLayerFlags layers[2 * REFUSAL_LAYERS + 1];
+    char seen[(2 * REFUSAL_LAYERS + 1) * 16];
+    int mid;
+    int n = tile_layers(tx, ty, ground, REFUSAL_LAYERS, layers,
+                        2 * REFUSAL_LAYERS + 1, seen, sizeof seen, &mid);
+    if (n < 0) return;
     _snprintf_s(say, say_sz, _TRUNCATE, "%s", tile_refusal_text(tile_refusal(layers, n)));
     logf_("nav: %d, %d refused, ground %.1f (layer %d), layers %s -> \"%s\"\n",
           tx, ty, ground, mid, seen, say);
+}
+
+// A step onto a tile nothing can stand on, decided the moment it lands. The
+// height search needs a path answer per height, and the game gives about ten
+// a second: on 48, 6 (2026-09-23), where every height failed, the search and
+// the probe never finished inside STEP_FALLBACK_MS, and all four visits were
+// 1.5 s of silence and then the bare coordinates, "No path" never said. The
+// tile's flags say the same thing at once: if no layer within QUICK_LAYERS of
+// the ground -- further than the search reaches -- is a place a move may end
+// (IsPositionOnFloorAndValidDestination), no height will build a path. Only
+// then is the step decided here; a tile with any destination on it searches
+// as ever, so nothing reachable is refused early.
+static int tile_blocked_now(int tx, int ty, float ground, char* say, size_t say_sz)
+{
+    TileLayerFlags layers[2 * QUICK_LAYERS + 1];
+    char seen[(2 * QUICK_LAYERS + 1) * 16];
+    int mid;
+    int n = tile_layers(tx, ty, ground, QUICK_LAYERS, layers, 2 * QUICK_LAYERS + 1,
+                        seen, sizeof seen, &mid);
+    if (n <= 0) return 0;
+    for (int i = 0; i < n; i++) if (layers[i].destination) return 0;
+    _snprintf_s(say, say_sz, _TRUNCATE, "%s", tile_refusal_text(tile_refusal(layers, n)));
+    logf_("nav: %d, %d decided on arrival, ground %.1f (layer %d), layers %s -> \"%s\"\n",
+          tx, ty, ground, mid, seen, say);
+    return 1;
 }
 
 // The floor an aim lands on at a tile. The aim is the cursor's feet, and
@@ -5104,6 +5147,23 @@ static void nav_arrive(int tx, int ty)
     // An aim is announced when it lands (nav_aim_landed): no path is built
     // to it, and the soldier's own tile is nothing special to a rocket.
     if (g_nav_aim) return;
+    // Nothing can stand here: say so now rather than after the search times
+    // out. A tile with a unit on it is left to the search, whose verdict
+    // names them.
+    if (!mine && !g_step_nunits) {
+        char why[48];
+        int blocked = 0;
+        __try { blocked = tile_blocked_now(tx, ty, navh_ground(), why, sizeof why); }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("nav: arrival check", &f, NULL);
+            blocked = 0;
+        }
+        if (blocked) {
+            navh_decide_none();
+            nav_step_say(why);
+            return;
+        }
+    }
     // With no verdict coming for the soldier's own tile, its cover is
     // described on a timer instead, once the floor search has settled.
     if (mine) {

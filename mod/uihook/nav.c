@@ -166,6 +166,12 @@ NavVerdict navh_poll(unsigned long long now_ms)
 }
 
 NavHeightPhase navh_phase(void) { return g_phase; }
+
+void navh_decide_none(void)
+{
+    g_phase = NAVH_NONE;
+    g_decided = 1;
+}
 float navh_ground(void) { return g_ground; }
 
 int nav_move(const NavGrid* g, int dx, int dy, char* say, size_t say_sz)

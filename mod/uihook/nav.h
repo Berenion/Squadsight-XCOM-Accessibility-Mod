@@ -117,4 +117,9 @@ NavVerdict navh_path_result(float dest_z, int ok, unsigned long long now_ms);
 NavVerdict navh_poll(unsigned long long now_ms);
 
 NavHeightPhase navh_phase(void);
+
+// The tile is decided from outside the height search: nothing will stand on
+// it, as the game's own tile flags said the moment the step landed. The
+// search stops, and no later path result for it gives a verdict.
+void navh_decide_none(void);
 float navh_ground(void);

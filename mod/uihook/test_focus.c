@@ -1541,6 +1541,19 @@ int main(void)
         check(v == NAVH_NO_PATH && navh_phase() == NAVH_NONE,
               "every probe failing is No path");
 
+        // Decided on arrival from the tile flags: the search stops, and no
+        // path result after it is a second verdict.
+        navh_set_ground(192.0f);
+        navh_begin_tile();
+        navh_decide_none();
+        check(navh_phase() == NAVH_NONE &&
+              navh_path_result(navh_query_z() + NAVH_LIFT, 0, 5000) == NAVH_WAIT &&
+              navh_path_result(navh_query_z() + NAVH_LIFT, 1, 5001) == NAVH_WAIT &&
+              navh_poll(9000) == NAVH_WAIT,
+              "a tile decided on arrival takes no later verdict");
+        navh_begin_tile();
+        check(navh_phase() == NAVH_SEARCH, "and the next tile searches as ever");
+
         // A floor that is found but cannot be reached: No path after the
         // settle time, and not before; a success in between cancels it.
         navh_set_ground(0.0f);
