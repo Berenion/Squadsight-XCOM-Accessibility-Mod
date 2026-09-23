@@ -90,6 +90,13 @@ static int practice(void)
         return 1;
     }
     printf("audio: %s\n", why);
+    static const char* const BEAT_FILE[HEART_KINDS] = { "ekgbeep.wav", "alienbeat.wav" };
+    for (int kind = 0; kind < HEART_KINDS; kind++) {
+        char beat[MAX_PATH];
+        _snprintf_s(beat, sizeof beat, _TRUNCATE, "%s\\%s", dir, BEAT_FILE[kind]);
+        audio_heart_load(kind, beat, why, sizeof why);
+        printf("audio: %s\n", why);
+    }
     if (!learn_start(why, sizeof why)) {
         printf("practice: %s\n", why);
         return 1;
@@ -97,7 +104,7 @@ static int practice(void)
     printf("practice: %s\n\n", why);
 
     printf("  Numpad /      the options menu open and closed\n"
-           "  In the menu: 8 2 move, 4 6 change, 5 opens Sound practice (the last entry)\n\n"
+           "  In the menu: 8 2 move, 4 6 change, 5 opens Sound practice or Hear the heartbeats\n\n"
            "  In practice, / goes back to the menu:\n"
            "  Numpad 8 2 4 6   north, south, west, east, one at a time\n"
            "  Numpad 7 9 1 3   the corners, two at a time\n"
@@ -320,12 +327,15 @@ int main(int argc, char** argv)
     // plugged in.
     printf("the level\n");
     check(audio_volume_notches() == 5, "there are five notches");
-    check(audio_volume() == 2, "and it starts in the middle of them");
-    check(audio_volume_set(4) == 4 && audio_volume() == 4, "a notch sticks");
-    check(audio_volume_set(9) == 4, "past the top it stops at the top");
-    check(audio_volume_set(-3) == 0, "and below the bottom at the bottom");
-    audio_volume_set(2);
-    check(audio_volume() == 2, "and it can be put back");
+    check(audio_volume(AUDIO_WALLS) == 2 && audio_volume(AUDIO_HEARTS) == 2,
+          "and every source starts in the middle of them");
+    check(audio_volume_set(AUDIO_WALLS, 4) == 4 && audio_volume(AUDIO_WALLS) == 4,
+          "a notch sticks");
+    check(audio_volume(AUDIO_HEARTS) == 2, "and moves only its own source");
+    check(audio_volume_set(AUDIO_WALLS, 9) == 4, "past the top it stops at the top");
+    check(audio_volume_set(AUDIO_WALLS, -3) == 0, "and below the bottom at the bottom");
+    audio_volume_set(AUDIO_WALLS, 2);
+    check(audio_volume(AUDIO_WALLS) == 2, "and it can be put back");
 
     printf("steps\n");
     int dx, dy;

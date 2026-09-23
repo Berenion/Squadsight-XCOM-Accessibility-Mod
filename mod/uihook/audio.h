@@ -1,6 +1,7 @@
 #pragma once
 #include <stddef.h>
 #include "sonar.h"
+#include "heart.h"
 
 // A small stereo mixer of generated sound, played through waveOut.
 //
@@ -22,11 +23,12 @@
 //   - the device opened on first use and shut off for good if it fails, so a
 //     machine with no sound card loses the field and nothing else.
 //
-// The voices themselves are not ported: those mods play recorded assets, and
+// The field's voices are not ported: those mods play recorded assets, and
 // these are resonant noise bands generated a buffer at a time, which is why
-// this file carries a filter and a delay line rather than a WAV decoder.
+// this file carries a filter and a delay line. The one recording is the ally
+// heartbeat (below), a single short sample.
 //
-// The voices are permanent. There is no pool and nothing is triggered: four
+// The bands are permanent. There is no pool and nothing is triggered: four
 // bands are open from the moment the device is, and all the mod ever does is
 // tell them how loud to be. Each glides to the level it is given over about a
 // tenth of a second, which is what turns a cursor stepping between tiles into
@@ -52,21 +54,55 @@ int audio_available(void);
 // destroyed nothing runs to switch anything off.
 void audio_field(const SonarField* f);
 
-// How loud the field is, as a notch from 0 to audio_volume_notches() - 1, three
+// The mod's sounds, each with a level of its own. A new sound adds an entry
+// here, a level in settings.h, and a line in learn.c's LEVELS table.
+enum {
+    AUDIO_WALLS,        // the wall field
+    AUDIO_HEARTS,       // ally heartbeats
+    AUDIO_ALIENS,       // enemy heartbeats
+    AUDIO_SOURCES
+};
+
+// How loud a source is, as a notch from 0 to audio_volume_notches() - 1, three
 // decibels apart, starting in the middle. There is no one right loudness: the
 // field has to be heard over whatever the game is playing, and a rainstorm and a
 // quiet interior are a long way apart. The pulse on each band (audio.c) is what
 // makes it audible through weather at all; this is what makes it comfortable.
-// Nothing saves the setting -- the mod has no settings file -- so every run
-// starts in the middle.
-int audio_volume(void);
+// And no one balance between the sources: which matters more is the player's
+// to say. The options menu saves each (settings.h) and learn_apply_levels
+// hands them over at startup.
+int audio_volume(int source);
 int audio_volume_notches(void);
-int audio_volume_set(int notch);        // clamped; returns what it set
+int audio_volume_set(int source, int notch);    // clamped; returns what it set
 
 // Fades the whole field out and leaves it there, until the next audio_field.
 // Used when there is nothing to describe: no cursor, the game in the
 // background, the field switched off.
 void audio_field_off(void);
+
+// ---- ally heartbeats (heart.h) ----------------------------------------------
+//
+// Loads a kind's beat (HEART_*), 16-bit mono PCM at 44.1 kHz. Without it
+// that kind is silent and nothing else changes. `why` receives a line for
+// the log.
+int audio_heart_load(int kind, const char* path, char* why, size_t why_sz);
+
+// Whether a kind will be heard: the device is open and its beat loaded.
+int audio_hearts_available(int kind);
+
+// Who is beating now, and how: `ids` names each ally (any pointer that stays
+// the same for them), so a heart keeps its own time from one call to the
+// next. Like audio_field it must be renewed every frame, and lapses when it
+// is not; one left out stops after the beat already sounding. Allies and
+// enemies go in the one set, each HeartSound naming its kind. At most 32.
+void audio_hearts(const void* const* ids, const HeartSound* s, int n);
+
+// No new beats until the next audio_hearts.
+void audio_hearts_off(void);
+
+// One beat on a voice of its own, outside the set: the options menu's
+// demonstration.
+void audio_heart_once(const HeartSound* s);
 
 // Closes the device. The mod does not call this: the DLL lives as long as the
 // game does, and tearing down an audio thread on process exit is a good way

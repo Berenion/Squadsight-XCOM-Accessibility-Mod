@@ -12,15 +12,20 @@ typedef struct {
     const char* const* words;   // one per value, or NULL for On / Off
 } Spec;
 
-// The level's names, notch 0..4. Five notches three decibels apart around
+// A level's names, notch 0..4. Five notches three decibels apart around
 // the built-in level, which is the middle one (audio.c, VOLUME_NOTCHES and
-// VOLUME_MIDDLE); main.c checks the mixer agrees when it applies the value.
+// VOLUME_MIDDLE); learn_apply_levels checks the mixer agrees.
 static const char* const LEVEL_WORDS[] = { "Quietest", "Quiet", "Normal", "Loud", "Loudest" };
 static const char* const GLIDE_WORDS[] = { "Slow", "Normal", "Fast" };
 
 static const Spec SPEC[SET_COUNT] = {
-    [SET_FIELD]      = { "WallField",    "Wall sound",          0, 1, 1, NULL },
-    [SET_LEVEL]      = { "WallLevel",    "Wall sound level",    0, 4, 2, LEVEL_WORDS },
+    [SET_FIELD]       = { "WallField",    "Wall sound",          0, 1, 1, NULL },
+    [SET_WALL_LEVEL]  = { "WallLevel",    "Wall sound level",    0, 4, 2, LEVEL_WORDS },
+    [SET_HEARTS]      = { "Hearts",       "Ally heartbeats",     0, 1, 1, NULL },
+    [SET_HEART_SOLO]  = { "HeartSolo",    "Follow one soldier",  0, 1, 0, NULL },
+    [SET_HEART_LEVEL] = { "HeartLevel",   "Ally heartbeat level", 0, 4, 2, LEVEL_WORDS },
+    [SET_ALIENS]      = { "Aliens",       "Alien heartbeats",    0, 1, 1, NULL },
+    [SET_ALIEN_LEVEL] = { "AlienLevel",   "Alien heartbeat level", 0, 4, 2, LEVEL_WORDS },
     [SET_GLIDE]      = { "GlideSpeed",   "Glide speed",         0, 2, GLIDE_NORMAL, GLIDE_WORDS },
     [SET_COMBAT]     = { "Combat",       "Combat narration",    0, 1, 1, NULL },
     [SET_SIGHT]      = { "Sightings",    "Enemy sightings",     0, 1, 1, NULL },

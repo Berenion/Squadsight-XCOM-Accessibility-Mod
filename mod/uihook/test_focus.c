@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include <windows.h>
 #include "focus.h"
 #include "dialog.h"
@@ -32,6 +33,7 @@
 #include "scan.h"
 #include "hq.h"
 #include "settings.h"
+#include "heart.h"
 
 static int failures;
 
@@ -2340,16 +2342,16 @@ int main(void)
         settings_reset();
         check(settings_get(SET_FIELD) == 1 && settings_get(SET_COMBAT) == 1,
               "switches start on");
-        settings_value_text(SET_LEVEL, v, sizeof v);
-        check(settings_get(SET_LEVEL) == 2 && strcmp(v, "Normal") == 0,
+        settings_value_text(SET_WALL_LEVEL, v, sizeof v);
+        check(settings_get(SET_WALL_LEVEL) == 2 && strcmp(v, "Normal") == 0,
               "the level starts in the middle, Normal");
         check(settings_step(SET_COMBAT, -1) == 0 && settings_step(SET_COMBAT, -1) == 1,
               "a switch flips either way");
         check(settings_step(SET_GLIDE, 1) == GLIDE_FAST &&
               settings_step(SET_GLIDE, 1) == GLIDE_FAST,
               "a scale stops at its top");
-        check(settings_set(SET_LEVEL, -3) == 0, "a scale is clamped at its bottom");
-        settings_value_text(SET_LEVEL, v, sizeof v);
+        check(settings_set(SET_WALL_LEVEL, -3) == 0, "a scale is clamped at its bottom");
+        settings_value_text(SET_WALL_LEVEL, v, sizeof v);
         check(strcmp(v, "Quietest") == 0, "the level's bottom is named");
         check(settings_is_switch(SET_FIELD) && !settings_is_switch(SET_GLIDE),
               "switches and scales told apart");
@@ -2363,17 +2365,83 @@ int main(void)
         check(strncmp(why, "0 of", 4) == 0, "no file: every default kept");
         settings_set(SET_SIGHT, 0);
         settings_set(SET_GLIDE, GLIDE_SLOW);
-        settings_set(SET_LEVEL, 4);
+        settings_set(SET_WALL_LEVEL, 4);
+        settings_set(SET_HEART_LEVEL, 1);
         settings_reset();
         settings_load(dir, why, sizeof why);
         check(settings_get(SET_SIGHT) == 0 && settings_get(SET_GLIDE) == GLIDE_SLOW &&
-              settings_get(SET_LEVEL) == 4 && settings_get(SET_TURN) == 1,
+              settings_get(SET_WALL_LEVEL) == 4 && settings_get(SET_HEART_LEVEL) == 1 &&
+              settings_get(SET_TURN) == 1,
               "changes saved and read back, the rest default");
         WritePrivateProfileStringA("settings", "WallLevel", "9", path);
         settings_load(dir, why, sizeof why);
-        check(settings_get(SET_LEVEL) == 4, "an out-of-range value in the file is clamped");
+        check(settings_get(SET_WALL_LEVEL) == 4, "an out-of-range value in the file is clamped");
         DeleteFileA(path);
         settings_load(NULL, why, sizeof why);
+    }
+
+    printf("\nally heartbeats\n");
+    {
+        HeartSound h, distant, n, s, hurt, pan, bleed, stable, w5, w10n5;
+        heart_sound(12, 0, 6, 6, 0, SOLDIER_WOUND_NONE, &h);
+        check(h.pan > 0.8f && h.pitch > 0.99f && h.pitch < 1.01f,
+              "12 east: right, the recording's pitch");
+        heart_sound(-4, 0, 6, 6, 0, SOLDIER_WOUND_NONE, &h);
+        check(h.pan < -0.2f && h.pan > -0.4f, "4 west: a little left, not all the way");
+        heart_sound(-5, 0, 6, 6, 0, SOLDIER_WOUND_NONE, &w5);
+        heart_sound(-10, 5, 6, 6, 0, SOLDIER_WOUND_NONE, &w10n5);
+        check(w10n5.pan < w5.pan - 0.3f && w10n5.pitch > w5.pitch * 1.15f,
+              "5 west and 10 west 5 north: further left, and higher");
+        heart_sound(0, 40, 6, 6, 0, SOLDIER_WOUND_NONE, &h);
+        check(h.pitch < 1.52f && h.pitch > 1.5f, "north is capped at 0.6 octave");
+        heart_sound(0, 4, 6, 6, 0, SOLDIER_WOUND_NONE, &n);
+        heart_sound(0, -4, 6, 6, 0, SOLDIER_WOUND_NONE, &s);
+        check(n.pitch > 1.1f && s.pitch < 0.9f && n.pan == 0.0f,
+              "north higher, south lower, both centred");
+        check(n.period > 1.1f && n.period < 1.3f, "calm is 1.2 s again");
+        heart_sound(0, 60, 6, 6, 0, SOLDIER_WOUND_NONE, &distant);
+        check(distant.gain < n.gain && distant.gain >= 0.12f, "far is quieter, never silent");
+        heart_sound(0, 4, 1, 6, 0, SOLDIER_WOUND_NONE, &hurt);
+        check(hurt.period < n.period && n.period > 1.1f, "wounded beats faster");
+        heart_sound(0, 4, 6, 6, 1, SOLDIER_WOUND_NONE, &pan);
+        check(pan.irregular > 0.0f && n.irregular == 0.0f && hurt.irregular == 0.0f,
+              "panicked stumbles; calm and hurt are steady");
+        check(pan.period == n.period, "panic leaves the pace to health");
+        check(heart_gap(&pan, 0) < 0.2f && heart_gap(&pan, 1) == heart_gap(&pan, 0) &&
+              heart_gap(&pan, 2) > pan.period * 0.5f,
+              "panic: a quick triple, then the pause");
+        check(fabsf(heart_gap(&pan, 0) + heart_gap(&pan, 1) + heart_gap(&pan, 2) -
+                    pan.period) < 0.001f,
+              "one triple a period, at the health pace");
+        check(heart_gap(&pan, 3) == heart_gap(&pan, 0) &&
+              heart_gap(&pan, 5) == heart_gap(&pan, 2), "and the figure repeats");
+        check(heart_figure_start(&pan, 0) && !heart_figure_start(&pan, 1) &&
+              !heart_figure_start(&pan, 2) && heart_figure_start(&pan, 3) &&
+              heart_figure_start(&n, 1),
+              "only a triple's first note waits its turn");
+        heart_sound(0, 4, 1, 6, 1, SOLDIER_WOUND_NONE, &h);
+        check(heart_gap(&h, 0) == heart_gap(&pan, 0) && h.period < pan.period,
+              "hurt and panicked: the same triple, sooner");
+        check(heart_gap(&hurt, 0) == hurt.period && heart_gap(&hurt, 1) == hurt.period,
+              "a steady heart's gaps are its period");
+        check(heart_turn_gap(&n, 0) < 0.5f && heart_turn_gap(&n, 0) > 0.35f,
+              "in a turn, a calm heart's two beats sit together");
+        check(heart_turn_gap(&hurt, 0) < heart_turn_gap(&n, 0) * 0.6f,
+              "and a hurt one's closer still");
+        HeartSound st;
+        heart_sound(0, 4, 0, 6, 0, SOLDIER_STABILISED, &st);
+        check(heart_turn_gap(&st, 0) < 1.0f && heart_turn_gap(&pan, 2) < 1.0f,
+              "every gap in a turn is shorter than the pause between soldiers");
+        check(heart_turn_gap(&pan, 0) == heart_gap(&pan, 0),
+              "a panic triple keeps its quick notes in a turn");
+        heart_sound(0, 4, 0, 6, 0, SOLDIER_BLEEDING, &bleed);
+        heart_sound(0, 4, 0, 6, 0, SOLDIER_STABILISED, &stable);
+        check(bleed.period < hurt.period && bleed.gain < n.gain,
+              "bleeding out: fastest, and faint");
+        check(stable.period > n.period && stable.gain < n.gain, "stabilised: slow and faint");
+        heart_sound(0, 0, -1, -1, -1, SOLDIER_WOUND_NONE, &h);
+        check(h.pan == 0.0f && h.gain == 1.0f && h.period > 1.1f,
+              "unknown health on the same tile: centred, calm");
     }
 
     printf("\nspeech debounce\n");

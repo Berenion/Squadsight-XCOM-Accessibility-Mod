@@ -76,6 +76,10 @@ int learn_start(char* why, size_t why_sz);
 // the demonstration.
 int learn_active(void);
 
+// Hands every saved level (settings.h) to the mixer. Call once the mixer is
+// up; `why` receives a line for the log, naming any level the mixer clamped.
+void learn_apply_levels(char* why, size_t why_sz);
+
 // Stops the thread. The mod does not call this -- the DLL lives as long as the
 // game does -- but the offline test does.
 void learn_stop(void);

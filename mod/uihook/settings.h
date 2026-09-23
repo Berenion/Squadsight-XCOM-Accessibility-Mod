@@ -10,14 +10,19 @@
 //
 // This file knows nothing of the game, the mixer or speech, so the offline
 // checks can link it on its own. What a value does is decided where it is
-// read: main.c for the announcements, the field and the glide, learn.c for
-// the level it hands to the mixer.
+// read: main.c for the announcements, the field, the hearts and the glide,
+// learn.c for the levels it hands to the mixer.
 
 #include <stddef.h>
 
 enum {
     SET_FIELD,          // the wall field, on or off (numpad * in a mission)
-    SET_LEVEL,          // the field's loudness, notch 0..4 (audio.h)
+    SET_WALL_LEVEL,     // its loudness, notch 0..4 (audio.h, AUDIO_WALLS)
+    SET_HEARTS,         // ally heartbeats, on or off (heart.h)
+    SET_HEART_SOLO,     // only the soldier last picked in the scanner beats
+    SET_HEART_LEVEL,    // their loudness, notch 0..4 (AUDIO_HEARTS)
+    SET_ALIENS,         // enemy heartbeats, on or off (heart.h)
+    SET_ALIEN_LEVEL,    // their loudness, notch 0..4 (AUDIO_ALIENS)
     SET_GLIDE,          // how fast a held numpad key moves: GLIDE_*
     SET_COMBAT,         // damage, misses and statuses
     SET_SIGHT,          // enemies coming into and going out of sight

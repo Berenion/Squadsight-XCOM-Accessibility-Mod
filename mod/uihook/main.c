@@ -2969,15 +2969,27 @@ static void* tile_vfn(void* obj, int slot)
 // only the hit meant that a class *without* the field paid that walk on every
 // single call, and a mission spent 311 of them on one lookup.
 //
-// Two classes rather than one, because the classes alternate. The unit flags
-// are walked in a row, and the two whose class has no m_kUnit sit among
+// Several classes rather than one, because the classes alternate. The unit
+// flags are walked in a row, and the two whose class has no m_kUnit sit among
 // fourteen whose class does; a single slot would have each of them evicting
-// the other, which is how the miss got expensive in the first place.
+// the other, which is how the miss got expensive in the first place. It was
+// one hit and one miss until the heartbeats: they read every unit's pawn
+// seven times a second, and a squad's pawns are several classes (soldiers,
+// SHIVs, each kind of alien), so `Location` was walked for afresh on nearly
+// every unit -- up to 105 ms of a frame, and 20-30 frames a second against 58
+// with the hearts off (2026-09-23, 21:58 log). Oldest out when full.
+#define FIELD_HITS   8
+#define FIELD_MISSES 4
 typedef struct {
-    void*    on;        // the class the offset was found on
-    void*    absent;    // a class since proved not to have the field at all
-    uint32_t off;
+    void*    on[FIELD_HITS];        // classes the offset was found on
+    uint32_t off[FIELD_HITS];       // and where, for each
+    void*    absent[FIELD_MISSES];  // classes proved not to have the field
+    uint8_t  next_on, next_absent;  // the next entry to replace
 } FieldSlot;
+
+// How many lookups missed every slot and walked the class chain; the perf
+// line reports it, since a walk is the expensive part of a field read.
+static unsigned g_field_walks;
 
 // An object's field, by name: the offset is looked up again whenever the
 // object's class is not one this slot has already decided. An offset belongs
@@ -2989,10 +3001,18 @@ static int field_ptr(void* obj, const char* name, FieldSlot* slot,
     uint32_t class_off = props_class_offset();
     if (!class_off || !readable((const uint8_t*)obj + class_off, sizeof(void*))) return 0;
     void* cls = *(void* const*)((const uint8_t*)obj + class_off);
-    if (!cls || cls == slot->absent) return 0;
-    if (cls != slot->on) {
-        if (!object_field_offset(obj, name, &slot->off)) {
-            slot->absent = cls;
+    if (!cls) return 0;
+    for (int i = 0; i < FIELD_MISSES; i++)
+        if (slot->absent[i] == cls) return 0;
+    int hit = -1;
+    for (int i = 0; i < FIELD_HITS && hit < 0; i++)
+        if (slot->on[i] == cls) hit = i;
+    if (hit < 0) {
+        uint32_t off;
+        g_field_walks++;
+        if (!object_field_offset(obj, name, &off)) {
+            slot->absent[slot->next_absent] = cls;
+            slot->next_absent = (uint8_t)((slot->next_absent + 1) % FIELD_MISSES);
             // A class that cannot be read is not a missing field, it is a
             // dead object, and the answer is to stop holding the pointer --
             // which is whoever is holding it to say, not this. Saying it here
@@ -3003,9 +3023,12 @@ static int field_ptr(void* obj, const char* name, FieldSlot* slot,
                 logf_("field: no %s on %s\n", name, cls_name);
             return 0;
         }
-        slot->on = cls;
+        hit = slot->next_on;
+        slot->on[hit] = cls;
+        slot->off[hit] = off;
+        slot->next_on = (uint8_t)((hit + 1) % FIELD_HITS);
     }
-    const uint8_t* v = (const uint8_t*)obj + slot->off;
+    const uint8_t* v = (const uint8_t*)obj + slot->off[hit];
     if (!readable(v, size)) return 0;
     *out = v;
     return 1;
@@ -4399,6 +4422,141 @@ static void walls_poll(void)
               tx, ty, floor,
               g_walls_field.level[SONAR_W], g_walls_field.level[SONAR_N],
               g_walls_field.level[SONAR_S], g_walls_field.level[SONAR_E]);
+    }
+}
+
+// Heartbeats (heart.h), allies' and seen enemies', heard from the tile the
+// field listens from. The units are read at most every HEARTS_SCAN_MS --
+// unit_seen calls into the game for each flag -- and what was read is handed
+// to the mixer every frame, as the field is, so it lapses when this stops
+// being called.
+#define HEARTS_SCAN_MS 150
+#define HEARTS_MAX     32
+
+// Every 5 s in a mission, a line saying how the frames went: how many there
+// were, and the worst the wall field and the hearts each took of one on the
+// game's thread. Written after a report of slowdowns while moving with beeps
+// on, when the log had no timings to tell a slow frame from a slow decision.
+#define PERF_MS 5000
+
+static void perf_note(long long walls_ticks, long long hearts_ticks)
+{
+    static LARGE_INTEGER freq;
+    static ULONGLONG since;
+    static int frames;
+    static long long walls_max, hearts_max;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    ULONGLONG now = GetTickCount64();
+    if (!since || now - since > 4 * PERF_MS) {
+        // First frame, or back from a stretch with no mission: start afresh
+        // rather than average the gap in.
+        since = now;
+        frames = 0;
+        walls_max = hearts_max = 0;
+    }
+    frames++;
+    if (walls_ticks > walls_max) walls_max = walls_ticks;
+    if (hearts_ticks > hearts_max) hearts_max = hearts_ticks;
+    if (now - since < PERF_MS) return;
+    double ms = 1000.0 / (double)freq.QuadPart;
+    static unsigned walks_seen;
+    logf_("perf: %.1f frames a second; worst frame's walls %.2f ms, hearts %.2f ms; "
+          "%u field walks\n",
+          frames * 1000.0 / (double)(now - since), walls_max * ms, hearts_max * ms,
+          g_field_walks - walks_seen);
+    walks_seen = g_field_walks;
+    since = now;
+    frames = 0;
+    walls_max = hearts_max = 0;
+}
+
+// "Follow one soldier" (settings.h, SET_HEART_SOLO): the soldier last picked
+// in the scanner, by the name the scanner gives them (unit_label). Set by
+// scan_say_selected, on the same thread as hearts_poll.
+static char g_heart_follow[SCAN_NAME];
+
+static void hearts_poll(void)
+{
+    static const void* ids[HEARTS_MAX];
+    static HeartSound  sounds[HEARTS_MAX];
+    static int         n = -1;          // -1: nothing read yet
+    static ULONGLONG   at;
+    static int         was_on = 1;
+    static int         logged = -1;
+
+    int allies = settings_get(SET_HEARTS) && audio_hearts_available(HEART_ALLY);
+    int solo = settings_get(SET_HEART_SOLO);
+    int aliens = settings_get(SET_ALIENS) && audio_hearts_available(HEART_ALIEN);
+    int on = allies || aliens;
+    if (!on && was_on) audio_hearts_off();
+    was_on = on;
+    if (!on) return;
+
+    CursorGrid g;
+    int tx, ty;
+    if (!cursor_grid(&g)) { audio_hearts_off(); return; }
+    if (!(nav_active() && nav_target(&tx, &ty))) {
+        float z;
+        if (!cursor_tile(&g, &tx, &ty, &z)) { audio_hearts_off(); return; }
+    }
+
+    ULONGLONG now = GetTickCount64();
+    if (n >= 0 && now - at < HEARTS_SCAN_MS) {
+        audio_hearts(ids, sounds, n);
+        return;
+    }
+    at = now;
+
+    void* squad = squad_player();
+    if (!squad) { audio_hearts_off(); n = -1; return; }
+    void* soldier = NULL;
+    cursor_chained_pawn(&soldier);
+
+    Fault flt;
+    int k = 0, seen_aliens = 0;
+    static SeenSet sight;
+    __try {
+        // Enemies only while a squad member sees them: the radar's rule.
+        if (aliens) squad_sight(squad, &sight);
+        for (int i = 0; i < g_nunits && k < HEARTS_MAX; i++) {
+            UnitSeen s;
+            if (!unit_seen(&g_units[i], squad, &s)) continue;
+            if (s.friendly ? !allies : (!aliens || !seen_has(&sight, s.unit))) continue;
+            const UnitName* u = &g_units[i];
+            int followed = 0;
+            if (s.friendly && solo) {
+                char label[SCAN_NAME];
+                unit_label(u, label, sizeof label);
+                if (!g_heart_follow[0] || strcmp(label, g_heart_follow) != 0) continue;
+                followed = 1;
+            }
+            int dx = cursor_tile_axis(s.loc[0], g.min_x, CURSOR_TILE) - tx;
+            int dy = cursor_tile_axis(s.loc[1], g.min_y, CURSOR_TILE) - ty;
+            // The selected soldier is where the player is listening from
+            // until they navigate away; then their heart marks the spot.
+            // One the player chose to follow is heard even there.
+            if (s.pawn == soldier && !dx && !dy && !followed) continue;
+            if (s.friendly) {
+                heart_sound(dx, dy, u->hp, u->hp_max, u->panicked, u->wounded, &sounds[k]);
+            } else {
+                heart_sound(dx, dy, u->hp, u->hp_max, 0, SOLDIER_WOUND_NONE, &sounds[k]);
+                sounds[k].kind = HEART_ALIEN;
+                seen_aliens++;
+            }
+            ids[k++] = s.unit;
+        }
+    }
+    __except (fault_note(GetExceptionInformation(), &flt)) {
+        fault_log("hearts: squad", &flt, NULL);
+        audio_hearts_off();
+        n = -1;
+        return;
+    }
+    n = k;
+    audio_hearts(ids, sounds, n);
+    if (n * 100 + seen_aliens != logged) {
+        logged = n * 100 + seen_aliens;
+        logf_("hearts: %d beating, %d of them aliens\n", n, seen_aliens);
     }
 }
 
@@ -6418,6 +6576,13 @@ static void scan_say_selected(void)
                   say, sizeof say);
     logf_("scan: %s  [%d of %d, %s]\n", say, scan_index(), scan_count(),
           scan_category_name(scan_category()));
+    // A soldier picked here is the one "Follow one soldier" hears. Anything
+    // else leaves the one already followed.
+    if (it.kind == SCAN_SQUAD && strcmp(it.name, g_heart_follow) != 0) {
+        strncpy_s(g_heart_follow, sizeof g_heart_follow, it.name, _TRUNCATE);
+        if (settings_get(SET_HEART_SOLO))
+            logf_("hearts: following %s\n", g_heart_follow);
+    }
     speech_say_now(say);
 }
 
@@ -7286,8 +7451,15 @@ static void nav_poll(void)
     scan_poll();
 
     // Last, so a step taken this frame is already in the target the field
-    // listens from.
+    // listens from. The hearts listen from the same tile. Both timed for the
+    // perf line, which is how a slowdown blamed on the sounds is settled.
+    LARGE_INTEGER t0, t1, t2;
+    QueryPerformanceCounter(&t0);
     walls_poll();
+    QueryPerformanceCounter(&t1);
+    hearts_poll();
+    QueryPerformanceCounter(&t2);
+    perf_note(t1.QuadPart - t0.QuadPart, t2.QuadPart - t1.QuadPart);
 }
 
 static void cursor_watch(void* self)
@@ -8488,12 +8660,18 @@ static DWORD WINAPI init(LPVOID param)
     audio_start(audio_why, sizeof audio_why);
     logf_("audio: %s\n", audio_why);
     {
-        // The saved level. settings.c names five notches; the mixer is asked
-        // rather than trusted to still have five.
-        int want = settings_get(SET_LEVEL);
-        int got = audio_volume_set(want);
-        logf_("audio: level notch %d of %d%s\n", got + 1, audio_volume_notches(),
-              got != want ? " -- the mixer clamped the saved one" : "");
+        // The saved levels, one per sound.
+        char levels[256];
+        learn_apply_levels(levels, sizeof levels);
+        logf_("audio: %s\n", levels);
+        // The heartbeats ship beside the DLL, as the NVDA client does.
+        static const char* const BEAT_FILE[HEART_KINDS] = { "ekgbeep.wav", "alienbeat.wav" };
+        for (int kind = 0; kind < HEART_KINDS; kind++) {
+            char beat[MAX_PATH];
+            _snprintf_s(beat, sizeof beat, _TRUNCATE, "%s%s", dll_dir, BEAT_FILE[kind]);
+            audio_heart_load(kind, beat, audio_why, sizeof audio_why);
+            logf_("audio: %s\n", audio_why);
+        }
     }
 
     // Sound practice, on a thread of its own so that it works at the main menu

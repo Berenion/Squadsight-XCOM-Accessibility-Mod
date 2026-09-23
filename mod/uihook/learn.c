@@ -2,6 +2,8 @@
 
 #include "learn.h"
 #include "settings.h"
+#include "heart.h"
+#include "soldier.h"
 #include "sonar.h"
 #include "audio.h"
 #include "speech.h"
@@ -25,11 +27,42 @@ static HANDLE        g_wake;
 static volatile LONG g_quit;
 static volatile LONG g_mode;    // MODE_*: who has the numpad
 
-enum { MODE_OFF, MODE_MENU, MODE_PRACTICE };
+enum { MODE_OFF, MODE_MENU, MODE_PRACTICE, MODE_HEARTS };
 
-// The menu's entries: every setting, in settings.h's order, then practice.
-#define ITEM_PRACTICE SET_COUNT
-#define ITEMS         (SET_COUNT + 1)
+// The menu's entries: the settings, with the two things to listen to beside
+// the sounds they teach. Negative entries are actions, the rest settings.h ids.
+#define ITEM_PRACTICE (-1)
+#define ITEM_HEAR     (-2)
+static const int MENU[] = {
+    SET_FIELD, SET_WALL_LEVEL, ITEM_PRACTICE,
+    SET_HEARTS, SET_HEART_SOLO, SET_HEART_LEVEL, SET_ALIENS, SET_ALIEN_LEVEL, ITEM_HEAR,
+    SET_GLIDE,
+    SET_COMBAT, SET_SIGHT, SET_TURN, SET_TICKER, SET_OBJECTIVES, SET_NARRATIVE,
+};
+
+// Which level setting belongs to which of the mixer's sources. The one place
+// they are paired: startup and the menu both go through it.
+static const struct { int setting, source; } LEVELS[] = {
+    { SET_WALL_LEVEL,  AUDIO_WALLS  },
+    { SET_HEART_LEVEL, AUDIO_HEARTS },
+    { SET_ALIEN_LEVEL, AUDIO_ALIENS },
+};
+#define NLEVELS ((int)(sizeof LEVELS / sizeof LEVELS[0]))
+
+static int level_source(int setting)
+{
+    for (int i = 0; i < NLEVELS; i++)
+        if (LEVELS[i].setting == setting) return LEVELS[i].source;
+    return -1;
+}
+
+// A level just changed from the menu is heard at once, on its own: the wall
+// field against the tile to the north for this long, or one heartbeat. Only
+// in the menu -- in a mission the game's own poll stands aside while it is
+// open, so nothing else is sounding.
+#define PREVIEW_MS 700
+static ULONGLONG g_preview_until;   // the wall preview, renewed by pump
+#define ITEMS ((int)(sizeof MENU / sizeof MENU[0]))
 static int g_item;              // where the menu's cursor is; kept between visits
 static int g_hinted;            // the keys have been named once this run
 
@@ -174,16 +207,118 @@ static void leave(void)
     audio_field_off();
 }
 
+// ---- hear the heartbeats ----------------------------------------------------
+//
+// A list of the ways an ally can sound. 8 and 2 move and name the entry, 5
+// plays it -- a few beats, as often as wanted -- and / goes back to the menu.
+// A move plays nothing: the player chooses when to listen. The beats are
+// timed from the poll, so the keys stay live while they play.
+typedef struct {
+    const char* say;
+    int kind, dx, dy, hp, hp_max, panicked, wounded;
+} HeartDemo;
+
+static const HeartDemo DEMO[] = {
+    // Placed in tiles, as the map puts them: pan by east-west tiles, pitch
+    // by north-south tiles. The states are heard here, on the listening tile.
+    { "Ally, here",                 HEART_ALLY,    0,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Ally, 5 west",               HEART_ALLY,   -5,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Ally, 10 west, 5 north",     HEART_ALLY,  -10,   5, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Ally, 10 east",              HEART_ALLY,   10,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Ally, 10 north",             HEART_ALLY,    0,  10, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Ally, 10 south",             HEART_ALLY,    0, -10, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Ally, far off, 25 north",    HEART_ALLY,    0,  25, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Ally, badly hurt",           HEART_ALLY,    0,   0, 1, 6, 0, SOLDIER_WOUND_NONE },
+    { "Ally, panicked",             HEART_ALLY,    0,   0, 6, 6, 1, SOLDIER_WOUND_NONE },
+    { "Ally, bleeding out",         HEART_ALLY,    0,   0, 0, 6, 0, SOLDIER_BLEEDING   },
+    { "Ally, stabilised",           HEART_ALLY,    0,   0, 0, 6, 0, SOLDIER_STABILISED },
+    { "Alien, here",                HEART_ALIEN,   0,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Alien, 5 west",              HEART_ALIEN,  -5,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Alien, 10 west, 5 north",    HEART_ALIEN, -10,   5, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Alien, 10 east",             HEART_ALIEN,  10,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Alien, 10 north",            HEART_ALIEN,   0,  10, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Alien, 10 south",            HEART_ALIEN,   0, -10, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { "Alien, badly hurt",          HEART_ALIEN,   0,   0, 1, 6, 0, SOLDIER_WOUND_NONE },
+};
+#define DEMO_ITEMS ((int)(sizeof DEMO / sizeof DEMO[0]))
+// Three of a steady heart -- at the calm pace that is already five seconds
+// -- and six of a panicked one: two triples, so the figure is heard repeating.
+#define DEMO_BEATS       3
+#define DEMO_PANIC_BEATS 6
+static int        g_demo_total;     // beats this play, for heart_gap's count
+
+static int        g_demo_item;      // kept between visits, like the menu's
+static int        g_demo_left;      // beats still to play
+static ULONGLONG  g_demo_due;
+static HeartSound g_demo_sound;
+static int        g_demo_hinted;
+
+static void hear_say(const char* before)
+{
+    char say[128];
+    _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s. %d of %d",
+                before ? before : "", before ? " " : "", DEMO[g_demo_item].say,
+                g_demo_item + 1, DEMO_ITEMS);
+    speech_say_now(say);
+}
+
+static void hear_open(void)
+{
+    InterlockedExchange(&g_mode, MODE_HEARTS);
+    g_demo_left = 0;
+    hear_say("Heartbeats.");
+    if (!g_demo_hinted) {
+        g_demo_hinted = 1;
+        speech_say("8 and 2 to choose, 5 to play, slash to go back.");
+    }
+}
+
+static void hear_play(void)
+{
+    const HeartDemo* d = &DEMO[g_demo_item];
+    heart_sound(d->dx, d->dy, d->hp, d->hp_max, d->panicked, d->wounded, &g_demo_sound);
+    g_demo_sound.kind = d->kind;
+    if (!audio_hearts_available(d->kind)) {
+        speech_say_now("No sound for it yet.");
+        return;
+    }
+    g_demo_total = g_demo_sound.irregular > 0.0f ? DEMO_PANIC_BEATS : DEMO_BEATS;
+    g_demo_left = g_demo_total;
+    g_demo_due = GetTickCount64();
+}
+
+static void hear_poll(const int* hit)
+{
+    // hit[] follows WATCH in poll(): 5 + d is numpad digit d.
+    if (hit[5 + 8] || hit[5 + 2]) {
+        g_demo_left = 0;
+        g_demo_item = (g_demo_item + (hit[5 + 8] ? -1 : 1) + DEMO_ITEMS) % DEMO_ITEMS;
+        hear_say(NULL);
+    } else if (hit[5 + 5]) {
+        hear_play();
+    }
+    if (g_demo_left > 0 && GetTickCount64() >= g_demo_due) {
+        int beat = g_demo_total - g_demo_left;
+        audio_heart_once(&g_demo_sound);
+        g_demo_left--;
+        g_demo_due = GetTickCount64() +
+                     (ULONGLONG)(heart_gap(&g_demo_sound, beat) * 1000.0f);
+    }
+}
+
 // ---- the menu ---------------------------------------------------------------
 
-// "Glide speed, Normal. 3 of 10". The position is said every time, because
+// "Glide speed, Normal. 3 of 12". The position is said every time, because
 // the list wraps and nothing else tells the player they went round.
 static void menu_say_item(const char* before)
 {
     char say[256], value[32];
-    const char* name = g_item == ITEM_PRACTICE ? "Sound practice" : settings_name(g_item);
+    int id = MENU[g_item];
+    const char* name = id == ITEM_PRACTICE ? "Sound practice"
+                     : id == ITEM_HEAR     ? "Hear the heartbeats"
+                     : settings_name(id);
     value[0] = 0;
-    if (g_item != ITEM_PRACTICE) settings_value_text(g_item, value, sizeof value);
+    if (id >= 0) settings_value_text(id, value, sizeof value);
     _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s. %d of %d",
                 before ? before : "", before ? " " : "", name,
                 value[0] ? ", " : "", value, g_item + 1, ITEMS);
@@ -208,24 +343,63 @@ static void menu_close(void)
 
 // The level goes to the mixer as well as the file: it is the one setting the
 // mixer holds itself.
-static int level_apply(int notch)
+static int level_apply(int setting, int notch)
 {
-    return audio_volume_set(settings_set(SET_LEVEL, notch));
+    return audio_volume_set(level_source(setting), settings_set(setting, notch));
+}
+
+void learn_apply_levels(char* why, size_t why_sz)
+{
+    size_t used = 0;
+    if (why && why_sz) why[0] = 0;
+    for (int i = 0; i < NLEVELS; i++) {
+        int want = settings_get(LEVELS[i].setting);
+        int got = audio_volume_set(LEVELS[i].source, want);
+        if (why)
+            used += _snprintf_s(why + used, why_sz - used, _TRUNCATE, "%s%s notch %d of %d%s",
+                                i ? ", " : "", settings_name(LEVELS[i].setting), got + 1,
+                                audio_volume_notches(),
+                                got != want ? " (clamped by the mixer)" : "");
+        if (used >= why_sz) used = why_sz - 1;
+    }
+}
+
+static void preview(int setting)
+{
+    if (level_source(setting) == AUDIO_WALLS) {
+        g_dirs = BIT(SONAR_N);
+        g_tiles = 0;
+        g_preview_until = GetTickCount64() + PREVIEW_MS;
+    } else if (level_source(setting) == AUDIO_HEARTS ||
+               level_source(setting) == AUDIO_ALIENS) {
+        HeartSound s;
+        heart_sound(0, 0, -1, -1, 0, SOLDIER_WOUND_NONE, &s);
+        s.kind = level_source(setting) == AUDIO_ALIENS ? HEART_ALIEN : HEART_ALLY;
+        if (audio_hearts_available(s.kind)) audio_heart_once(&s);
+        else speech_say("No sound for it yet.");
+    }
 }
 
 // 4 and 6 on the entry under the cursor. A switch flips either way; a scale
 // moves and says its end again when pressed past it.
 static void menu_change(int delta)
 {
-    if (g_item == ITEM_PRACTICE) {
+    int id = MENU[g_item];
+    if (id < 0) {
         speech_say_now("5 to open.");
         return;
     }
-    if (g_item == SET_LEVEL) level_apply(settings_get(SET_LEVEL) + delta);
-    else settings_step(g_item, delta);
+    int level = level_source(id) >= 0;
+    if (level) level_apply(id, settings_get(id) + delta);
+    else settings_step(id, delta);
     char value[32];
-    settings_value_text(g_item, value, sizeof value);
+    settings_value_text(id, value, sizeof value);
     speech_say_now(value);
+    if (level) preview(id);
+    // Otherwise it goes quiet with nothing to say why: nobody is followed
+    // until the scanner picks someone.
+    if (id == SET_HEART_SOLO && settings_get(id))
+        speech_say("The soldier you pick with Page Up and Page Down is the one heard.");
 }
 
 static void menu_poll(const int* hit)
@@ -238,8 +412,14 @@ static void menu_poll(const int* hit)
     } else if (hit[5 + 4] || hit[5 + 6]) {
         menu_change(hit[5 + 6] ? 1 : -1);
     } else if (hit[5 + 5]) {
-        if (g_item == ITEM_PRACTICE) enter();
-        else if (settings_is_switch(g_item)) menu_change(1);
+        int id = MENU[g_item];
+        if (id == ITEM_PRACTICE) enter();
+        else if (id == ITEM_HEAR) {
+            if (audio_hearts_available(HEART_ALLY) || audio_hearts_available(HEART_ALIEN))
+                hear_open();
+            else speech_say_now("No heartbeat sound. It did not load.");
+        }
+        else if (settings_is_switch(id)) menu_change(1);
         else menu_say_item(NULL);
     }
 }
@@ -271,15 +451,22 @@ static void poll(int* down)
     }
 
     // Numpad / first, and on its own: it is the only key that means anything
-    // while the menu is closed. From practice it goes back to the menu.
+    // while the menu is closed. From practice or the heartbeats it goes back
+    // to the menu, on the entry it came from.
     if (hit[0]) {
-        if (g_mode == MODE_OFF)       menu_open();
-        else if (g_mode == MODE_MENU) menu_close();
+        if (g_mode == MODE_OFF)         menu_open();
+        else if (g_mode == MODE_MENU)   menu_close();
+        else if (g_mode == MODE_HEARTS) {
+            g_demo_left = 0;
+            InterlockedExchange(&g_mode, MODE_MENU);
+            menu_say_item(NULL);
+        }
         else { leave(); menu_say_item("Sound practice off."); }
         return;
     }
     if (g_mode == MODE_OFF) return;
-    if (g_mode == MODE_MENU) { menu_poll(hit); return; }
+    if (g_mode == MODE_MENU)   { menu_poll(hit); return; }
+    if (g_mode == MODE_HEARTS) { hear_poll(hit); return; }
 
     char how_far[32];
     if (hit[1] && g_tiles < MAX_TILES) {            // further
@@ -293,7 +480,8 @@ static void poll(int* down)
         say_distance(how_far, sizeof how_far);
         speech_say_now(how_far);
     } else if (hit[3] || hit[4]) {                   // louder, quieter
-        say_volume(level_apply(audio_volume() + (hit[3] ? 1 : -1)));
+        say_volume(level_apply(SET_WALL_LEVEL,
+                               audio_volume(AUDIO_WALLS) + (hit[3] ? 1 : -1)));
     } else {
         for (int d = 0; d <= 9; d++) {
             if (!hit[5 + d]) continue;
@@ -323,7 +511,9 @@ static DWORD WINAPI pump(LPVOID arg)
         // all of that, because nothing was switched off -- which is right, since
         // with no focus there is no way to press the key that would switch it
         // back on.
-        if (g_mode == MODE_PRACTICE && has_focus()) push();
+        if ((g_mode == MODE_PRACTICE ||
+             (g_mode == MODE_MENU && GetTickCount64() < g_preview_until)) && has_focus())
+            push();
         WaitForSingleObject(g_wake, POLL_MS);
     }
     return 0;

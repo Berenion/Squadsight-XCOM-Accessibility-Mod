@@ -16,11 +16,17 @@ pushd "%OUT%"
 cl /nologo /W3 /O2 /MT /LD ^
    /I"%MH%\include" /I"%MH%\src" ^
    "%HERE%main.c" "%HERE%natives.c" "%HERE%names.c" "%HERE%speech.c" "%HERE%focus.c" "%HERE%dialog.c" "%HERE%help.c" "%HERE%shot.c" "%HERE%combat.c" "%HERE%history.c" "%HERE%soldier.c" "%HERE%info.c" "%HERE%sight.c" "%HERE%mission.c" "%HERE%abar.c" "%HERE%hq.c" "%HERE%cursor.c" "%HERE%nav.c" "%HERE%tile.c" "%HERE%sonar.c" "%HERE%audio.c" "%HERE%learn.c" ^
-   "%HERE%props.c" "%HERE%input.c" "%HERE%scan.c" "%HERE%objects.c" "%HERE%settings.c" ^
+   "%HERE%props.c" "%HERE%input.c" "%HERE%scan.c" "%HERE%objects.c" "%HERE%settings.c" "%HERE%heart.c" ^
    "%MH%\src\hook.c" "%MH%\src\buffer.c" "%MH%\src\trampoline.c" "%MH%\src\hde\hde32.c" ^
    /Fe:xcom_uihook.dll ^
    /link /OUT:xcom_uihook.dll /MAP:xcom_uihook.map ole32.lib oleaut32.lib sapi.lib user32.lib winmm.lib
 if errorlevel 1 (popd & echo DLL BUILD FAILED & exit /b 1)
+
+rem The heartbeats are read from beside the DLL (audio_heart_load). The alien
+rem one is optional until it is cut: without it only the aliens are silent.
+copy /y "%HERE%ekgbeep.wav" "%OUT%\ekgbeep.wav" >nul
+if errorlevel 1 (popd & echo HEARTBEAT COPY FAILED & exit /b 1)
+if exist "%HERE%alienbeat.wav" copy /y "%HERE%alienbeat.wav" "%OUT%\alienbeat.wav" >nul
 
 cl /nologo /W3 /O2 /MT "%HERE%inject.c" "%HERE%injector.c" /Fe:inject.exe /link user32.lib
 if errorlevel 1 (popd & echo INJECTOR BUILD FAILED & exit /b 1)
@@ -42,10 +48,10 @@ if errorlevel 1 (popd & echo TEST BUILD FAILED & exit /b 1)
 cl /nologo /W3 /O2 /MT "%HERE%test_speech.c" "%HERE%speech.c" /Fe:test_speech.exe /link ole32.lib oleaut32.lib sapi.lib
 if errorlevel 1 (popd & echo SPEECH TEST BUILD FAILED & exit /b 1)
 
-cl /nologo /W3 /O2 /MT "%HERE%test_focus.c" "%HERE%nav.c" "%HERE%tile.c" "%HERE%scan.c" "%HERE%focus.c" "%HERE%dialog.c" "%HERE%help.c" "%HERE%shot.c" "%HERE%combat.c" "%HERE%history.c" "%HERE%soldier.c" "%HERE%info.c" "%HERE%sight.c" "%HERE%mission.c" "%HERE%abar.c" "%HERE%hq.c" "%HERE%speech.c" "%HERE%input.c" "%HERE%settings.c" /Fe:test_focus.exe /link ole32.lib oleaut32.lib sapi.lib
+cl /nologo /W3 /O2 /MT "%HERE%test_focus.c" "%HERE%nav.c" "%HERE%tile.c" "%HERE%scan.c" "%HERE%focus.c" "%HERE%dialog.c" "%HERE%help.c" "%HERE%shot.c" "%HERE%combat.c" "%HERE%history.c" "%HERE%soldier.c" "%HERE%info.c" "%HERE%sight.c" "%HERE%mission.c" "%HERE%abar.c" "%HERE%hq.c" "%HERE%speech.c" "%HERE%input.c" "%HERE%settings.c" "%HERE%heart.c" /Fe:test_focus.exe /link ole32.lib oleaut32.lib sapi.lib
 if errorlevel 1 (popd & echo FOCUS TEST BUILD FAILED & exit /b 1)
 
-cl /nologo /W3 /O2 /MT "%HERE%test_sonar.c" "%HERE%sonar.c" "%HERE%audio.c" "%HERE%learn.c" "%HERE%settings.c" "%HERE%speech.c" /Fe:test_sonar.exe ^
+cl /nologo /W3 /O2 /MT "%HERE%test_sonar.c" "%HERE%sonar.c" "%HERE%audio.c" "%HERE%learn.c" "%HERE%settings.c" "%HERE%heart.c" "%HERE%speech.c" /Fe:test_sonar.exe ^
    /link winmm.lib user32.lib ole32.lib oleaut32.lib sapi.lib
 if errorlevel 1 (popd & echo SONAR TEST BUILD FAILED & exit /b 1)
 
