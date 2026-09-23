@@ -60,6 +60,7 @@
 #include "sight.h"
 #include "mission.h"
 #include "abar.h"
+#include "hq.h"
 #include "cursor.h"
 #include "nav.h"
 #include "tile.h"
@@ -327,8 +328,35 @@ static int is_title_fn(const char* fn)
 
 // The last move said, so a panel arriving just after it can follow it.
 static void*     g_focus_obj;
+static int       g_focus_idx = -1;
 static ULONGLONG g_focus_at;
 static int       g_focus_had_panel;
+
+// When a screen last dispatched a key (rewrite_cmd). A selection that names
+// the item already said, with no key behind it, is a screen redrawing:
+// UIMissionControl_MissionList.RealizeSelected re-sends "0" on every
+// geoscape refresh, three times in the first seconds at the base.
+static ULONGLONG g_ui_key_at;
+
+// Keys still owed to a mod menu that just closed: the key that closed it has
+// events left to come, and they must not reach whatever is underneath.
+static ULONGLONG g_menu_grace_until;
+#define REDRAW_QUIET_MS 1000
+#define NARRATIVE_REPEAT_MS 30000  // a comm-link line re-sent within this is one line
+
+// The base's facility menu, once it has published.
+static void*     g_hq_menu;
+
+// The soldier a soldier screen is about, from its header panels.
+static char      g_soldier_info[256];
+static char      g_soldier_stats[128];
+static ULONGLONG g_soldier_info_at;
+#define SOLDIER_INFO_FRESH_MS 3000
+
+// The loadout's inventory list and its last selection (loadout_leave_locker).
+static void*     g_loadout_inv;          // the inventory list, as focus keys it
+static int       g_loadout_inv_idx = -1; // its last selection
+static void*     g_loadout_side;         // the list the cursor was last said in
 
 // A screen redrawing because of a key the game itself ignored has nothing to
 // say, and saying it anyway talks over the answer.
@@ -564,12 +592,27 @@ static int font_hue(const char* raw)
 // red. Enter on one runs OnChooseCont, which plays the bad sound and nothing
 // else -- no text anywhere says why. Scoped to the one screen: red elsewhere
 // is a warning, not a lock.
-#define HUE_BAD 0xEE1C25
+#define HUE_BAD      0xEE1C25
+#define HUE_DISABLED 0x808080   // GetHTMLColoredText's state 1
 static int hue_unavailable(const char* obj_name, const char* fn_name, int hue)
 {
     return hue == HUE_BAD &&
            strncmp(obj_name, "UIContinentSelect", 17) == 0 &&
            strcmp(fn_name, "AS_AddOption") == 0;
+}
+
+// A facility submenu's option says it cannot be chosen through its state,
+// which is passed through as a plain number rather than drawn as a colour:
+//
+//     UIStrategyHUD_FacilitySubMenu.AS_AddOption(int Index, string Text, int State)
+//
+// from the manager's TMenuOption.iState, where 1 is disabled.
+static int state_unavailable(const char* obj_name, const char* fn_name,
+                             const Payload* p)
+{
+    return strncmp(obj_name, "UIStrategyHUD_FSM_", 18) == 0 &&
+           strcmp(fn_name, "AS_AddOption") == 0 &&
+           p->nnumbers >= 2 && (int)p->numbers[1] == 1;
 }
 
 static void payload_add_number(Payload* p, float v)
@@ -651,7 +694,10 @@ static void read_array(const FArray* a, Payload* out)
 static void*     g_abar_obj;            // the container the bar was kept for
 static int       g_abar_logged_fail;
 
-static int abar_from_frame(void* stack)
+// The frame's command stream, typed: the first ArrayProperty whose every
+// element carries a valid ASValue type. Returns how many values, or -1 when
+// there is none. The strings live in static storage until the next call.
+static int asvalues_from_frame(void* stack, AbarValue** out)
 {
     void* node = *(void**)((uint8_t*)stack + FFRAME_NODE);
     uint8_t* locals = *(uint8_t**)((uint8_t*)stack + FFRAME_LOCALS);
@@ -695,12 +741,120 @@ static int abar_from_frame(void* stack)
                     default: ok = 0;
                     }
                 }
-                if (ok) return abar_feed(vals, a->Num);
+                if (ok) { *out = vals; return a->Num; }
             }
         }
         prop = next;
     }
     return -1;
+}
+
+static int abar_from_frame(void* stack)
+{
+    AbarValue* vals;
+    int n = asvalues_from_frame(stack, &vals);
+    return n < 0 ? -1 : abar_feed(vals, n);
+}
+
+// The cursor has landed on item `idx` of `object`'s list: say it, with the
+// heading the first time the cursor lands after one, and the panel
+// describing this item if the move just redrew it.
+static void focus_announce(LONG n, const char* tag, const char* obj_name,
+                           const char* fn_name, void* object, int idx)
+{
+    ULONGLONG now = GetTickCount64();
+    char label[FOCUS_MAX_LABEL];
+    if (!focus_label_at(object, idx, label, sizeof label)) {
+        logf_("[%ld] %s %s.%s  FOCUS %d unresolved\n", n, tag, obj_name, fn_name, idx);
+        return;
+    }
+    char title[FOCUS_MAX_LABEL], detail[FOCUS_MAX_DETAIL];
+    char say[FOCUS_MAX_LABEL * 2 + FOCUS_MAX_DETAIL];
+    ULONGLONG t_at, d_at;
+    if (!focus_take_title(object, title, sizeof title, &t_at) ||
+        now - t_at > TITLE_FRESH_MS)
+        title[0] = 0;
+    if (!focus_detail(object, detail, sizeof detail, &d_at) ||
+        now - d_at > LIST_WINDOW_MS)
+        detail[0] = 0;
+    // A redraw says nothing -- unless it carries a panel just sent, which
+    // is news (a facility entered: its submenu rides on this focus).
+    if (!detail[0] && object == g_focus_obj && idx == g_focus_idx &&
+        now - g_ui_key_at > REDRAW_QUIET_MS) {
+        logf_("[%ld] %s %s.%s  FOCUS %d (redraw, unchanged)\n",
+              n, tag, obj_name, fn_name, idx);
+        return;
+    }
+    focus_compose(title, label, detail, say, sizeof say);
+    // Used once: a description sent after the *previous* move could
+    // otherwise ride on the next one when the keys come quickly.
+    if (detail[0]) focus_set_detail(object, "");
+    g_focus_obj = object;
+    g_focus_idx = idx;
+    g_focus_at = now;
+    g_focus_had_panel = detail[0] != 0;
+    logf_("[%ld] %s %s.%s  FOCUS %d -> \"%s\"\n", n, tag, obj_name, fn_name, idx, say);
+    speech_cancel_pending();
+    // A panel makes this long, so the next move must cut it off rather than
+    // queue behind it.
+    if (g_speak && !muted()) {
+        if (detail[0]) speech_say_now(say);
+        else speech_say(say);
+    }
+}
+
+// A panel describing the item under the cursor, sent on a call of its own
+// with one string: a facility submenu's AS_SetHelpText, UISoldierSummary's
+// AS_SetDescription. Both used to go through the lone-line path, which takes
+// one string for a one-item list and clears the list it belongs beside: the
+// soldier summary's first move wiped Abilities, Loadout, Customize and
+// Dismiss, and every later move said "unresolved" or read a description.
+//
+// Kept for the next move to say, and said now when it follows the move just
+// announced. On a screen that has no list (UIProgressDialogue and
+// UISaveExplanationScreen share the name) it is the content, and is said on
+// its own as before.
+static void panel_note(LONG n, const char* tag, const char* obj_name,
+                       const char* fn_name, void* object, const char* text)
+{
+    focus_set_detail(object, text);
+    logf_("[%ld] %s %s.%s  PANEL \"%s\"\n", n, tag, obj_name, fn_name, text);
+    if (!*text || !g_speak || muted()) return;
+    if (object == g_focus_obj && !g_focus_had_panel &&
+        GetTickCount64() - g_focus_at < LIST_WINDOW_MS) {
+        g_focus_had_panel = 1;
+        focus_set_detail(object, "");
+        speech_say(text);
+    } else if (focus_count(object) == 0) {
+        speech_say_after(text, SETTLE_MS);
+    }
+}
+
+// The index as a string. Much of the strategy layer sends the selection that
+// way -- the Id is text on the Flash side:
+//
+//     UIStrategyHUD_FacilityMenu.AS_SetFocus(string Id)
+//     UIBuildItem / UIFoundry.AS_SetFocus(string Id)
+//     RealizeSelected: Invoke("setFocus", [ASValue string])  on the facility
+//         submenus, UIChooseTech, UIChooseFacility, the mission list
+//
+// One string and no number looks exactly like a screen publishing a
+// one-item list, which cleared the list it pointed into: the first move
+// along the facility menu wiped the five facility names. Taken as an index
+// only when every string in the frame is the same integer (the parameter,
+// and its copy in the ASValue array), so a real label is never mistaken.
+static int string_index(const Payload* p, int* out)
+{
+    if (p->nnumbers || !p->nstrings) return 0;
+    for (int i = 0; i < p->nstrings; i++) {
+        const char* s = p->strings[i];
+        if (strcmp(s, p->strings[0]) != 0) return 0;
+        const char* d = (*s == '-') ? s + 1 : s;
+        if (!*d) return 0;
+        for (; *d; d++) if (*d < '0' || *d > '9') return 0;
+    }
+    *out = atoi(p->strings[0]);
+    return 1;
 }
 
 // Remembers which (object, function) last spoke, so that a screen publishing
@@ -751,7 +905,7 @@ static void strip_note(void* strip, const char* fn, const Payload* p);
 // ASValue array, so SetShotInfo("", "72%", "Chance to Hit:", "72%", ...)
 // could not be told from one with no hit chance. Here an empty or unreadable
 // string is kept as "" in its place.
-#define FRAME_ARGS     6
+#define FRAME_ARGS     12
 #define FRAME_ARG_TEXT 1024
 typedef struct {
     char s[FRAME_ARGS][FRAME_ARG_TEXT];
@@ -828,7 +982,7 @@ static void mission_note(LONG n, void* object, const char* fn_name, void* node,
     }
     g_mission_panel = object;
     const char* fn = strncmp(fn_name, "AS_", 3) == 0 ? fn_name + 3 : fn_name;
-    static FrameArgs a;     // 6 KB: not on the game's stack
+    static FrameArgs a;     // 12 KB: not on the game's stack
     frame_args(node, locals, &a);
     const char* id = a.ns > 0 ? a.s[0] : "";
     if (strcmp(fn, "AddObjective") == 0) {
@@ -920,6 +1074,8 @@ static void capture_body(const char* tag, LONG n, void* stack)
     if (!props_ready()) {
         char why[160];
         if (props_init(node, why, sizeof why)) logf_("props: %s\n", why);
+    } else if (!props_mask_offset() && props_learn_mask(node)) {
+        logf_("props: BitMask +0x%X, learned from %s\n", props_mask_offset(), fn_name);
     }
 
     // Payload is ~64KB. Putting that on the game's own thread stack, inside
@@ -1198,6 +1354,14 @@ static void capture_body(const char* tag, LONG n, void* stack)
                     label = p->strings[i];
                 }
             }
+            // A mouse-mode PC bar's frame number, standing in for a glyph.
+            // Back and Accept keep their keys; the rest are mouse buttons.
+            const char* pc = !*icon ? hq_pc_icon_label(label) : NULL;
+            if (pc) {
+                label = pc;
+                if (strcmp(pc, "Back") == 0) icon = "Icon_B_CIRCLE";
+                else if (strcmp(pc, "Accept") == 0) icon = "Icon_A_X";
+            }
             int slot = (int)p->numbers[0];
             int disabled = p->nbools ? p->bools[0] : 0;
             help_set(object, slot, label, icon, disabled);
@@ -1257,6 +1421,424 @@ static void capture_body(const char* tag, LONG n, void* stack)
             if (g_speak && !muted()) speech_say(detail);
         }
         return;
+    }
+
+    // The base's facility menu. See hq.h: its first publish is one call per
+    // facility, its updates a command stream, and a facility's name is
+    // composed with what its colour and alert say before it is filed.
+    if (strncmp(obj_name, "UIStrategyHUD_FacilityMenu", 26) == 0) {
+        if (object != g_hq_menu) { hq_facility_reset(); g_hq_menu = object; }
+        // A move. The labels are put back from hq.c's own copy first: the
+        // slot table can reclaim this object while the player is elsewhere
+        // in the base, and the menu never republishes them on its return.
+        if (strcmp(fn_name, "AS_SetFocus") == 0) {
+            for (int id = 0; id < HQ_FACILITIES; id++) {
+                char label[FOCUS_MAX_LABEL];
+                if (hq_facility_label(id, label, sizeof label))
+                    focus_set(object, id, label);
+            }
+        }
+        if (strcmp(fn_name, "AS_AddMenuOption") == 0 && p->nnumbers && p->nstrings) {
+            int id = (int)p->numbers[0];
+            const char* name = "";
+            int grey = 0;
+            for (int i = 0; i < p->nstrings; i++)
+                if (!looks_like_asset(p->strings[i])) {
+                    name = p->strings[i];
+                    grey = p->hues[i] == HUE_DISABLED;
+                    break;
+                }
+            hq_facility_set(id, name, grey, p->nbools ? p->bools[0] : 0);
+            char label[FOCUS_MAX_LABEL];
+            if (hq_facility_label(id, label, sizeof label))
+                focus_set(object, id, label);
+            logf_("[%ld] %s %s.%s  FACILITY %d = \"%s\"\n", n, tag, obj_name,
+                  fn_name, id, label);
+            return;
+        }
+        if (strcmp(fn_name, "UpdateData") == 0) {
+            AbarValue* vals;
+            int nv = asvalues_from_frame(stack, &vals);
+            int touched = nv < 0 ? -1 : hq_facility_feed(vals, nv);
+            if (touched < 0) {
+                logf_("[%ld] %s %s.%s  FACILITY update did not parse\n",
+                      n, tag, obj_name, fn_name);
+                return;
+            }
+            for (int id = 0; id < HQ_FACILITIES; id++) {
+                char label[FOCUS_MAX_LABEL];
+                if (!(touched & (1 << id)) ||
+                    !hq_facility_label(id, label, sizeof label)) continue;
+                focus_set(object, id, label);
+                logf_("[%ld] %s %s.%s  FACILITY %d now \"%s\"\n", n, tag,
+                      obj_name, fn_name, id, label);
+            }
+            return;
+        }
+    }
+
+    // What the game says to the player in words: Central and the other
+    // advisors (UINarrativeCommLink: AS_SetTitle the speaker, AS_SetText the
+    // line) and the tutorial's instruction box (UIStrategyTutorialBox:
+    // "Select the Barracks"). Both used to go through the lone-line path,
+    // whose one pending slot the next line overwrites: at the Barracks the
+    // box's "Select "View Soldiers"" was replaced five calls later by
+    // Central's line, so one of the two was never heard. Queued as events
+    // instead, and kept for the Insert list. The comm link re-sends a line it
+    // is still showing, so the same line is said once.
+    if ((strncmp(obj_name, "UINarrativeCommLink", 19) == 0 ||
+         strncmp(obj_name, "UIStrategyTutorialBox", 21) == 0) &&
+        (strcmp(fn_name, "AS_SetText") == 0 || strcmp(fn_name, "AS_SetTitle") == 0)) {
+        static char s_speaker[64];
+        static char s_said[MAX_STR];
+        static ULONGLONG s_said_at;
+        const char* text = p->nstrings ? p->strings[0] : "";
+        if (strcmp(fn_name, "AS_SetTitle") == 0) {
+            strncpy_s(s_speaker, sizeof s_speaker, text, _TRUNCATE);
+            logf_("[%ld] %s %s.%s  SPEAKER \"%s\"\n", n, tag, obj_name, fn_name, text);
+            return;
+        }
+        if (!*text) return;
+        char say[MAX_STR + 80];
+        if (obj_name[2] == 'N' && s_speaker[0])
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s: %s", s_speaker, text);
+        else
+            strncpy_s(say, sizeof say, text, _TRUNCATE);
+        ULONGLONG t = GetTickCount64();
+        if (strcmp(say, s_said) == 0 && t - s_said_at < NARRATIVE_REPEAT_MS) {
+            logf_("[%ld] %s %s.%s  NARRATIVE repeated\n", n, tag, obj_name, fn_name);
+            return;
+        }
+        strncpy_s(s_said, sizeof s_said, say, _TRUNCATE);
+        s_said_at = t;
+        logf_("[%ld] %s %s.%s  NARRATIVE \"%s\"\n", n, tag, obj_name, fn_name, say);
+        announce(say);
+        return;
+    }
+
+    // A soldier list: the Barracks' View Soldiers, and every other screen
+    // built on UISoldierListBase. UpdateDisplay clears the list, adds one
+    // row per soldier with no index, then sends the column headings and the
+    // count, and selects through Invoke("SetSelected", [string index]) --
+    // which the string index resolves (string_index). Left to the general
+    // path, every row was "a screen publishing its contents" and replaced
+    // the one before, and the headings and "3/4" replaced the lot.
+    if (strstr(obj_name, "UISoldierList")) {
+        if (strcmp(fn_name, "UpdateDisplay") == 0 && !p->nstrings) {
+            focus_begin(object);                 // Invoke("ClearSoldierList")
+            logf_("[%ld] %s %s.%s  SOLDIERS cleared\n", n, tag, obj_name, fn_name);
+            return;
+        }
+        int nick = strcmp(fn_name, "AS_AddSoldierWithNickname") == 0;
+        if (nick || strcmp(fn_name, "AS_AddSoldier") == 0) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            // By position, empties kept: name, [nickname,] class, status,
+            // rank label; then the bools disabled, promotable.
+            int k = nick ? 1 : 0;
+            if (a.ns < 4 + k) {
+                logf_("[%ld] %s %s.%s  SOLDIER row did not read (%d strings)\n",
+                      n, tag, obj_name, fn_name, a.ns);
+                return;
+            }
+            char row[FOCUS_MAX_LABEL];
+            hq_soldier_row(a.s[0], nick ? a.s[1] : "", a.s[1 + k], a.s[2 + k],
+                           a.s[3 + k], a.nb > 0 && a.b[0], a.nb > 1 && a.b[1],
+                           row, sizeof row);
+            focus_add(object, row);
+            logf_("[%ld] %s %s.%s  SOLDIER %d = \"%s\"\n", n, tag, obj_name,
+                  fn_name, focus_count(object) - 1, row);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetCountLabel") == 0) {
+            char head[96];
+            if (p->nstrings && hq_soldier_count(p->strings[0], head, sizeof head)) {
+                focus_set_title(object, head);
+                logf_("[%ld] %s %s.%s  HEADING \"%s\"\n", n, tag, obj_name, fn_name, head);
+            }
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetTitleLabels") == 0) {
+            logf_("[%ld] %s %s.%s  (column headings)\n", n, tag, obj_name, fn_name);
+            return;
+        }
+    }
+
+    // The loadout: two lists on one screen, the soldier's inventory and the
+    // locker of what can go in the slot under the cursor.
+    //
+    //     UpdateInventoryList: Invoke("ClearInventoryList"), then per slot
+    //         AS_AddInventoryItem(int Type, string Title, string imgLabel,
+    //                             int numEquipableItems, GFxObject mecIcons)
+    //     UpdateLockerList:    Invoke("ClearLockerList"), then per item
+    //         AS_AddLockerItem(string Title, string Count, string imgLabel,
+    //                          bool isLocked, bool showItemCard,
+    //                          string lockedDescription, GFxObject mecIcons)
+    //     AS_SetSelectedIndex_InventoryList(int) / _LockerList(int)
+    //
+    // Up/down move within a list, right goes into the locker and left back,
+    // Enter equips. Both lists landed in the screen's one slot table, so the
+    // inventory read icon paths and the locker said "Body Armor" wherever
+    // the cursor was. Kept as two lists -- the locker under the screen's
+    // address plus one, which no object can have -- and the list is named
+    // when the cursor crosses into the other.
+    if (strncmp(obj_name, "UISoldierLoadout", 16) == 0) {
+        void* inv = object;
+        void* locker = (uint8_t*)object + 1;
+        static FrameArgs a;
+        if (strcmp(fn_name, "UpdateInventoryList") == 0 ||
+            strcmp(fn_name, "UpdateLockerList") == 0) {
+            focus_begin(fn_name[6] == 'I' ? inv : locker);
+            return;
+        }
+        if (strcmp(fn_name, "AS_AddInventoryItem") == 0 ||
+            strcmp(fn_name, "AS_AddLockerItem") == 0) {
+            int in_locker = fn_name[6] == 'L';
+            frame_args(node, locals, &a);
+            char row[FOCUS_MAX_LABEL];
+            if (!in_locker) {
+                strncpy_s(row, sizeof row, a.ns ? a.s[0] : "", _TRUNCATE);
+            } else {
+                // Title, Count ("x3", or "" for infinite), imgLabel,
+                // lockedDescription; the bools isLocked, showItemCard.
+                const char* count = a.ns > 1 ? a.s[1] : "";
+                const char* why = a.ns > 3 ? a.s[3] : "";
+                int is_locked = a.nb > 0 && a.b[0];
+                _snprintf_s(row, sizeof row, _TRUNCATE, "%s%s%s%s%s",
+                            a.ns ? a.s[0] : "", *count ? " " : "", count,
+                            is_locked ? ", " : "",
+                            is_locked ? (*why ? why : "unavailable") : "");
+            }
+            focus_add(in_locker ? locker : inv, row);
+            logf_("[%ld] %s %s.%s  %s %d = \"%s\"\n", n, tag, obj_name, fn_name,
+                  in_locker ? "LOCKER" : "INVENTORY",
+                  focus_count(in_locker ? locker : inv) - 1, row);
+            return;
+        }
+        if (strncmp(fn_name, "AS_SetSelectedIndex_", 20) == 0 && p->nnumbers) {
+            int in_locker = fn_name[20] == 'L';
+            void* list = in_locker ? locker : inv;
+            int idx = (int)p->numbers[0];
+            char label[FOCUS_MAX_LABEL], say[FOCUS_MAX_LABEL + 64];
+            if (!focus_label_at(list, idx, label, sizeof label)) {
+                logf_("[%ld] %s %s.%s  FOCUS %d unresolved\n", n, tag, obj_name, fn_name, idx);
+                return;
+            }
+            char title[FOCUS_MAX_LABEL];
+            ULONGLONG t_at;
+            int head = focus_take_title(inv, title, sizeof title, &t_at) &&
+                       GetTickCount64() - t_at < TITLE_FRESH_MS;
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s",
+                        head ? title : "", head ? ". " : "",
+                        g_loadout_side != list ? (in_locker ? "Locker. " : "Inventory. ") : "",
+                        label);
+            g_loadout_side = list;
+            if (!in_locker) { g_loadout_inv = object; g_loadout_inv_idx = idx; }
+            logf_("[%ld] %s %s.%s  FOCUS %d -> \"%s\"\n", n, tag, obj_name, fn_name, idx, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetScreenTitle") == 0 && p->nstrings) {
+            focus_set_title(inv, p->strings[0]);
+            return;
+        }
+        // The screen's own buttons, into its help bar for 0. Details is the
+        // item card, which F1 reaches (case 600); Remove is X, which no
+        // keyboard key sends in the headquarters -- 1 stands in (input.c).
+        if (strcmp(fn_name, "AS_SetLockerButtonHelp") == 0 && p->nstrings >= 2) {
+            help_set(object, 0, p->strings[0], "Icon_A_X", 0);
+            if (p->nstrings >= 3) help_set(object, 1, "DETAILS: F1", "", 0);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetRemoveInventorySlotButtonHelp") == 0 && p->nstrings) {
+            help_set(object, 2, p->strings[0], "Icon_X_SQUARE", 0);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetListTitles") == 0) return;
+    }
+
+    // A button moving between choices: (int buttonIndex, bool bFocus), sent
+    // twice per move -- the old button off, the new one on. Declared the same
+    // way on the Mission Control alerts, the council's requests and missions,
+    // and the infiltrator mission, in both builds. Only the "on" call is the
+    // move.
+    if (strcmp(fn_name, "AS_SetButtonFocus") == 0 && p->nnumbers && p->nbools) {
+        if (p->bools[0])
+            focus_announce(n, tag, obj_name, fn_name, object, (int)p->numbers[0]);
+        return;
+    }
+
+    // A Mission Control alert: "ALIEN ABDUCTIONS REPORTED!", a UFO, a
+    // finished project. Its title and text are single strings and its
+    // buttons indexed labels, so on the general path the buttons cancelled
+    // the title before it was said, and with the mouse active nothing is
+    // selected on arrival -- the alert said nothing at all, and up/down on it
+    // were silent. UIMissionControl_AlertBase.OnInit ends with
+    // Invoke("AlertFullyLoaded"), after the title, text and buttons are all
+    // sent, so that is when the whole alert is said, as an event.
+    if (strncmp(obj_name, "UIMissionControl_", 17) == 0 && strstr(obj_name, "Alert")) {
+        static char s_alert_text[MAX_STR];
+        if (strcmp(fn_name, "AS_SetText") == 0 && p->nstrings) {
+            strncpy_s(s_alert_text, sizeof s_alert_text, p->strings[0], _TRUNCATE);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetButtonText") == 0 && p->nstrings) {
+            focus_set(object, 0, p->strings[0]);
+            return;
+        }
+        if (strcmp(fn_name, "OnInit") == 0) {
+            char title[FOCUS_MAX_LABEL], say[MAX_STR + FOCUS_MAX_LABEL * 4];
+            ULONGLONG t_at;
+            if (!focus_take_title(object, title, sizeof title, &t_at)) title[0] = 0;
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s", title,
+                        title[0] && s_alert_text[0] ? " " : "", s_alert_text);
+            s_alert_text[0] = 0;
+            int nb = focus_count(object);
+            for (int i = 0; i < nb; i++) {
+                char label[FOCUS_MAX_LABEL];
+                if (!focus_label_at(object, i, label, sizeof label)) continue;
+                size_t used = strlen(say);
+                _snprintf_s(say + used, sizeof say - used, _TRUNCATE, "%s%s",
+                            i == 0 ? (used ? ". Options: " : "Options: ") : ", ", label);
+            }
+            logf_("[%ld] %s %s.%s  ALERT \"%s\"\n", n, tag, obj_name, fn_name, say);
+            speech_cancel_pending();
+            announce(say);
+            // The first button is the selected one; a move off it and back
+            // must still be said.
+            g_focus_obj = object;
+            g_focus_idx = 0;
+            return;
+        }
+    }
+
+    // An item card (F1 on the loadout, and wherever else UIItemCards opens):
+    // its name, its stats and its paragraphs, each on a call of its own, and
+    // nothing ever read them -- the title was held and cancelled by the stat
+    // slots after it. UIItemCards.OnInit fills the card and then calls
+    // AS_InitializationComplete, so the card is gathered call by call and
+    // said whole there. By position (frame_args):
+    //     AS_SetCardTitle(Title)
+    //     AS_SetStatData(int statIndex, statLabel, statVal, optional statDiff)
+    //     AS_AddSimpleTextCardData(Text)
+    //     AS_AddTacticalInfoCardData / AS_AddAbilitiesCardData /
+    //     AS_AddPerksCardData(Title, text)
+    if (strncmp(obj_name, "UIItemCards", 11) == 0) {
+        static char s_card[2048];
+        static FrameArgs a;
+        if (strcmp(fn_name, "AS_SetHelp") == 0 && p->nstrings) {
+            const char* icon = p->nstrings > 1 ? p->strings[1] : "";
+            help_set(object, 0, p->strings[0], icon, 0);
+            return;
+        }
+        if (strcmp(fn_name, "AS_InitializationComplete") == 0) {
+            logf_("[%ld] %s %s.%s  CARD \"%s\"\n", n, tag, obj_name, fn_name, s_card);
+            if (s_card[0]) {
+                history_add(s_card);
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_now(s_card);
+            }
+            s_card[0] = 0;
+            return;
+        }
+        int title = strcmp(fn_name, "AS_SetCardTitle") == 0;
+        int stat = strcmp(fn_name, "AS_SetStatData") == 0;
+        int para = strncmp(fn_name, "AS_Add", 6) == 0 && strstr(fn_name, "CardData");
+        if (title || stat || para) {
+            frame_args(node, locals, &a);
+            char piece[1200];
+            piece[0] = 0;
+            if (title && a.ns)
+                strncpy_s(piece, sizeof piece, a.s[0], _TRUNCATE);
+            else if (stat && a.ns >= 2 && a.s[0][0])
+                _snprintf_s(piece, sizeof piece, _TRUNCATE, "%s %s%s%s", a.s[0], a.s[1],
+                            a.ns > 2 && a.s[2][0] ? " " : "", a.ns > 2 ? a.s[2] : "");
+            else if (para && strstr(fn_name, "SimpleText") && a.ns)
+                strncpy_s(piece, sizeof piece, a.s[0], _TRUNCATE);
+            else if (para && a.ns >= 2 && a.s[1][0])
+                _snprintf_s(piece, sizeof piece, _TRUNCATE, "%s: %s", a.s[0], a.s[1]);
+            hq_card_clean(piece);
+            if (title) s_card[0] = 0;
+            if (piece[0]) {
+                size_t used = strlen(s_card);
+                _snprintf_s(s_card + used, sizeof s_card - used, _TRUNCATE, "%s%s",
+                            used ? ". " : "", piece);
+            }
+            return;
+        }
+    }
+
+    // A facility submenu's line of help for the option under the cursor,
+    // sent by RealizeSelected just before it moves the focus:
+    //
+    //     UIStrategyHUD_FacilitySubMenu.AS_SetHelpText(string displayString)
+    //
+    // Kept as that option's panel, said after its label. Declared on that
+    // class alone, in both builds.
+    if ((strcmp(fn_name, "AS_SetHelpText") == 0 ||
+         strcmp(fn_name, "AS_SetDescription") == 0) && p->nstrings <= 1 && !p->nnumbers) {
+        panel_note(n, tag, obj_name, fn_name, object, p->nstrings ? p->strings[0] : "");
+        return;
+    }
+
+    // Who a soldier screen is about. UIStrategyComponent_SoldierInfo and
+    // _SoldierStats draw the header over the soldier summary, promotion and
+    // loadout screens, and nothing said it: several strings and no index, so
+    // each went into a list of its own that no key ever read. Kept, and given
+    // to the soldier summary as its heading when it builds, so opening a
+    // soldier says who it is before the menu. By position (frame_args):
+    //     (_name, _nickname, _status, _flagIcon, _classLabel, _classText,
+    //      _rankLabel, _rankText, bool _showPromoteIcon, _missions, _kills)
+    //     (_health, _will, _defense, _offense)
+    // the same in both builds.
+    if (strncmp(obj_name, "UIStrategyComponent_Soldier", 27) == 0) {
+        static FrameArgs a;
+        frame_args(node, locals, &a);
+        if (strcmp(fn_name, "AS_SetSoldierInformation") == 0 && a.ns >= 10) {
+            char who[160];
+            if (a.s[1][0])
+                _snprintf_s(who, sizeof who, _TRUNCATE, "%s %s '%s'", a.s[7], a.s[0], a.s[1]);
+            else
+                _snprintf_s(who, sizeof who, _TRUNCATE, "%s %s", a.s[7], a.s[0]);
+            _snprintf_s(g_soldier_info, sizeof g_soldier_info, _TRUNCATE,
+                        "%s, %s%s. %s. %s. %s", who, a.s[5],
+                        a.nb && a.b[0] ? ", promotion" : "", a.s[2], a.s[8], a.s[9]);
+            g_soldier_stats[0] = 0;
+            g_soldier_info_at = GetTickCount64();
+            logf_("[%ld] %s %s.%s  SOLDIER INFO \"%s\"\n", n, tag, obj_name, fn_name,
+                  g_soldier_info);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetSoldierStats") == 0 && a.ns >= 4) {
+            _snprintf_s(g_soldier_stats, sizeof g_soldier_stats, _TRUNCATE,
+                        "%s. %s. %s. %s", a.s[0], a.s[1], a.s[2], a.s[3]);
+            logf_("[%ld] %s %s.%s  SOLDIER STATS \"%s\"\n", n, tag, obj_name, fn_name,
+                  g_soldier_stats);
+            return;
+        }
+    }
+    // The soldier summary building: its heading is the soldier.
+    if (strncmp(obj_name, "UISoldierSummary", 16) == 0 &&
+        strcmp(fn_name, "UpdateData") == 0 && g_soldier_info[0] &&
+        GetTickCount64() - g_soldier_info_at < SOLDIER_INFO_FRESH_MS) {
+        char head[FOCUS_MAX_LABEL];
+        _snprintf_s(head, sizeof head, _TRUNCATE, "%s%s%s", g_soldier_info,
+                    g_soldier_stats[0] ? ". " : "", g_soldier_stats);
+        focus_set_title(object, head);
+    }
+
+    // A selection sent as text. See string_index.
+    {
+        int idx;
+        if ((is_selection_fn(fn_name) || strcmp(fn_name, "AS_SetFocus") == 0) &&
+            string_index(p, &idx)) {
+            if (idx < 0)
+                logf_("[%ld] %s %s.%s  FOCUS none\n", n, tag, obj_name, fn_name);
+            else
+                focus_announce(n, tag, obj_name, fn_name, object, idx);
+            return;
+        }
     }
 
     // A modal prompt is composed rather than narrated call by call.  It
@@ -1418,7 +2000,13 @@ static void capture_body(const char* tag, LONG n, void* stack)
         joined[0] = 0;
         for (int i = 0; i < p->nstrings; i++) {
             if (looks_like_asset(p->strings[i])) continue;
+            // An icon id riding beside the label: the mission list sends
+            // AS_AddOption(..., "SCAN FOR ACTIVITY", "_ScanForUFO"). Always a
+            // leading underscore and no space. Dropped here rather than in
+            // looks_like_asset, because the shot readout reads "_lowCover".
+            if (p->strings[i][0] == '_' && !strchr(p->strings[i], ' ')) continue;
             if (hue_unavailable(obj_name, fn_name, p->hues[i])) locked = 1;
+            if (state_unavailable(obj_name, fn_name, p)) locked = 1;
             // The frame walk sees every property, so a setter's parameter and
             // the local it was copied into both arrive -- one call, the same
             // text twice, joined into "Mode:, Mode:". Repeats within a single
@@ -1465,6 +2053,15 @@ static void capture_body(const char* tag, LONG n, void* stack)
         } else if (joined[0]) {
             int part = is_value_fn(fn_name) ? FOCUS_PART_VALUE : FOCUS_PART_LABEL;
             int changed = focus_set_part(object, idx, part, joined);
+            // Entering a facility publishes its submenu and then re-sends
+            // the facility menu's focus. The submenu starts on its first
+            // option and, in mouse mode, never sends a selection of its own
+            // (FacilitySubMenu.OnFlashCommand realizes only without a
+            // mouse) -- so the first option rides along as the facility's
+            // panel: "BARRACKS, needs attention. VIEW SOLDIERS".
+            if (idx == 0 && g_hq_menu && part == FOCUS_PART_LABEL &&
+                strncmp(obj_name, "UIStrategyHUD_FSM_", 18) == 0)
+                focus_set_detail(g_hq_menu, joined);
             logf_("[%ld] %s %s.%s  SLOT %d %s \"%s\"%s\n", n, tag, obj_name, fn_name,
                   idx, part == FOCUS_PART_VALUE ? "value =" : "label =", joined,
                   changed ? "  (changed)" : "");
@@ -1503,37 +2100,7 @@ static void capture_body(const char* tag, LONG n, void* stack)
         // No text, just an index, from a function that actually moves the
         // selection: XCOM never re-sends the label, so resolve it from what
         // the screen published.
-        int idx = (int)p->numbers[0];
-        char label[FOCUS_MAX_LABEL];
-        if (focus_label_at(object, idx, label, sizeof label)) {
-            // The heading, the first time the cursor lands after it, and the
-            // panel describing this item if the move just redrew it.
-            char title[FOCUS_MAX_LABEL], detail[FOCUS_MAX_DETAIL];
-            char say[FOCUS_MAX_LABEL * 2 + FOCUS_MAX_DETAIL];
-            ULONGLONG t_at, d_at;
-            if (!focus_take_title(object, title, sizeof title, &t_at) ||
-                now - t_at > TITLE_FRESH_MS)
-                title[0] = 0;
-            if (!focus_detail(object, detail, sizeof detail, &d_at) ||
-                now - d_at > LIST_WINDOW_MS)
-                detail[0] = 0;
-            focus_compose(title, label, detail, say, sizeof say);
-            g_focus_obj = object;
-            g_focus_at = now;
-            g_focus_had_panel = detail[0] != 0;
-            logf_("[%ld] %s %s.%s  FOCUS %d -> \"%s\"\n",
-                  n, tag, obj_name, fn_name, idx, say);
-            speech_cancel_pending();
-            // A panel makes this long, so the next move must cut it off
-            // rather than queue behind it.
-            if (g_speak && !muted()) {
-                if (detail[0]) speech_say_now(say);
-                else speech_say(say);
-            }
-        } else {
-            logf_("[%ld] %s %s.%s  FOCUS %d unresolved\n",
-                  n, tag, obj_name, fn_name, idx);
-        }
+        focus_announce(n, tag, obj_name, fn_name, object, (int)p->numbers[0]);
     } else if (p->nnumbers) {
         // Numbers nobody claimed. Now that plain ints are readable these are
         // no longer invisible, and dropping them silently hid the very call
@@ -1636,8 +2203,12 @@ static void fault_log(const char* prefix, const Fault* f, const char* where)
 // with it -- before the switch, and before the refresh at the end. That is a
 // cleaner swallow than rewriting the command to a code nothing matches, which
 // would still run the rest of the handler.
+static void hq_locked_note(LONG n, void* sub, const char* screen);
+static void loadout_leave_locker(LONG n, void* loadout, const char* screen);
+
 static int rewrite_cmd(LONG n, void* stack)
 {
+    g_ui_key_at = GetTickCount64();
     if (!readable(stack, 0x20)) return DELIVER;
 
     void* node      = *(void**)((uint8_t*)stack + FFRAME_NODE);
@@ -1786,6 +2357,26 @@ static int rewrite_cmd(LONG n, void* stack)
                 break;
         }
     }
+
+    // Insert's list (review_pump) has the arrows, Enter and Escape while it is
+    // open, and for a moment after it closes, so the Escape that closed it
+    // does not also back out of the screen underneath.
+    if ((history_is_open() || GetTickCount64() < g_menu_grace_until) &&
+        ((cmd >= 500 && cmd <= 503) || cmd == 510 || cmd == 511)) {
+        *cmd_slot = CMD_INERT;
+        return SUPPRESS;
+    }
+
+    // Left in the loadout's locker. See loadout_leave_locker.
+    if (cmd == FXS_ARROW_LEFT && strncmp(screen, "UISoldierLoadout", 16) == 0)
+        loadout_leave_locker(n, object, screen);
+
+    // Up and down on a facility submenu the tutorial has locked. See
+    // hq_locked_note. Only observed: the key goes on to the screen, which
+    // plays its sound and ignores it.
+    if (press && (cmd == FXS_ARROW_UP || cmd == FXS_ARROW_DOWN) &&
+        strncmp(screen, "UIStrategyHUD_FSM_", 18) == 0)
+        hq_locked_note(n, object, screen);
 
     // The key that opens the menu, and reads the whole list on the way in so
     // that one press still answers "what can I do here".
@@ -2136,6 +2727,159 @@ static int field_ptr(void* obj, const char* name, FieldSlot* slot,
     if (!readable(v, size)) return 0;
     *out = v;
     return 1;
+}
+
+// Up and down on a facility submenu while the tutorial has locked them. The
+// submenu's OnUnrealCommand plays MenuSelectCue and returns when the
+// headquarters input has m_bDisableLeftStick or m_bDisableDPad set -- which
+// the tutorial's campaign does, to make the player pick the one option it
+// wants. All the player heard was the sound, over and over, with nothing to
+// say the list was not moving or which option Enter would pick. The flags
+// are read (submenu -> controllerRef -> PlayerInput), not guessed from the
+// silence, and the option under the cursor is m_iCurrentSelection.
+static FieldSlot g_sub_ctrl, g_ctrl_input, g_sub_sel;
+static void hq_locked_note(LONG n, void* sub, const char* screen)
+{
+    const void* v;
+    if (!field_ptr(sub, "controllerRef", &g_sub_ctrl, sizeof(void*), &v)) return;
+    void* ctrl = *(void* const*)v;
+    if (!ctrl || !field_ptr(ctrl, "PlayerInput", &g_ctrl_input, sizeof(void*), &v)) return;
+    const uint8_t* input = *(const uint8_t* const*)v;
+    if (!input) return;
+    static const char* const flags[] = { "m_bDisableDPad", "m_bDisableLeftStick" };
+    int locked = 0;
+    for (int i = 0; i < 2 && !locked; i++) {
+        const void* prop = object_field_prop(input, flags[i]);
+        int b = 0;
+        if (prop && props_read_object_bool(prop, input, &b) && b) locked = 1;
+    }
+    if (!locked) return;
+    int sel = 0;
+    if (field_ptr(sub, "m_iCurrentSelection", &g_sub_sel, sizeof(int32_t), &v))
+        sel = *(const int32_t*)v;
+    char label[FOCUS_MAX_LABEL], say[FOCUS_MAX_LABEL + 64];
+    if (focus_label_at(sub, sel, label, sizeof label))
+        _snprintf_s(say, sizeof say, _TRUNCATE, "Locked by the tutorial. %s", label);
+    else
+        strncpy_s(say, sizeof say, "Locked by the tutorial.", _TRUNCATE);
+    logf_("[%ld] Input        %s  LOCKED \"%s\"\n", n, screen, say);
+    speech_cancel_pending();
+    if (g_speak) speech_say_now(say);
+}
+
+// A bool inside a struct field of an object: `owner.field.member`, e.g.
+// XGSoldierUI.m_kLocker.bIsSelected. Returns a pointer to the dword holding
+// the bit and its mask, or NULL -- and says, once, which step failed.
+//
+// UStructProperty::Struct is not at a known offset: the first guess, the
+// bool's BitMask offset, found nothing live. So a short window past
+// UProperty's own fields is searched for the one pointer whose class is
+// ScriptStruct, and the answer is kept.
+static uint32_t g_struct_ptr_off;
+static int      g_struct_logged;
+static uint32_t* struct_bool(void* owner, const char* field, const char* member,
+                             uint32_t* mask_out)
+{
+    const char* why = NULL;
+    uint32_t* result = NULL;
+    const uint8_t* sp = (const uint8_t*)object_field_prop(owner, field);
+    void* st = NULL;
+    uint32_t moff = 0;
+    if (!sp) why = "no such field";
+    if (!why && !g_struct_ptr_off) {
+        for (uint32_t off = UPROPERTY_OFFSET + 4; off <= 0x90 && !g_struct_ptr_off; off += 4) {
+            if (!readable(sp + off, sizeof(void*))) break;
+            void* cand = *(void* const*)(sp + off);
+            char cls[64];
+            if (cand && readable(cand, 0x40) &&
+                object_class_name(cand, cls, sizeof cls) && strcmp(cls, "ScriptStruct") == 0)
+                g_struct_ptr_off = off;
+        }
+        if (!g_struct_ptr_off) why = "no ScriptStruct pointer on the field";
+        else logf_("struct: UStructProperty::Struct at +0x%X\n", g_struct_ptr_off);
+    }
+    if (!why) {
+        st = *(void* const*)(sp + g_struct_ptr_off);
+        // The struct's own bool members teach the mask if nothing has yet.
+        if (!props_mask_offset() && props_learn_mask(st))
+            logf_("props: BitMask +0x%X, learned from %s\n", props_mask_offset(), field);
+        moff = props_mask_offset();
+        if (!moff) why = "no bool mask offset";
+    }
+    if (!why) {
+        uint32_t field_off = *(const uint32_t*)(sp + UPROPERTY_OFFSET);
+        void* m = readable((uint8_t*)st + USTRUCT_CHILDREN, sizeof(void*))
+                      ? *(void**)((uint8_t*)st + USTRUCT_CHILDREN) : NULL;
+        why = "no such member";
+        for (int guard = 0; m && guard < MAX_FIELDS; guard++) {
+            char name[64];
+            if (!readable(m, moff + sizeof(uint32_t))) { why = "member unreadable"; break; }
+            if (object_name(m, name, sizeof name) && strcmp(name, member) == 0) {
+                uint32_t off = *(const uint32_t*)((const uint8_t*)m + UPROPERTY_OFFSET);
+                uint32_t mask = *(const uint32_t*)((const uint8_t*)m + moff);
+                uint32_t* word = (uint32_t*)((uint8_t*)owner + field_off + off);
+                if (!mask || (mask & (mask - 1))) why = "member is not a one-bit bool";
+                else if (!writable(word, sizeof *word)) why = "member not writable";
+                else {
+                    why = NULL;
+                    *mask_out = mask;
+                    result = word;
+                    if (!g_struct_logged)
+                        logf_("struct: %s.%s at +0x%X+0x%X, mask 0x%X\n",
+                              field, member, field_off, off, mask);
+                    g_struct_logged = 1;
+                }
+                break;
+            }
+            m = *(void**)((uint8_t*)m + UFIELD_NEXT);
+        }
+    }
+    if (why) logf_("struct: %s.%s not found -- %s\n", field, member, why);
+    return result;
+}
+
+// Left in the loadout's locker closed the whole screen. UISoldierLoadout
+// sends left to OnCancel() while the locker is selected, and OnCancel calls
+// XGSoldierUI.OnLeaveGear(manager.IsMouseActive()) -- which steps back to the
+// inventory only when that is false. On a PC the mouse is active, so the
+// step back is the gamepad's alone, and the keyboard's left and Escape both
+// leave. The mouse's own way back is a click on the inventory list, and all
+// that click does to the state is clear m_kLocker.bIsSelected. So that is
+// what left does: the flag is cleared before the screen reads the key, the
+// screen's case then finds the locker not selected and does nothing, and the
+// inventory item the cursor returns to is said. Escape still leaves, as the
+// game intends.
+static FieldSlot g_loadout_mgr;
+static void loadout_leave_locker(LONG n, void* loadout, const char* screen)
+{
+    const void* v;
+    if (!field_ptr(loadout, "m_kLocalMgr", &g_loadout_mgr, sizeof(void*), &v)) {
+        logf_("[%ld] Input        %s  no m_kLocalMgr -- left will leave\n", n, screen);
+        return;
+    }
+    void* mgr = *(void* const*)v;
+    if (!mgr) {
+        logf_("[%ld] Input        %s  m_kLocalMgr is empty -- left will leave\n", n, screen);
+        return;
+    }
+    uint32_t mask = 0;
+    uint32_t* word = mgr ? struct_bool(mgr, "m_kLocker", "bIsSelected", &mask) : NULL;
+    if (!word) {
+        logf_("[%ld] Input        %s  locker flag not found -- left will leave\n", n, screen);
+        return;
+    }
+    if (!(*word & mask)) return;            // in the inventory already
+    *word &= ~mask;
+    g_loadout_side = loadout;               // "Inventory." is said here, once
+    char label[FOCUS_MAX_LABEL], say[FOCUS_MAX_LABEL + 16];
+    if (g_loadout_inv == loadout && g_loadout_inv_idx >= 0 &&
+        focus_label_at(loadout, g_loadout_inv_idx, label, sizeof label))
+        _snprintf_s(say, sizeof say, _TRUNCATE, "Inventory. %s", label);
+    else
+        strncpy_s(say, sizeof say, "Inventory.", _TRUNCATE);
+    logf_("[%ld] Input        %s  LOCKER left -> \"%s\"\n", n, screen, say);
+    speech_cancel_pending();
+    if (g_speak) speech_say_now(say);
 }
 
 // The soldier's own tile, from the pawn the cursor is chained to. `z` gets the
@@ -4594,7 +5338,7 @@ static int info_list_slot(void* obj, const char* obj_name)
 static void info_note(LONG n, void* object, const char* obj_name, const char* fn_name,
                       void* node, uint8_t* locals)
 {
-    static FrameArgs a;     // 6 KB: not on the game's stack
+    static FrameArgs a;     // 12 KB: not on the game's stack
     frame_args(node, locals, &a);
     const char* s[FRAME_ARGS];
     for (int i = 0; i < FRAME_ARGS; i++) s[i] = i < a.ns ? a.s[i] : "";
@@ -5767,7 +6511,6 @@ static int       g_pick_release_to = -1; // Enter's release, still to rewrite
 // before this hook, EU after it). That is also why the Escape that closed the
 // menu cannot reach the game alone.
 #define MENU_GRACE_MS 150
-static ULONGLONG g_menu_grace_until;
 
 static void abar_menu_end(const char* why)
 {
@@ -5958,6 +6701,29 @@ static int review_poll(void)
     return 1;
 }
 
+// Insert has to work everywhere -- the base, the shell, a mission -- and the
+// only per-frame hook is the battle cursor's, which exists in a mission alone:
+// in the base Insert was never read. So the list is polled on a thread of its
+// own, as sound practice is (learn.c). history.c takes a lock, and speech is
+// already safe from any thread. The keys are kept from the screen underneath
+// by rewrite_cmd in a menu and by hook_moviecheck in a mission.
+#define REVIEW_POLL_MS 15
+static volatile LONG g_review_stop;
+static DWORD WINAPI review_pump(LPVOID unused)
+{
+    (void)unused;
+    while (!g_review_stop) {
+        Sleep(REVIEW_POLL_MS);
+        if (!game_has_focus()) continue;
+        Fault f;
+        __try { review_poll(); }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("review: poll", &f, NULL);
+        }
+    }
+    return 0;
+}
+
 static void nav_poll(void)
 {
     // Practice owns the numpad while it is on (learn.h). Navigation stands
@@ -6049,7 +6815,9 @@ static void nav_poll(void)
     }
     // The ability menu holds the numpad while it is open, as practice does;
     // so does the unit information screen (F1) while it is up.
-    if (info_poll() || abar_menu_poll() || review_poll()) {
+    // Insert's list is polled on its own thread (review_pump); while it is
+    // open the numpad is its, as before.
+    if (info_poll() || abar_menu_poll() || history_is_open()) {
         memset(g_numpad_down, 0, sizeof g_numpad_down);
         g_glide_digit = 0;
         g_glide_steps = 0;
@@ -7395,6 +8163,11 @@ static DWORD WINAPI init(LPVOID param)
     char learn_why[256];
     learn_start(learn_why, sizeof learn_why);
     logf_("practice: %s\n", learn_why);
+
+    if (CreateThread(NULL, 0, review_pump, NULL, 0, NULL))
+        logf_("review: Insert polled every %d ms, everywhere\n", REVIEW_POLL_MS);
+    else
+        logf_("review: no thread (0x%08lx) -- Insert will not work\n", GetLastError());
 
     NativeEntry* tbl = (NativeEntry*)malloc(sizeof(NativeEntry) * MAX_NATIVES);
     if (!tbl) { logf_("FATAL: out of memory\n"); return 1; }

@@ -63,6 +63,25 @@ static const Remap g_remaps[] = {
     // change a setting and be told, correctly, that its only two choices are
     // to throw the change away or go back and look at it again.
     { "UIOptionsPCScreen", FXS_KEY_2,   FXS_BUTTON_X,       "Save changes and exit" },
+
+    // The base. UIStrategyHUD_FacilityMenu enters Mission Control on Y (303)
+    // or Q, and the Gollop chamber on X (302) or E -- but the headquarters
+    // has no input section of its own, so it runs on [Engine.PlayerInput]
+    // like the shell, and no letter ever arrives. Mission Control, where the
+    // geoscape and every mission are, had no key at all. 1-5 already pick a
+    // facility (612-616, DirectSelectFacility), so 6 and 7 follow on.
+    //
+    // Matched on "UIStrategyHUD" because every panel of the HUD sees the
+    // keystroke: UIStrategyHUD first, then the build queue, then the menu,
+    // which is the one that acts. The submenus and the queue have no case
+    // for 302 or 303, so the rewrite reaching them changes nothing.
+    { "UIStrategyHUD",     FXS_KEY_6,   FXS_BUTTON_Y,       "Mission Control" },
+    { "UIStrategyHUD",     FXS_KEY_7,   FXS_BUTTON_X,       "Gollop chamber" },
+
+    // The loadout removes the item in the selected slot on X (302,
+    // OnUnequip) or the letter X (538), and neither arrives from a keyboard
+    // in the headquarters. The screen has no case for any digit.
+    { "UISoldierLoadout",  FXS_KEY_1,   FXS_BUTTON_X,       "Remove item" },
 };
 
 int input_remap(const char* screen, int cmd)
@@ -115,6 +134,8 @@ const char* input_cmd_name(int cmd)
         case FXS_KEY_1:          return "1";
         case FXS_KEY_2:          return "2";
         case FXS_KEY_3:          return "3";
+        case FXS_KEY_6:          return "6";
+        case FXS_KEY_7:          return "7";
         default:                 return NULL;
     }
 }

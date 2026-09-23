@@ -45,6 +45,22 @@ PropKind props_kind(const void* prop);
 // Returns 0 if the value could not be read.
 int props_read_bool(const void* prop, const uint8_t* base, int* out);
 
+// The same for a field of an object rather than a frame local, where the
+// offset can run past the 0x1000 a frame allows: PlayerInput is large.
+int props_read_object_bool(const void* prop, const uint8_t* obj, int* out);
+
+// Where the first member past UProperty lives: UBoolProperty::BitMask, and
+// by the same layout UStructProperty::Struct. 0 until discovered.
+uint32_t props_mask_offset(void);
+
+// Looks for the BitMask offset among `node`'s children -- a function's
+// parameters or a struct's members -- when it is not yet known. Discovery at
+// startup takes the first frame the hook sees, and a first frame with no bool
+// left the mask unknown for the whole session: bools read as a whole dword,
+// and nothing that needed the mask could work. Cheap once found; returns
+// whether it is known now.
+int props_learn_mask(const void* node);
+
 // The two predicates a wrong offset has to get past. They are the whole of
 // the probe's judgement, and they are pure, so they live here where the
 // offline tests can reach them without a live game.

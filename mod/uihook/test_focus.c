@@ -30,6 +30,7 @@
 #include "nav.h"
 #include "tile.h"
 #include "scan.h"
+#include "hq.h"
 
 static int failures;
 
@@ -2203,6 +2204,73 @@ int main(void)
         const char* dupes[] = { "A", "", "A", "B" };
         focus_join_detail(dupes, 4, detail, sizeof detail);
         check(strcmp(detail, "A. B") == 0, "empties and repeats dropped");
+    }
+
+    printf("\nthe facility menu (headquarters)\n");
+    {
+        char say[128];
+        hq_facility_reset();
+        hq_facility_set(0, "RESEARCH", 1, 0);
+        hq_facility_set(2, "BARRACKS", 0, 1);
+        check(hq_facility_label(0, say, sizeof say) &&
+              strcmp(say, "RESEARCH, unavailable") == 0, "a grey facility is unavailable");
+        check(hq_facility_label(2, say, sizeof say) &&
+              strcmp(say, "BARRACKS, needs attention") == 0, "the alert is said");
+        check(!hq_facility_label(7, say, sizeof say), "an unpublished Id is unknown");
+
+        // As logged 2026-09-23, flattened as "SetAlert, SetButtonText,
+        // BARRACKS": Research enabled and alerted, Barracks' alert cleared.
+        AbarValue st[] = {
+            { ABAR_NULL }, { ABAR_NUMBER, 0 },
+            { ABAR_STRING, 0, 0, "SetAlert" }, { ABAR_BOOL, 0, 1 },
+            { ABAR_STRING, 0, 0, "SetButtonText" },
+            { ABAR_STRING, 0, 0, "<font color='#FFFFFF'>RESEARCH</font>" },
+            { ABAR_NULL }, { ABAR_NUMBER, 2 },
+            { ABAR_STRING, 0, 0, "SetAlert" }, { ABAR_BOOL, 0, 0 },
+        };
+        int touched = hq_facility_feed(st, 10);
+        check(touched == ((1 << 0) | (1 << 2)), "two records, two facilities touched");
+        check(hq_facility_label(0, say, sizeof say) &&
+              strcmp(say, "RESEARCH, needs attention") == 0, "recoloured and alerted");
+        check(hq_facility_label(2, say, sizeof say) &&
+              strcmp(say, "BARRACKS") == 0, "the alert cleared");
+
+        AbarValue bad[] = { { ABAR_NUMBER, 2 }, { ABAR_STRING, 0, 0, "SetAlert" } };
+        check(hq_facility_feed(bad, 2) == -1, "a stream without its null is refused");
+        check(hq_facility_label(2, say, sizeof say) && strcmp(say, "BARRACKS") == 0,
+              "and changes nothing");
+
+        check(strcmp(hq_pc_icon_label("4"), "Back") == 0, "PC frame 4 is Back");
+        check(strcmp(hq_pc_icon_label("2"), "Hologlobe") == 0, "PC frame 2 is the hologlobe");
+        check(hq_pc_icon_label("42") == NULL && hq_pc_icon_label("BACK") == NULL,
+              "anything else is not a frame");
+
+        check(input_remap("UIStrategyHUD_FacilityMenu_0", 617) == 303,
+              "6 is Mission Control on the facility menu");
+        check(input_remap("UIStrategyHUD_0", 618) == 302, "7 is the Gollop chamber");
+        check(input_remap("UIShellDifficulty_0", 617) == 0, "and nowhere else");
+
+        char row[256];
+        hq_soldier_row("Kelly Hudson", "Disco", "Assault", "Available", "rank1", 0, 1,
+                       row, sizeof row);
+        check(strcmp(row, "Squaddie Kelly Hudson 'Disco', Assault, Available, promotion") == 0,
+              "a soldier row: rank, name, nickname, class, status, promotion");
+        hq_soldier_row("Ana Ruiz", "", "", "Wounded", "rank0", 1, 0, row, sizeof row);
+        check(strcmp(row, "Rookie Ana Ruiz, Wounded, unavailable") == 0,
+              "a rookie with no nickname or class");
+        hq_soldier_row("Unit", "", "", "", "shiv2", 0, 0, row, sizeof row);
+        check(strcmp(row, "SHIV Unit") == 0, "a SHIV");
+        hq_soldier_row("Sq. Cesar Vargas", "", "HEAVY", "Active", "rank1", 0, 1, row, sizeof row);
+        check(strcmp(row, "Squaddie Cesar Vargas, HEAVY, Active, promotion") == 0,
+              "the name's rank abbreviation gives way to the word");
+        check(hq_soldier_count("3/4", row, sizeof row) &&
+              strcmp(row, "3 of 4 soldiers available") == 0, "the count as a heading");
+        check(!hq_soldier_count("SOLDIERS", row, sizeof row), "anything else is not a count");
+
+        char card[256] = "TACTICAL INFO: \xC2\xB7 Light armor \xC2\xB7 XCOM soldiers will appreciate it";
+        hq_card_clean(card);
+        check(strcmp(card, "TACTICAL INFO: Light armor. XCOM soldiers will appreciate it") == 0,
+              "card bullets become sentences");
     }
 
     printf("\nspeech debounce\n");

@@ -9,7 +9,11 @@
 #include <string.h>
 #include <stdio.h>
 
-#define FOCUS_SLOTS 12
+// Enough that a long walk through the base does not push the base's own
+// menus out: each soldier list, loadout (two lists), item card and alert is a
+// new object, and at 12 the facility menu was reclaimed after one trip
+// through the barracks -- every later move along it said "unresolved".
+#define FOCUS_SLOTS 32
 
 typedef struct {
     void*     obj;

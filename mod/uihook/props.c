@@ -187,3 +187,27 @@ int props_read_bool(const void* prop, const uint8_t* base, int* out)
     *out = (word & mask) != 0;
     return 1;
 }
+
+int props_read_object_bool(const void* prop, const uint8_t* obj, int* out)
+{
+    if (!g_ready || !prop || !obj) return 0;
+    if (!readable((const uint8_t*)prop + UPROPERTY_OFFSET, sizeof(uint32_t))) return 0;
+    uint32_t off = *(const uint32_t*)((const uint8_t*)prop + UPROPERTY_OFFSET);
+    if (off >= 0x10000 || !readable(obj + off, sizeof(uint32_t))) return 0;
+    uint32_t word = *(const uint32_t*)(obj + off);
+    uint32_t mask = 0xFFFFFFFFu;
+    if (g_mask_off && readable((const uint8_t*)prop + g_mask_off, sizeof(uint32_t)))
+        mask = *(const uint32_t*)((const uint8_t*)prop + g_mask_off);
+    *out = (word & mask) != 0;
+    return 1;
+}
+
+uint32_t props_mask_offset(void) { return g_mask_off; }
+
+int props_learn_mask(const void* node)
+{
+    if (g_mask_off) return 1;
+    if (!g_ready || !node) return 0;
+    find_mask_offset(node);
+    return g_mask_off != 0;
+}
