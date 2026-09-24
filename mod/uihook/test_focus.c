@@ -2364,6 +2364,59 @@ int main(void)
               "the mission's factors, row by row");
         check(hq_summary_factors("Mission Length,_missionLength,,,RATING:,Good", pr, sizeof pr) == 1 &&
               strcmp(pr, "Mission Length: Good") == 0, "a factor with a rating and no result");
+
+        // The Situation Room, as the EW log of 2026-09-24 drew it.
+        {
+            static char sit[HQ_SIT_LINES][HQ_SIT_TEXT];
+            hq_sit_doom(0);
+            hq_sit_country(0, "UNITED STATES", "", 2, 1);
+            hq_sit_country(11, "GERMANY", "+\xC2\xA7" "100", 1, 1);
+            hq_sit_country(7, "NIGERIA", "", 5, 0);
+            hq_sit_news("WORLD NEWS", "Activists in China say aliens are real//"
+                                      "Economist says future markets unpredictable// ");
+            hq_sit_objectives("", "NONE");
+            int k = hq_sit_lines(sit, HQ_SIT_LINES);
+            check(k == 7, "the room: doom, three countries, two headlines, objectives");
+            check(strcmp(sit[0], "Countries lost: 0") == 0, "doom first");
+            check(strcmp(sit[1], "UNITED STATES, panic 2 of 5") == 0, "a country and its panic");
+            check(strcmp(sit[2], "NIGERIA, panic 5 of 5, left XCOM") == 0,
+                  "in the screen's order, and one that has left");
+            check(strcmp(sit[3], "GERMANY, panic 1 of 5, funding +100") == 0,
+                  "funding without the section sign");
+            check(strcmp(sit[4], "WORLD NEWS: Activists in China say aliens are real") == 0 &&
+                  strcmp(sit[5], "Economist says future markets unpredictable") == 0,
+                  "the ticker split into headlines, the title on the first");
+            check(strcmp(sit[6], "OBJECTIVES: NONE") == 0, "no objectives");
+            hq_sit_objectives("Build a satellite. In progress", "Build a satellite. In progress. Details");
+            k = hq_sit_lines(sit, HQ_SIT_LINES);
+            check(k == 8 && strcmp(sit[6], "OBJECTIVES: Build a satellite. In progress") == 0 &&
+                  strcmp(sit[7], "Build a satellite. In progress. Details") == 0,
+                  "the brief, then the in-depth text");
+
+            history_reset();
+            history_add("Your turn.");
+            check(history_page_open("Situation Room", (const char (*)[HISTORY_PAGE_TEXT])sit, k,
+                                    pr, sizeof pr) &&
+                  strcmp(pr, "Situation Room, 8. Countries lost: 0") == 0, "the page opens on its first line");
+            check(history_is_open() && history_page_is_open(), "and counts as the list being open");
+            history_step(-1, pr, sizeof pr);
+            check(strcmp(pr, "Top. Countries lost: 0") == 0, "the top says so");
+            history_step(1, pr, sizeof pr);
+            check(strcmp(pr, "UNITED STATES, panic 2 of 5") == 0, "down walks it");
+            history_add("Alien activity.");
+            history_current(pr, sizeof pr);
+            check(strcmp(pr, "UNITED STATES, panic 2 of 5") == 0, "announcements do not move it");
+            for (int i = 0; i < 10; i++) history_step(1, pr, sizeof pr);
+            check(strncmp(pr, "End. ", 5) == 0, "the end says so");
+            history_close();
+            check(!history_is_open() && !history_page_is_open(), "closes");
+            check(history_open(pr, sizeof pr) && strcmp(pr, "Announcements, 2. Alien activity.") == 0,
+                  "Insert's list is untouched by the page");
+            history_close();
+            check(!history_page_open("Situation Room", (const char (*)[HISTORY_PAGE_TEXT])sit, 0,
+                                     pr, sizeof pr) && !history_is_open(),
+                  "an empty room opens nothing");
+        }
     }
 
     printf("\noptions\n");

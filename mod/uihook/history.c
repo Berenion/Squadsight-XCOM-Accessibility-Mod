@@ -14,11 +14,18 @@ static int g_count;
 static int g_open;
 static unsigned g_at;       // the seq under the cursor
 
+// A page (history_page_open): lines of its own, walked by index.
+static char g_page[HISTORY_PAGE_MAX][HISTORY_PAGE_TEXT];
+static int g_page_n;
+static int g_page_open;
+static int g_page_at;
+
 static void h_reset(void)
 {
     g_next = 0;
     g_count = 0;
     g_open = 0;
+    g_page_open = 0;
 }
 
 static void h_add(const char* text)
@@ -69,12 +76,42 @@ static int h_open(char* out, size_t out_sz)
     return 1;
 }
 
-static void h_close(void) { g_open = 0; }
+static void h_close(void) { g_open = 0; g_page_open = 0; }
 
-static int h_is_open(void) { return g_open; }
+static int h_is_open(void) { return g_open || g_page_open; }
+
+static int h_page_open(const char* title, const char (*lines)[HISTORY_PAGE_TEXT], int n,
+                       char* out, size_t out_sz)
+{
+    if (n > HISTORY_PAGE_MAX) n = HISTORY_PAGE_MAX;
+    if (n <= 0) {
+        _snprintf_s(out, out_sz, _TRUNCATE, "%s: nothing to read yet.", title ? title : "");
+        return 0;
+    }
+    for (int i = 0; i < n; i++) strncpy_s(g_page[i], HISTORY_PAGE_TEXT, lines[i], _TRUNCATE);
+    g_page_n = n;
+    g_page_at = 0;
+    g_page_open = 1;
+    g_open = 0;
+    _snprintf_s(out, out_sz, _TRUNCATE, "%s, %d. %s", title ? title : "", n, g_page[0]);
+    return 1;
+}
+
+static void h_page_step(int dir, char* out, size_t out_sz)
+{
+    int to = g_page_at + (dir < 0 ? -1 : 1);
+    if (to < 0 || to >= g_page_n) {
+        _snprintf_s(out, out_sz, _TRUNCATE, "%s %s", dir < 0 ? "Top." : "End.",
+                    g_page[g_page_at]);
+        return;
+    }
+    g_page_at = to;
+    _snprintf_s(out, out_sz, _TRUNCATE, "%s", g_page[g_page_at]);
+}
 
 static void h_step(int dir, char* out, size_t out_sz)
 {
+    if (g_page_open) { h_page_step(dir, out, out_sz); return; }
     unsigned oldest = g_next - (unsigned)g_count;
     if (dir < 0) {
         if (g_at > oldest) {
@@ -95,6 +132,7 @@ static void h_step(int dir, char* out, size_t out_sz)
 
 static void h_current(char* out, size_t out_sz)
 {
+    if (g_page_open) { _snprintf_s(out, out_sz, _TRUNCATE, "%s", g_page[g_page_at]); return; }
     _snprintf_s(out, out_sz, _TRUNCATE, "%s", g_count ? entry(g_at) : "");
 }
 
@@ -128,3 +166,7 @@ void history_close(void) { lock(); h_close(); unlock(); }
 int  history_is_open(void) { lock(); int r = h_is_open(); unlock(); return r; }
 void history_step(int dir, char* out, size_t out_sz) { lock(); h_step(dir, out, out_sz); unlock(); }
 void history_current(char* out, size_t out_sz) { lock(); h_current(out, out_sz); unlock(); }
+int  history_page_open(const char* title, const char (*lines)[HISTORY_PAGE_TEXT], int n,
+                       char* out, size_t out_sz)
+{ lock(); int r = h_page_open(title, lines, n, out, out_sz); unlock(); return r; }
+int  history_page_is_open(void) { lock(); int r = g_page_open; unlock(); return r; }

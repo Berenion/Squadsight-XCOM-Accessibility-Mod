@@ -402,6 +402,10 @@ static void*     g_msum_screen;
 // When each layer's HUD last drew. See capture_body.
 static volatile ULONGLONG g_seen_strategy_at;
 static volatile ULONGLONG g_seen_tactical_at;
+// When the Situation Room last drew or took a key, and when the player was
+// last seen somewhere else. See sitroom_up.
+static volatile ULONGLONG g_sitroom_at;
+static volatile ULONGLONG g_sitroom_left_at;
 
 // The loadout's inventory list and its last selection (loadout_leave_locker).
 static void*     g_loadout_inv;          // the inventory list, as focus keys it
@@ -992,6 +996,31 @@ static void frame_args(void* node, uint8_t* locals, FrameArgs* a)
     }
 }
 
+// The call's `index`th string parameter, whole (frame_args keeps 1024
+// characters). Markup is stripped. Empty when there is no such parameter.
+static void frame_string(void* node, uint8_t* locals, int index, char* out, size_t out_sz)
+{
+    out[0] = 0;
+    if (!locals || !readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*))) return;
+    void* prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
+    int at = 0;
+    for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
+        if (!readable(prop, 0x68)) return;
+        uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
+        uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
+        void* next     = *(void**)((uint8_t*)prop + UFIELD_NEXT);
+        if ((flags & CPF_PARM) && !(flags & CPF_RETURNPARM) && off < 0x1000 &&
+            props_kind(prop) == PROP_UNKNOWN) {
+            if (at++ == index) {
+                if (read_fstring((const FString*)(locals + off), out, out_sz)) strip_markup(out);
+                else out[0] = 0;
+                return;
+            }
+        }
+        prop = next;
+    }
+}
+
 static void info_note(LONG n, void* object, const char* obj_name, const char* fn_name,
                       void* node, uint8_t* locals);
 static ULONGLONG g_info_due;            // when to say the summary, 0 for not yet
@@ -1225,6 +1254,40 @@ static void capture_body(const char* tag, LONG n, void* stack)
             return;
         }
     }
+
+    // The Situation Room's display. See hq.h. Kept for Delete; nothing else
+    // is changed, so the countries are still filed as the slots the satellite
+    // view's SetSelected moves over. The ticker and the objectives are read
+    // from the frame whole: the payload keeps 256 characters, and the ticker
+    // is every headline in one string.
+    if ((strncmp(obj_name, "UISituationRoom_", 16) == 0 &&
+         obj_name[16] >= '0' && obj_name[16] <= '9') ||
+        strncmp(obj_name, "UIObjectivesScreen_", 19) == 0) {
+        g_sitroom_at = GetTickCount64();
+        if (strcmp(fn_name, "AS_SetCountryInfo") == 0 && p->nnumbers >= 2) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            hq_sit_country((int)p->numbers[0], a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
+                           (int)p->numbers[1], a.nb > 0 ? a.b[0] : 1);
+        } else if (strcmp(fn_name, "AS_SetTickerText") == 0) {
+            static char title[64], text[MAX_STR];
+            frame_string(node, locals, 0, title, sizeof title);
+            frame_string(node, locals, 1, text, sizeof text);
+            hq_sit_news(title, text);
+        } else if (strcmp(fn_name, "AS_SetDoomLevel") == 0 && p->nnumbers >= 1) {
+            hq_sit_doom((int)p->numbers[0]);
+        } else if (strcmp(fn_name, "AS_SetSmallBody") == 0 ||
+                   strcmp(fn_name, "AS_SetLargeBody") == 0) {
+            static char body[MAX_STR];
+            frame_string(node, locals, 0, body, sizeof body);
+            if (fn_name[6] == 'S') hq_sit_objectives(body, NULL);
+            else                   hq_sit_objectives(NULL, body);
+        }
+    }
+    // Back at the facility row: out of the room, whatever drew last.
+    if (strncmp(obj_name, "UIStrategyHUD_FacilityMenu", 26) == 0 &&
+        strcmp(fn_name, "OnReceiveFocus") == 0)
+        g_sitroom_left_at = GetTickCount64();
 
     // The mission's objectives. See mission.h. Kept, and said once a burst
     // of changes is over (mission_poll).
@@ -2791,6 +2854,38 @@ static void fault_log(const char* prefix, const Fault* f, const char* where)
 static void hq_locked_note(LONG n, void* sub, const char* screen);
 static void loadout_leave_locker(LONG n, void* loadout, const char* screen);
 
+// Whether a key reaching `screen` says the player is in the Situation Room or
+// somewhere else. Every key in the room passes through its own screens
+// (UIObjectivesScreen first, then the strategy HUD and the facility menu,
+// then UIStrategyHUD_FSM_SituationRoom; UISituationRoom itself in the
+// satellite view), and the strategy HUD and the facility menu see every key
+// at the base as well, so those two say nothing either way. Any other
+// screen -- another facility, the Gray Market, a dialogue -- means the
+// player has left the room's main view.
+static void sitroom_key_reached(const char* screen)
+{
+    if (strncmp(screen, "UISituationRoom", 15) == 0 ||
+        strncmp(screen, "UIObjectivesScreen", 18) == 0 ||
+        strncmp(screen, "UIStrategyHUD_FSM_SituationRoom", 31) == 0) {
+        g_sitroom_at = GetTickCount64();
+        return;
+    }
+    if ((strncmp(screen, "UIStrategyHUD_", 14) == 0 && screen[14] >= '0' && screen[14] <= '9') ||
+        strncmp(screen, "UIStrategyHUD_FacilityMenu", 26) == 0 ||
+        strncmp(screen, "UIStrategyHUD_BuildQueue", 24) == 0)
+        return;
+    g_sitroom_left_at = GetTickCount64();
+}
+
+// Whether Delete should open the Situation Room rather than the base's
+// status: the room drew or took a key more recently than the player was seen
+// anywhere else, and the base more recently than a mission.
+static int sitroom_up(void)
+{
+    return g_sitroom_at && g_sitroom_at > g_sitroom_left_at &&
+           g_seen_strategy_at && g_seen_tactical_at <= g_seen_strategy_at;
+}
+
 static int rewrite_cmd(LONG n, void* stack)
 {
     g_ui_key_at = GetTickCount64();
@@ -2803,6 +2898,7 @@ static int rewrite_cmd(LONG n, void* stack)
 
     char screen[128] = "?";
     object_name(object, screen, sizeof screen);
+    sitroom_key_reached(screen);
 
     void* prop = NULL;
     if (readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
@@ -7808,7 +7904,8 @@ static int review_poll(void)
         pressed[k] = now[k] && !g_review_was[k];
         g_review_was[k] = now[k];
     }
-    char say[HISTORY_TEXT + 64];
+    // A page's lines (history_page_open) are longer than an announcement.
+    static char say[HISTORY_PAGE_TEXT + 64];
     if (!history_is_open()) {
         if (!pressed[0]) return 0;
         g_menu_polled_at = GetTickCount64();
@@ -7842,14 +7939,33 @@ static volatile LONG g_review_stop;
 // key says everything about the selected soldier in a mission (nav_poll), so
 // it acts here only while the strategy HUD has drawn more recently than the
 // tactical one.
+//
+// In the Situation Room it opens the room as a list instead (hq_sit_lines),
+// on Insert's machinery, so the same keys walk and close it; Delete closes it
+// too.
 static int g_status_was;
 static void status_poll(void)
 {
     int down = (GetAsyncKeyState(VK_DELETE) & 0x8000) != 0;
     int pressed = down && !g_status_was;
     g_status_was = down;
-    if (!pressed || history_is_open()) return;
+    if (!pressed) return;
+    if (history_page_is_open()) { review_end("Delete"); return; }
+    if (history_is_open()) return;
     if (!g_seen_strategy_at || g_seen_tactical_at > g_seen_strategy_at) return;
+    if (sitroom_up()) {
+        typedef char page_fits_room[HQ_SIT_TEXT == HISTORY_PAGE_TEXT ? 1 : -1];
+        static char lines[HISTORY_PAGE_MAX][HISTORY_PAGE_TEXT];
+        static char say[HISTORY_PAGE_TEXT + 64];
+        int n = hq_sit_lines(lines, HISTORY_PAGE_MAX);
+        g_menu_polled_at = GetTickCount64();
+        int opened = history_page_open("Situation Room", (const char (*)[HISTORY_PAGE_TEXT])lines,
+                                       n, say, sizeof say);
+        logf_("sitroom: %s, %d entries \"%s\"\n", opened ? "opened" : "nothing to open", n, say);
+        speech_cancel_pending();
+        if (g_speak) speech_say_now(say);
+        return;
+    }
     char say[1024];
     if (!hq_status_line(say, sizeof say))
         strncpy_s(say, sizeof say, "Nothing known about the base yet.", _TRUNCATE);

@@ -193,3 +193,48 @@ void hq_squad_row(const char* name, const char* nick, const char* class_desc,
 // "Frag Grenade", "...Inv_AssaultRifleModern" -> "Assault Rifle Modern".
 // Empty when the path is not an inventory icon.
 void hq_item_from_image(const char* path, char* out, size_t out_sz);
+
+// ---- the Situation Room (Delete in the room) ---------------------------------
+//
+// UISituationRoom's main view is a display with no cursor: its arrows all go
+// to the facility submenu. What it shows, from MainSituationViewState's
+// PushedState (UpdateData, RealizeMap, RealizeObjectives):
+//
+//     AS_SetCountryInfo(int iIndex, countryName, cash, int panicLevel,
+//                       bool bIsActive)
+//         -- one per Council nation, 16, in SortSitCountries' order. cash is
+//            "+\xC2\xA7" "100" when the country funds XCOM or has satellite
+//            coverage, else "". panicLevel is XGCountry.GetPanicBlocks(),
+//            1..5. bIsActive is false once the country has left XCOM.
+//     AS_SetTickerText(title, txt) -- "WORLD NEWS", and the items joined
+//            by "//", each coloured by its own state
+//     AS_SetDoomLevel(int Level) -- World().m_iNumCountriesLost. The limit
+//            (LOSE_CONDITION_NUM_DESERTERS) is never sent.
+//     UIObjectivesScreen.AS_SetSmallBody(brief) / AS_SetLargeBody(large)
+//         -- the brief is the sub-objectives as bullets, joined by <br>; the
+//            large one each with its in-depth text, or "NONE".
+//
+// Only the panic level told a sighted player anything the names did not, and
+// it was a number, so it never showed. Kept here and opened as a list
+// (history_page_open) by Delete while the room is up.
+
+#define HQ_SIT_COUNTRIES 24
+#define HQ_SIT_NEWS      16
+#define HQ_SIT_LINES     (HQ_SIT_COUNTRIES + HQ_SIT_NEWS + 4)
+#define HQ_SIT_TEXT      1024
+
+void hq_sit_country(int index, const char* name, const char* cash, int panic, int active);
+// The ticker's whole text, items split on "//".
+void hq_sit_news(const char* title, const char* text);
+void hq_sit_doom(int lost);
+void hq_sit_objectives(const char* brief, const char* large);
+
+// The room as list entries, in the order the screen reads: countries lost,
+// then each country, the news, the objectives. Returns how many.
+//     "Countries lost: 0"
+//     "UNITED STATES, panic 2 of 5"
+//     "GERMANY, panic 1 of 5, funding +100"
+//     "NIGERIA, panic 5 of 5, left XCOM"
+//     "WORLD NEWS: Activists in China say aliens are real ..."
+//     "OBJECTIVES: NONE"
+int  hq_sit_lines(char lines[][HQ_SIT_TEXT], int max);

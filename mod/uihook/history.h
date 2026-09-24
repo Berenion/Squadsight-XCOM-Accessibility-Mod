@@ -43,3 +43,17 @@ void history_step(int dir, char* out, size_t out_sz);
 
 // The entry under the cursor, again.
 void history_current(char* out, size_t out_sz);
+
+// ---- a page ----------------------------------------------------------------
+//
+// The same list, over lines handed to it instead of the announcements: what
+// a screen shows with no cursor to walk it (the Situation Room). Opens on the
+// first line with `title` and the count in front; Up and Down walk it, with
+// "Top." / "End." at either end, and history_close or any key that closes
+// the list closes it. history_is_open is true while it is up. The lines are
+// copied.
+#define HISTORY_PAGE_MAX  48
+#define HISTORY_PAGE_TEXT 1024
+int history_page_open(const char* title, const char (*lines)[HISTORY_PAGE_TEXT], int n,
+                      char* out, size_t out_sz);
+int history_page_is_open(void);

@@ -517,3 +517,96 @@ void hq_squad_row(const char* name, const char* nick, const char* class_desc,
                 i1[0] ? ", " : "", i1, i2[0] ? ", " : "", i2,
                 promote && *promote ? ", " : "", promote ? promote : "");
 }
+
+// ---- the Situation Room ------------------------------------------------------
+
+typedef struct {
+    int  known;
+    char name[64];
+    char cash[32];
+    int  panic;
+    int  active;
+} SitCountry;
+
+static SitCountry g_sit[HQ_SIT_COUNTRIES];
+static char g_sit_news_title[64];
+static char g_sit_news[HQ_SIT_NEWS][HQ_SIT_TEXT];
+static int  g_sit_nnews;
+static int  g_sit_doom = -1;
+static char g_sit_brief[HQ_SIT_TEXT];
+static char g_sit_large[HQ_SIT_TEXT];
+
+void hq_sit_country(int index, const char* name, const char* cash, int panic, int active)
+{
+    if (index < 0 || index >= HQ_SIT_COUNTRIES || !name || !*name) return;
+    st_lock();
+    SitCountry* c = &g_sit[index];
+    c->known = 1;
+    strncpy_s(c->name, sizeof c->name, name, _TRUNCATE);
+    copy_without_section(c->cash, sizeof c->cash, cash);
+    c->panic = panic;
+    c->active = active;
+    st_unlock();
+}
+
+void hq_sit_news(const char* title, const char* text)
+{
+    st_lock();
+    strncpy_s(g_sit_news_title, sizeof g_sit_news_title, title ? title : "", _TRUNCATE);
+    g_sit_nnews = 0;
+    const char* r = text ? text : "";
+    while (*r && g_sit_nnews < HQ_SIT_NEWS) {
+        const char* end = strstr(r, "//");
+        size_t len = end ? (size_t)(end - r) : strlen(r);
+        while (len && *r == ' ') { r++; len--; }
+        while (len && r[len - 1] == ' ') len--;
+        if (len) {
+            char* d = g_sit_news[g_sit_nnews++];
+            size_t k = len < HQ_SIT_TEXT - 1 ? len : HQ_SIT_TEXT - 1;
+            memcpy(d, r, k);
+            d[k] = 0;
+        }
+        if (!end) break;
+        r = end + 2;
+    }
+    st_unlock();
+}
+
+void hq_sit_doom(int lost) { st_lock(); g_sit_doom = lost; st_unlock(); }
+
+void hq_sit_objectives(const char* brief, const char* large)
+{
+    st_lock();
+    if (brief) strncpy_s(g_sit_brief, sizeof g_sit_brief, brief, _TRUNCATE);
+    if (large) strncpy_s(g_sit_large, sizeof g_sit_large, large, _TRUNCATE);
+    st_unlock();
+}
+
+int hq_sit_lines(char lines[][HQ_SIT_TEXT], int max)
+{
+    int n = 0;
+    st_lock();
+    if (g_sit_doom >= 0 && n < max)
+        _snprintf_s(lines[n++], HQ_SIT_TEXT, _TRUNCATE, "Countries lost: %d", g_sit_doom);
+    for (int i = 0; i < HQ_SIT_COUNTRIES && n < max; i++) {
+        const SitCountry* c = &g_sit[i];
+        if (!c->known) continue;
+        _snprintf_s(lines[n++], HQ_SIT_TEXT, _TRUNCATE, "%s, panic %d of 5%s%s%s", c->name,
+                    c->panic, c->cash[0] ? ", funding " : "", c->cash,
+                    c->active ? "" : ", left XCOM");
+    }
+    for (int i = 0; i < g_sit_nnews && n < max; i++)
+        _snprintf_s(lines[n++], HQ_SIT_TEXT, _TRUNCATE, "%s%s%s",
+                    i == 0 && g_sit_news_title[0] ? g_sit_news_title : "",
+                    i == 0 && g_sit_news_title[0] ? ": " : "", g_sit_news[i]);
+    // The brief lists the sub-objectives; the large text is each again with
+    // its in-depth description, or "NONE" when there are none -- the brief is
+    // empty then.
+    if (g_sit_brief[0] && n < max)
+        _snprintf_s(lines[n++], HQ_SIT_TEXT, _TRUNCATE, "OBJECTIVES: %s", g_sit_brief);
+    if (g_sit_large[0] && n < max)
+        _snprintf_s(lines[n++], HQ_SIT_TEXT, _TRUNCATE, "%s%s",
+                    g_sit_brief[0] ? "" : "OBJECTIVES: ", g_sit_large);
+    st_unlock();
+    return n;
+}
