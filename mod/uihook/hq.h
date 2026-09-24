@@ -238,3 +238,36 @@ void hq_sit_objectives(const char* brief, const char* large);
 //     "WORLD NEWS: Activists in China say aliens are real ..."
 //     "OBJECTIVES: NONE"
 int  hq_sit_lines(char lines[][HQ_SIT_TEXT], int max);
+
+// ---- a day passing (the geoscape's clock) ------------------------------------
+//
+// UIStrategyComponent_Clock.UpdateData sends AS_SetDateTime whenever the game's
+// minute changes, rate-limited to 30 a second (m_fUpdateRate 0.033), and only
+// while the clock is visible and focused -- so while time is running on the
+// geoscape, and scanning above all, it is a steady stream. The first two
+// strings are the date ("1 March", "2015" in English; the year first in
+// Korean and Japanese), so the pair is compared whole, whatever the language.
+//
+// A day has passed when the date changes between two updates less than
+// HQ_DAY_GAP_MS apart. A load, a return from a mission or the clock coming
+// back after another screen all arrive after a longer silence, and are a
+// jump rather than time passing: no tick.
+#define HQ_DAY_GAP_MS 3000
+int hq_day_passed(const char* date_a, const char* date_b, unsigned long long now_ms);
+
+// ---- Mission Control's notices ----------------------------------------------
+//
+// XGMissionControlUI.AddNotice puts a short line on top of m_arrNotices --
+// an item built, new scientists or engineers, an excavation finished, a
+// soldier back from the infirmary -- and each lapses after its fTimer (4).
+// UIMissionControl.UpdateNotices sends the whole list on every refresh, newest
+// first, as one string: each notice followed by "\n", Invoke(
+// "DisplayNotifications", [displayString]). Nothing read it.
+//
+// Feeds one such string (raw, the "\n"s kept) and returns how many of its
+// lines were not in the one before -- the new notices -- joined in `out`, the
+// oldest first. A soldier's abbreviated rank at the start of a line becomes
+// the word: "Rk. Christophe Leroy has returned to active duty." ->
+// "Rookie Christophe Leroy has returned to active duty."
+#define HQ_NOTICES 16
+int hq_notices_new(const char* raw, char* out, size_t out_sz);

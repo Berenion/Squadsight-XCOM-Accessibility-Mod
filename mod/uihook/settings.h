@@ -29,6 +29,8 @@ enum {
     SET_WINDOW_LEVEL,   // their loudness, notch 0..4 (AUDIO_WINDOWS)
     SET_STEPS,          // a cue on a step up or down a floor, on or off
     SET_STEP_LEVEL,     // its loudness, notch 0..4 (AUDIO_STEPS)
+    SET_DAYS,           // a tick as each day passes on the geoscape, on or off
+    SET_DAY_LEVEL,      // its loudness, notch 0..4 (AUDIO_DAYS)
     SET_GLIDE,          // how fast a held numpad key moves: GLIDE_*
     SET_COMBAT,         // damage, misses and statuses
     SET_SIGHT,          // enemies coming into and going out of sight

@@ -63,6 +63,7 @@ enum {
     AUDIO_DOORS,        // doors nearby
     AUDIO_WINDOWS,      // windows nearby
     AUDIO_STEPS,        // a step up or down a floor
+    AUDIO_DAYS,         // a day passing on the geoscape
     AUDIO_SOURCES
 };
 

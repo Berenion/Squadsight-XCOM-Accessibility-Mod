@@ -92,7 +92,7 @@ int  focus_count(void* obj);
 // its description, and moving the cursor read those back by position.  The
 // panel is kept beside the list instead, with when it arrived, and said
 // after the label of the item it describes.
-#define FOCUS_MAX_DETAIL 1024
+#define FOCUS_MAX_DETAIL 2048
 
 void focus_set_detail(void* obj, const char* text);
 int  focus_detail(void* obj, char* out, size_t out_sz, ULONGLONG* at);

@@ -37,7 +37,7 @@ static const int MENU[] = {
     SET_FIELD, SET_WALL_LEVEL, ITEM_PRACTICE,
     SET_HEARTS, SET_HEART_SOLO, SET_HEART_LEVEL, SET_ALIENS, SET_ALIEN_LEVEL,
     SET_DOORS, SET_DOOR_LEVEL, SET_WINDOWS, SET_WINDOW_LEVEL,
-    SET_STEPS, SET_STEP_LEVEL, ITEM_HEAR,
+    SET_STEPS, SET_STEP_LEVEL, SET_DAYS, SET_DAY_LEVEL, ITEM_HEAR,
     SET_GLIDE,
     SET_COMBAT, SET_SIGHT, SET_TURN, SET_TICKER, SET_OBJECTIVES, SET_NARRATIVE,
 };
@@ -51,6 +51,7 @@ static const struct { int setting, source; } LEVELS[] = {
     { SET_DOOR_LEVEL,  AUDIO_DOORS  },
     { SET_WINDOW_LEVEL, AUDIO_WINDOWS },
     { SET_STEP_LEVEL,  AUDIO_STEPS  },
+    { SET_DAY_LEVEL,   AUDIO_DAYS   },
 };
 #define NLEVELS ((int)(sizeof LEVELS / sizeof LEVELS[0]))
 
@@ -257,6 +258,7 @@ static const HeartDemo DEMO[] = {
     { "Down one floor",             HEART_STEP_DOWN, 0, 0, 0, 0, 0, 0, 1 },
     { "Down two floors, a roof to the ground", HEART_STEP_DOWN, 0, 0, 0, 0, 0, 0, 2 },
     { "Up three floors",            HEART_STEP_UP,   0, 0, 0, 0, 0, 0, 3 },
+    { "A day passing",              HEART_TICK,      0, 0, 0, 0, 0, 0, 1 },
 };
 #define DEMO_ITEMS ((int)(sizeof DEMO / sizeof DEMO[0]))
 // Three of a steady heart -- at the calm pace that is already five seconds
@@ -396,7 +398,8 @@ static void preview(int setting)
     } else if (level_source(setting) >= 0) {
         // Every other source is a kind of heart, in the same order.
         static const int KIND[AUDIO_SOURCES] = {
-            -1, HEART_ALLY, HEART_ALIEN, HEART_DOOR, HEART_WINDOW, HEART_STEP_DOWN
+            -1, HEART_ALLY, HEART_ALIEN, HEART_DOOR, HEART_WINDOW, HEART_STEP_DOWN,
+            HEART_TICK
         };
         HeartSound s;
         heart_sound(0, 0, -1, -1, 0, SOLDIER_WOUND_NONE, &s);

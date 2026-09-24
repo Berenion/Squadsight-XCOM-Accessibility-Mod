@@ -1021,6 +1021,30 @@ static void frame_string(void* node, uint8_t* locals, int index, char* out, size
     }
 }
 
+// A string local or parameter of the call, by name, as it is: no markup
+// stripped, line breaks kept. Returns 0 when there is none.
+static int frame_local_raw(void* node, uint8_t* locals, const char* name, char* out,
+                           size_t out_sz)
+{
+    out[0] = 0;
+    if (!locals || !readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*))) return 0;
+    void* prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
+    for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
+        if (!readable(prop, 0x68)) return 0;
+        uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
+        uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
+        void* next     = *(void**)((uint8_t*)prop + UFIELD_NEXT);
+        if (!(flags & CPF_RETURNPARM) && off < 0x1000 && props_kind(prop) == PROP_UNKNOWN) {
+            char pname[64];
+            object_name(prop, pname, sizeof pname);
+            if (strcmp(pname, name) == 0)
+                return read_fstring((const FString*)(locals + off), out, out_sz);
+        }
+        prop = next;
+    }
+    return 0;
+}
+
 static void info_note(LONG n, void* object, const char* obj_name, const char* fn_name,
                       void* node, uint8_t* locals);
 static ULONGLONG g_info_due;            // when to say the summary, 0 for not yet
@@ -1132,6 +1156,121 @@ static void mission_poll(void)
     if (vis != 0) announce_as(SET_OBJECTIVES, say);
 }
 
+// ---- Mission Control alerts ---------------------------------------------------
+//
+// UIMissionControl_AlertBase.OnInit fills a simple alert (title, text, one
+// button) and then Invoke("AlertFullyLoaded"); the OnInit the log shows is
+// that. The alerts with several buttons -- research, engineering and the
+// Foundry finishing, a facility built, a UFO, terror, the alien base, EXALT
+// -- are UIMissionControl_AlertWithMultipleButtons, whose OnInit calls
+// super.OnInit() *first* and only then UpdateData(): at AlertFullyLoaded they
+// are still empty. Said then, the research alert of 2026-09-24 was
+// ALERT "". Such an alert is held (g_alert_due) and said once its burst is
+// over: at the first call on anything else, or the first key.
+//
+// ScienceAlert.UpdateData (EW, and EU the same) sends
+//     AS_SetTitle(name), AS_SetSubTitle("RESEARCH COMPLETE"), AS_SetText(text),
+//     AS_SetButtonData(i, label, bool disabled) per reply,
+//     AS_SetImage(path)
+// and the engineering and Foundry ones AS_SetRebates(label, lines) as well.
+// The image was taken for a screen publishing a one-item list, and replaced
+// the buttons with its path.
+static void* g_alert_due;               // the alert waiting to be said
+static char  g_alert_title[FOCUS_MAX_LABEL];
+static char  g_alert_text[MAX_STR];
+static char  g_alert_sub[FOCUS_MAX_LABEL];
+static char  g_alert_rebates[MAX_STR];
+
+static void alert_say(LONG n, const char* tag, const char* obj_name, void* object)
+{
+    static char say[MAX_STR * 2 + FOCUS_MAX_LABEL * 8];
+    const char* parts[4] = { g_alert_title, g_alert_sub, g_alert_text, g_alert_rebates };
+    focus_join_detail(parts, 4, say, sizeof say);
+    g_alert_title[0] = g_alert_text[0] = g_alert_sub[0] = g_alert_rebates[0] = 0;
+    int nb = focus_count(object);
+    for (int i = 0; i < nb; i++) {
+        char label[FOCUS_MAX_LABEL];
+        if (!focus_label_at(object, i, label, sizeof label)) continue;
+        size_t used = strlen(say);
+        const char* lead = !used ? "Options: "
+                         : say[used - 1] == '.' ? " Options: " : ". Options: ";
+        _snprintf_s(say + used, sizeof say - used, _TRUNCATE, "%s%s",
+                    i == 0 ? lead : ", ", label);
+    }
+    logf_("[%ld] %s %s  ALERT \"%s\"\n", n, tag, obj_name, say);
+    speech_cancel_pending();
+    announce(say);
+    // The first button is the selected one; a move off it and back must
+    // still be said.
+    g_focus_obj = object;
+    g_focus_idx = 0;
+}
+
+// Says a held alert, when `object` is not it: its burst is over.
+static void alert_flush(LONG n, const char* tag, void* object)
+{
+    if (!g_alert_due || object == g_alert_due) return;
+    void* due = g_alert_due;
+    g_alert_due = NULL;
+    char name[128] = "?";
+    object_name(due, name, sizeof name);
+    alert_say(n, tag, name, due);
+}
+
+// One call on an alert. Returns 1 when it has been dealt with.
+static int alert_note(LONG n, const char* tag, const char* obj_name, const char* fn_name,
+                      void* object, void* node, uint8_t* locals, const Payload* p)
+{
+    if (strcmp(fn_name, "AS_SetTitle") == 0) {
+        frame_string(node, locals, 0, g_alert_title, sizeof g_alert_title);
+        return 1;
+    }
+    if (strcmp(fn_name, "AS_SetText") == 0) {
+        frame_string(node, locals, 0, g_alert_text, sizeof g_alert_text);
+        return 1;
+    }
+    if (strcmp(fn_name, "AS_SetSubTitle") == 0) {
+        frame_string(node, locals, 0, g_alert_sub, sizeof g_alert_sub);
+        return 1;
+    }
+    if (strcmp(fn_name, "AS_SetRebates") == 0) {
+        static char label[FOCUS_MAX_LABEL], lines[MAX_STR];
+        frame_string(node, locals, 0, label, sizeof label);
+        frame_string(node, locals, 1, lines, sizeof lines);
+        const char* parts[2] = { label, lines };
+        focus_join_detail(parts, 2, g_alert_rebates, sizeof g_alert_rebates);
+        return 1;
+    }
+    if (strcmp(fn_name, "AS_SetImage") == 0) return 1;
+    if (strcmp(fn_name, "AS_SetButtonText") == 0 && p->nstrings) {
+        focus_set(object, 0, p->strings[0]);
+        return 1;
+    }
+    // (int index, string label, bool disabled): a reply that cannot be
+    // chosen yet plays the bad sound on Enter.
+    if (strcmp(fn_name, "AS_SetButtonData") == 0 && p->nnumbers && p->nstrings) {
+        char label[FOCUS_MAX_LABEL];
+        _snprintf_s(label, sizeof label, _TRUNCATE, "%s%s", p->strings[0],
+                    p->nbools && p->bools[0] ? ", unavailable" : "");
+        focus_set(object, (int)p->numbers[0], label);
+        return 1;
+    }
+    if (strcmp(fn_name, "OnInit") == 0) {
+        // Anything a previous alert at this address left is not this one's.
+        g_alert_due = NULL;
+        if (g_alert_title[0] || g_alert_text[0]) {
+            alert_say(n, tag, obj_name, object);
+        } else {
+            focus_begin(object);
+            g_alert_due = object;
+            logf_("[%ld] %s %s.%s  ALERT held until its data is in\n", n, tag, obj_name,
+                  fn_name);
+        }
+        return 1;
+    }
+    return 0;
+}
+
 static void capture_body(const char* tag, LONG n, void* stack)
 {
     if (!readable(stack, 0x20)) {
@@ -1215,6 +1354,10 @@ static void capture_body(const char* tag, LONG n, void* stack)
         prop = next;
     }
 
+    // A multi-button alert held for its data is said once anything else
+    // draws. See alert_note.
+    alert_flush(n, tag, object);
+
     // Which layer the player is in, for keys read off the game's thread:
     // Delete means the selected soldier in a mission and the base's status
     // at the base, and the key thread cannot ask the game which it is.
@@ -1242,6 +1385,14 @@ static void capture_body(const char* tag, LONG n, void* stack)
         frame_args(node, locals, &a);
         hq_status_date(a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
                        a.ns > 2 ? a.s[2] : "", a.ns > 3 ? a.s[3] : "");
+        // A tick as each day passes (hq_day_passed), so time moving on the
+        // geoscape -- scanning above all -- is heard without asking.
+        if (hq_day_passed(a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "", GetTickCount64())) {
+            logf_("[%ld] %s %s.%s  DAY \"%s %s\"%s\n", n, tag, obj_name, fn_name,
+                  a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
+                  settings_get(SET_DAYS) ? "" : " (tick off)");
+            if (settings_get(SET_DAYS)) audio_cue(HEART_TICK, 1);
+        }
         return;
     }
     if (strncmp(obj_name, "UIStrategyComponent_EventList", 29) == 0) {
@@ -1566,12 +1717,17 @@ static void capture_body(const char* tag, LONG n, void* stack)
     // focus_set_detail. Kept, not filed as a list: it replaced the list it
     // describes. Said with the item's label when the cursor moves; if it
     // arrives just after the move was said, it follows on its own.
+    // The strings are read from the frame whole: the payload keeps 256
+    // characters, and a research project's description stopped mid-word
+    // ("... ways to improve the sold").
     if (strcmp(fn_name, "AS_UpdateInfo") == 0 && p->nstrings) {
-        const char* parts[FOCUS_MAX_LABELS];
+        static FrameArgs a;
+        frame_args(node, locals, &a);
+        const char* parts[FRAME_ARGS];
         int np = 0;
-        for (int i = 0; i < p->nstrings && np < FOCUS_MAX_LABELS; i++)
-            if (!looks_like_asset(p->strings[i])) parts[np++] = p->strings[i];
-        char detail[FOCUS_MAX_DETAIL];
+        for (int i = 0; i < a.ns; i++)
+            if (a.s[i][0] && !looks_like_asset(a.s[i])) parts[np++] = a.s[i];
+        static char detail[FOCUS_MAX_DETAIL];
         focus_join_detail(parts, np, detail, sizeof detail);
         focus_set_detail(object, detail);
         logf_("[%ld] %s %s.%s  PANEL \"%s\"\n", n, tag, obj_name, fn_name, detail);
@@ -1829,50 +1985,31 @@ static void capture_body(const char* tag, LONG n, void* stack)
         return;
     }
 
+    // Mission Control's notices: "Rk. Christophe Leroy has returned to active
+    // duty.", an item built, new scientists. See hq_notices_new. The whole
+    // list comes on every refresh, so only the lines new since the last one
+    // are said. Read from the local, raw: the notices are divided by "\n",
+    // which strip_markup would make a space.
+    if (strncmp(obj_name, "UIMissionControl_", 17) == 0 && obj_name[17] >= '0' &&
+        obj_name[17] <= '9' && strcmp(fn_name, "UpdateNotices") == 0) {
+        static char raw[MAX_STR], say[MAX_STR];
+        if (frame_local_raw(node, locals, "displayString", raw, sizeof raw) &&
+            hq_notices_new(raw, say, sizeof say) > 0) {
+            logf_("[%ld] %s %s.%s  NOTICE \"%s\"\n", n, tag, obj_name, fn_name, say);
+            announce(say);
+        }
+        return;
+    }
+
     // A Mission Control alert: "ALIEN ABDUCTIONS REPORTED!", a UFO, a
     // finished project. Its title and text are single strings and its
     // buttons indexed labels, so on the general path the buttons cancelled
     // the title before it was said, and with the mouse active nothing is
     // selected on arrival -- the alert said nothing at all, and up/down on it
-    // were silent. UIMissionControl_AlertBase.OnInit ends with
-    // Invoke("AlertFullyLoaded"), after the title, text and buttons are all
-    // sent, so that is when the whole alert is said, as an event.
+    // were silent. It is said whole, as an event (alert_say), once it is
+    // filled -- see alert_note for when that is.
     if (strncmp(obj_name, "UIMissionControl_", 17) == 0 && strstr(obj_name, "Alert")) {
-        static char s_alert_text[MAX_STR];
-        if (strcmp(fn_name, "AS_SetText") == 0 && p->nstrings) {
-            strncpy_s(s_alert_text, sizeof s_alert_text, p->strings[0], _TRUNCATE);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetButtonText") == 0 && p->nstrings) {
-            focus_set(object, 0, p->strings[0]);
-            return;
-        }
-        if (strcmp(fn_name, "OnInit") == 0) {
-            char title[FOCUS_MAX_LABEL], say[MAX_STR + FOCUS_MAX_LABEL * 4];
-            ULONGLONG t_at;
-            if (!focus_take_title(object, title, sizeof title, &t_at)) title[0] = 0;
-            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s", title,
-                        title[0] && s_alert_text[0] ? " " : "", s_alert_text);
-            s_alert_text[0] = 0;
-            int nb = focus_count(object);
-            for (int i = 0; i < nb; i++) {
-                char label[FOCUS_MAX_LABEL];
-                if (!focus_label_at(object, i, label, sizeof label)) continue;
-                size_t used = strlen(say);
-                const char* lead = !used ? "Options: "
-                                 : say[used - 1] == '.' ? " Options: " : ". Options: ";
-                _snprintf_s(say + used, sizeof say - used, _TRUNCATE, "%s%s",
-                            i == 0 ? lead : ", ", label);
-            }
-            logf_("[%ld] %s %s.%s  ALERT \"%s\"\n", n, tag, obj_name, fn_name, say);
-            speech_cancel_pending();
-            announce(say);
-            // The first button is the selected one; a move off it and back
-            // must still be said.
-            g_focus_obj = object;
-            g_focus_idx = 0;
-            return;
-        }
+        if (alert_note(n, tag, obj_name, fn_name, object, node, locals, p)) return;
     }
 
     // An item card (F1 on the loadout, and wherever else UIItemCards opens):
@@ -2899,6 +3036,7 @@ static int rewrite_cmd(LONG n, void* stack)
     char screen[128] = "?";
     object_name(object, screen, sizeof screen);
     sitroom_key_reached(screen);
+    alert_flush(n, "Input       ", object);
 
     void* prop = NULL;
     if (readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*)))
@@ -9455,7 +9593,8 @@ static DWORD WINAPI init(LPVOID param)
         // The height cues are made in audio.c and have no file.
         static const char* const BEAT_FILE[HEART_KINDS] = { "ekgbeep.wav", "alienbeat.wav",
                                                              "doorsound.wav",
-                                                             "windowsound.wav", NULL, NULL };
+                                                             "windowsound.wav", NULL, NULL,
+                                                             NULL };
         for (int kind = 0; kind < HEART_KINDS; kind++) {
             if (!BEAT_FILE[kind]) continue;
             char beat[MAX_PATH];

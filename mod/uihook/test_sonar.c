@@ -92,7 +92,7 @@ static int practice(void)
     printf("audio: %s\n", why);
     static const char* const BEAT_FILE[HEART_KINDS] = { "ekgbeep.wav", "alienbeat.wav",
                                                          "doorsound.wav", "windowsound.wav",
-                                                         NULL, NULL };
+                                                         NULL, NULL, NULL };
     for (int kind = 0; kind < HEART_KINDS; kind++) {
         if (!BEAT_FILE[kind]) continue;
         char beat[MAX_PATH];

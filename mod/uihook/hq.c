@@ -6,6 +6,7 @@
 #include <stdio.h>
 
 static void copy_without_section(char* out, size_t out_sz, const char* in);
+static const char* rank_from_abbrev(const char* name, const char** rest);
 
 typedef struct {
     int  known;
@@ -609,4 +610,64 @@ int hq_sit_lines(char lines[][HQ_SIT_TEXT], int max)
                     g_sit_brief[0] ? "" : "OBJECTIVES: ", g_sit_large);
     st_unlock();
     return n;
+}
+
+// ---- a day passing ------------------------------------------------------------
+
+static char g_day[96];
+static unsigned long long g_day_at;
+
+int hq_day_passed(const char* date_a, const char* date_b, unsigned long long now_ms)
+{
+    char day[96];
+    _snprintf_s(day, sizeof day, _TRUNCATE, "%s|%s", date_a ? date_a : "", date_b ? date_b : "");
+    int passed = g_day[0] && strcmp(day, g_day) != 0 && now_ms - g_day_at < HQ_DAY_GAP_MS;
+    strncpy_s(g_day, sizeof g_day, day, _TRUNCATE);
+    g_day_at = now_ms;
+    return passed;
+}
+
+// ---- Mission Control's notices ------------------------------------------------
+
+static char g_notice[HQ_NOTICES][256];
+static int  g_nnotice;
+
+int hq_notices_new(const char* raw, char* out, size_t out_sz)
+{
+    char now[HQ_NOTICES][256];
+    int  nnow = 0;
+    const char* r = raw ? raw : "";
+    while (*r && nnow < HQ_NOTICES) {
+        const char* end = strchr(r, '\n');
+        size_t len = end ? (size_t)(end - r) : strlen(r);
+        while (len && (*r == ' ' || *r == '\r')) { r++; len--; }
+        while (len && (r[len - 1] == ' ' || r[len - 1] == '\r')) len--;
+        if (len) {
+            size_t k = len < sizeof now[0] - 1 ? len : sizeof now[0] - 1;
+            memcpy(now[nnow], r, k);
+            now[nnow][k] = 0;
+            nnow++;
+        }
+        if (!end) break;
+        r = end + 1;
+    }
+    if (out && out_sz) out[0] = 0;
+    size_t used = 0;
+    int fresh = 0;
+    // Newest first on the screen; said oldest first, as they happened.
+    for (int i = nnow - 1; i >= 0; i--) {
+        int seen = 0;
+        for (int j = 0; j < g_nnotice && !seen; j++) seen = strcmp(now[i], g_notice[j]) == 0;
+        if (seen) continue;
+        fresh++;
+        if (!out || !out_sz) continue;
+        const char* rest;
+        const char* rank = rank_from_abbrev(now[i], &rest);
+        char line[300];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "%s%s%s", rank ? rank : "", rank ? " " : "", rest);
+        put_piece(out, out_sz, &used, used ? " " : "", line);
+    }
+    memcpy(g_notice, now, sizeof now);
+    g_nnotice = nnow;
+    return fresh;
 }

@@ -2365,6 +2365,27 @@ int main(void)
         check(hq_summary_factors("Mission Length,_missionLength,,,RATING:,Good", pr, sizeof pr) == 1 &&
               strcmp(pr, "Mission Length: Good") == 0, "a factor with a rating and no result");
 
+        // As UIMissionControl.UpdateNotices builds it: " " @ each, newest first.
+        check(hq_notices_new(" Rk. Christophe Leroy has returned to active duty.\n", pr, sizeof pr) == 1 &&
+              strcmp(pr, "Rookie Christophe Leroy has returned to active duty.") == 0,
+              "a notice, with the rank as a word");
+        check(hq_notices_new(" Rk. Christophe Leroy has returned to active duty.\n", pr, sizeof pr) == 0 &&
+              !pr[0], "the same list again says nothing");
+        check(hq_notices_new(" 4 Scientists have arrived.\n Rk. Christophe Leroy has returned to active duty.\n",
+                             pr, sizeof pr) == 1 &&
+              strcmp(pr, "4 Scientists have arrived.") == 0, "only the new one on top");
+        check(hq_notices_new(" B built.\n A built.\n 4 Scientists have arrived.\n", pr, sizeof pr) == 2 &&
+              strcmp(pr, "A built. B built.") == 0, "two at once, oldest first");
+        check(hq_notices_new("", pr, sizeof pr) == 0, "the list emptying says nothing");
+        check(hq_notices_new(" A built.\n", pr, sizeof pr) == 1, "and a line back after that is new");
+
+        check(!hq_day_passed("1 March", "2015", 1000), "the first date seen is no day passing");
+        check(!hq_day_passed("1 March", "2015", 1100), "nor is the same date again");
+        check(hq_day_passed("2 March", "2015", 1200), "a new date while the clock runs is");
+        check(!hq_day_passed("5 March", "2015", 1200 + HQ_DAY_GAP_MS),
+              "a new date after a silence is a jump -- a load, a mission");
+        check(hq_day_passed("1 January", "2016", 1300 + HQ_DAY_GAP_MS), "the year turning is a day");
+
         // The Situation Room, as the EW log of 2026-09-24 drew it.
         {
             static char sit[HQ_SIT_LINES][HQ_SIT_TEXT];

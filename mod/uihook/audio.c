@@ -279,8 +279,9 @@ static int              g_stale;        // frames since the field was renewed
 // Per source (AUDIO_*), read once per buffer by the mixer.
 static int              g_notch[AUDIO_SOURCES] = { VOLUME_MIDDLE, VOLUME_MIDDLE,
                                                    VOLUME_MIDDLE, VOLUME_MIDDLE,
-                                                   VOLUME_MIDDLE, VOLUME_MIDDLE };
-static float            g_volume[AUDIO_SOURCES] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+                                                   VOLUME_MIDDLE, VOLUME_MIDDLE,
+                                                   VOLUME_MIDDLE };
+static float            g_volume[AUDIO_SOURCES] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
 
 // ---- heartbeats ---------------------------------------------------------------
 //
@@ -352,7 +353,8 @@ static float*     g_heart[HEART_KINDS];     // each kind's sample, mono, -1..1
 static int        g_heart_len[HEART_KINDS];
 // Each kind's level (AUDIO_*): allies and aliens are turned up and down apart.
 static const int  HEART_SOURCE[HEART_KINDS] = { AUDIO_HEARTS, AUDIO_ALIENS, AUDIO_DOORS,
-                                                AUDIO_WINDOWS, AUDIO_STEPS, AUDIO_STEPS };
+                                                AUDIO_WINDOWS, AUDIO_STEPS, AUDIO_STEPS,
+                                                AUDIO_DAYS };
 // And a trim, so the kinds sit together at the same notch. The alien beat's
 // murmur fills its gaps: 0.353 rms against the old lub-dub's 0.262, so 0.74
 // matched them. The beep carries about the lub-dub's energy, but at 1600 Hz,
@@ -365,7 +367,9 @@ static const int  HEART_SOURCE[HEART_KINDS] = { AUDIO_HEARTS, AUDIO_ALIENS, AUDI
 // as the click can go at Normal without the limiter.
 // The height cues are pure tones like the beep, and a sweep through the
 // ear's most sensitive octave, so they start at the beep's half.
-static const float HEART_TRIM[HEART_KINDS] = { 0.5f, 0.74f, 1.6f, 1.6f, 0.5f, 0.5f };
+// The tick is a 25 ms click with nothing after it, far less energy than a
+// tone of the same peak, so it is given the door's 1.6 to be heard at Normal.
+static const float HEART_TRIM[HEART_KINDS] = { 0.5f, 0.74f, 1.6f, 1.6f, 0.5f, 0.5f, 1.6f };
 static HeartVoice g_voice[HEARTS_MAX + 2];
 static int        g_cue_left;       // cues still to play on HEART_CUE
 static int        g_hearts_stale;   // samples since the set was renewed
@@ -804,6 +808,34 @@ static void steps_synth(void)
     }
 }
 
+// The day's tick (the geoscape's clock passing midnight), made rather than
+// recorded: a clock's tick is a knock with a bright ring and no pitch to
+// follow. Two partials, 2.5 and 4.1 kHz, inharmonic so it is heard as a
+// click and not a note, dying away in about 20 ms, over a 2 ms burst of
+// noise for the knock. Well above the height cues (400-800 Hz) and a pure
+// decay, where the ally beep is a held tone.
+#define TICK_S 0.025f
+
+static void tick_synth(void)
+{
+    int n = (int)(TICK_S * RATE);
+    float* s = (float*)malloc(n * sizeof(float));
+    if (!s) return;
+    unsigned seed = 12345u;
+    for (int i = 0; i < n; i++) {
+        float t = (float)i / RATE;
+        float ring = 0.6f * sinf(2.0f * PI_F * 2500.0f * t) + 0.4f * sinf(2.0f * PI_F * 4100.0f * t);
+        seed = seed * 1664525u + 1013904223u;
+        float noise = ((float)(seed >> 9) / 4194304.0f - 1.0f);
+        float knock = t < 0.002f ? noise * (1.0f - t / 0.002f) : 0.0f;
+        float env = expf(-t / 0.005f);
+        if (t < 0.0005f) env *= t / 0.0005f;
+        s[i] = 0.9f * (env * ring + 0.5f * knock);
+    }
+    g_heart_len[HEART_TICK] = n;
+    g_heart[HEART_TICK] = s;
+}
+
 int audio_start(char* why, size_t why_sz)
 {
     if (why && why_sz) why[0] = 0;
@@ -842,6 +874,7 @@ int audio_start(char* why, size_t why_sz)
     InitializeCriticalSection(&g_lock);
     bands_init();
     steps_synth();
+    tick_synth();
     for (int b = 0; b < BUFFERS; b++) {
         memset(&g_hdr[b], 0, sizeof g_hdr[b]);
         g_hdr[b].lpData         = (LPSTR)g_buf[b];
