@@ -614,6 +614,101 @@ int hq_sit_lines(char lines[][HQ_SIT_TEXT], int max)
     return n;
 }
 
+// ---- choosing a country on the map --------------------------------------------
+
+static struct {
+    char country[64];
+    char body[HQ_SIT_TEXT];
+    int  panic;
+    char continent[64];
+    char cont_body[HQ_SIT_TEXT];
+    char button[2][96];
+    int  button_on[2];
+    int  available, in_orbit, max;      // available -1: not drawn
+    int  said_count;
+    char said_cont[64 + HQ_SIT_TEXT];
+} g_sat = { .available = -1 };
+
+void hq_sat_country(const char* name, const char* body, int panic)
+{
+    strncpy_s(g_sat.country, sizeof g_sat.country, name ? name : "", _TRUNCATE);
+    copy_without_section(g_sat.body, sizeof g_sat.body, body);
+    g_sat.panic = panic;
+}
+
+void hq_sat_continent(const char* name, const char* body)
+{
+    strncpy_s(g_sat.continent, sizeof g_sat.continent, name ? name : "", _TRUNCATE);
+    strncpy_s(g_sat.cont_body, sizeof g_sat.cont_body, body ? body : "", _TRUNCATE);
+}
+
+void hq_sat_button(int which, const char* label, int enabled)
+{
+    if (which < 0 || which > 1) return;
+    strncpy_s(g_sat.button[which], sizeof g_sat.button[which], label ? label : "", _TRUNCATE);
+    g_sat.button_on[which] = enabled && label && *label;
+}
+
+void hq_sat_count(int available, int in_orbit, int max)
+{
+    g_sat.available = available;
+    g_sat.in_orbit = in_orbit;
+    g_sat.max = max;
+}
+
+void hq_sat_reset(void)
+{
+    memset(&g_sat, 0, sizeof g_sat);
+    g_sat.available = -1;
+}
+
+static void sat_put(char* out, size_t out_sz, size_t* w, const char* s)
+{
+    if (!s || !*s) return;
+    if (*w) {
+        // A stop between parts, unless the part before ended in one.
+        char last = out[*w - 1];
+        _snprintf_s(out + *w, out_sz - *w, _TRUNCATE, "%s", strchr(".!?:", last) ? " " : ". ");
+        *w += strlen(out + *w);
+    }
+    _snprintf_s(out + *w, out_sz - *w, _TRUNCATE, "%s", s);
+    *w += strlen(out + *w);
+}
+
+int hq_sat_say(char* out, size_t out_sz)
+{
+    if (!out || !out_sz) return 0;
+    out[0] = 0;
+    if (!g_sat.country[0]) return 0;
+    size_t w = 0;
+    char part[HQ_SIT_TEXT + 96];
+    if (!g_sat.said_count && g_sat.available >= 0) {
+        _snprintf_s(part, sizeof part, _TRUNCATE, "Satellites: %d available, %d of %d in orbit",
+                    g_sat.available, g_sat.in_orbit, g_sat.max);
+        sat_put(out, out_sz, &w, part);
+        g_sat.said_count = 1;
+    }
+    if (g_sat.panic > 0)
+        _snprintf_s(part, sizeof part, _TRUNCATE, "%s, panic %d of 5", g_sat.country, g_sat.panic);
+    else
+        strncpy_s(part, sizeof part, g_sat.country, _TRUNCATE);
+    sat_put(out, out_sz, &w, part);
+    sat_put(out, out_sz, &w, g_sat.body);
+    if (g_sat.button_on[0]) {
+        _snprintf_s(part, sizeof part, _TRUNCATE, "Enter: %s", g_sat.button[0]);
+        sat_put(out, out_sz, &w, part);
+    }
+    if (g_sat.button_on[1]) sat_put(out, out_sz, &w, g_sat.button[1]);
+    char cont[sizeof g_sat.said_cont];
+    _snprintf_s(cont, sizeof cont, _TRUNCATE, "%s%s%s", g_sat.continent,
+                g_sat.continent[0] && g_sat.cont_body[0] ? ": " : "", g_sat.cont_body);
+    if (cont[0] && strcmp(cont, g_sat.said_cont) != 0) {
+        sat_put(out, out_sz, &w, cont);
+        strncpy_s(g_sat.said_cont, sizeof g_sat.said_cont, cont, _TRUNCATE);
+    }
+    return 1;
+}
+
 // ---- a day passing ------------------------------------------------------------
 
 static char g_day[96];

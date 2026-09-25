@@ -239,6 +239,43 @@ void hq_sit_objectives(const char* brief, const char* large);
 //     "OBJECTIVES: NONE"
 int  hq_sit_lines(char lines[][HQ_SIT_TEXT], int max);
 
+// ---- choosing a country on the Situation Room's map --------------------------
+//
+// Launch Satellite (UISituationRoom's SatelliteState) and EW's covert ops
+// (InfiltratorState) move a selection over the countries, and the only name
+// for it is on UISituationRoomHUD. Each move runs the state's
+// RealizeSelected:
+//
+//     SetTargetCountry(iEnum); UpdateHUD();
+//         UISituationRoomHUD.AS_SetContinentInfo(name, bodyText, 0)
+//             -- satellite: the continent and its bonus per satellite count,
+//                one per line; covert ops: name "" and the clues instead
+//         UISituationRoomHUD.AS_SetLaunchButton(icon, msg, bool enabled)
+//         UISituationRoomHUD.AS_SetAccuseButton(icon, msg, bool enabled)
+//         UISituationRoomHUD.AS_SetCountryInfo(name, bodyText, int panic)
+//             -- satellite: "+\xC2\xA7" "180 per month", and on a new line why
+//                no satellite can go there when the launch button is off
+//         UISituationRoom.AS_SetSatellites(available, label, inOrbit, max, label)
+//     Invoke("SetSelected", [index])  -- -1 when the state is left
+//
+// The index is the country's place on the map; the general path looked it up
+// in the room's own slot table and read "_hq" or "Available, In Orbit".
+// Everything the HUD drew is kept, and said at SetSelected.
+
+void hq_sat_country(const char* name, const char* body, int panic);
+void hq_sat_continent(const char* name, const char* body);
+// which: 0 the launch button (Enter), 1 accuse.
+void hq_sat_button(int which, const char* label, int enabled);
+void hq_sat_count(int available, int in_orbit, int max);
+// The state was left: the next entry says the satellite count again.
+void hq_sat_reset(void);
+// What to say for the country now selected. The continent is said only when
+// it changed since the last time; the satellite count only on entering.
+//     "Satellites: 1 available, 1 of 2 in orbit. UNITED STATES, panic 1 of
+//      5. +180 per month. Enter: LAUNCH SATELLITE. North America: ..."
+// Returns 0, with nothing written, when no country is known.
+int  hq_sat_say(char* out, size_t out_sz);
+
 // ---- a day passing (the geoscape's clock) ------------------------------------
 //
 // UIStrategyComponent_Clock.UpdateData sends AS_SetDateTime whenever the game's

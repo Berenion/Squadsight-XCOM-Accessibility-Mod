@@ -1069,6 +1069,24 @@ static int frame_local_raw(void* node, uint8_t* locals, const char* name, char* 
     return 0;
 }
 
+// A string parameter by name with its line breaks read as stops, the way
+// strip_markup reads <br>: "+§100 per month\nNo satellites available" would
+// otherwise run together. Markup stripped.
+static void frame_lines(void* node, uint8_t* locals, const char* name, char* out,
+                        size_t out_sz)
+{
+    static char raw[FRAME_ARG_TEXT];
+    out[0] = 0;
+    if (!frame_local_raw(node, locals, name, raw, sizeof raw)) return;
+    size_t w = 0;
+    for (const char* r = raw; *r && w + 5 < out_sz; r++) {
+        if (*r == '\n') { memcpy(out + w, "<br>", 4); w += 4; }
+        else out[w++] = *r;
+    }
+    out[w] = 0;
+    strip_markup(out);
+}
+
 static void info_note(LONG n, void* object, const char* obj_name, const char* fn_name,
                       void* node, uint8_t* locals);
 static ULONGLONG g_info_due;            // when to say the summary, 0 for not yet
@@ -1778,6 +1796,58 @@ static void capture_body(const char* tag, LONG n, void* stack)
                 speech_cancel_pending();
                 if (g_speak && !muted()) speech_say_now(say);
             }
+            return;
+        }
+    }
+
+    // A country chosen on the room's map (Launch Satellite, covert ops). See
+    // hq.h. The HUD beside the map is the only place the country is named;
+    // what it draws is kept, and said when the map's selection moves.
+    if (strncmp(obj_name, "UISituationRoomHUD_", 19) == 0) {
+        static FrameArgs a;
+        static char body[FRAME_ARG_TEXT];
+        if (strcmp(fn_name, "AS_SetCountryInfo") == 0) {
+            frame_args(node, locals, &a);
+            frame_lines(node, locals, "bodyText", body, sizeof body);
+            hq_sat_country(a.ns > 0 ? a.s[0] : "", body, p->nnumbers ? (int)p->numbers[0] : 0);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetContinentInfo") == 0) {
+            frame_args(node, locals, &a);
+            frame_lines(node, locals, "bodyText", body, sizeof body);
+            hq_sat_continent(a.ns > 0 ? a.s[0] : "", body);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetLaunchButton") == 0 ||
+            strcmp(fn_name, "AS_SetAccuseButton") == 0) {
+            frame_args(node, locals, &a);
+            hq_sat_button(fn_name[5] == 'A', a.ns > 1 ? a.s[1] : "", a.nb > 0 && a.b[0]);
+            return;
+        }
+    }
+    if (strncmp(obj_name, "UISituationRoom_", 16) == 0 &&
+        obj_name[16] >= '0' && obj_name[16] <= '9') {
+        g_sitroom_at = GetTickCount64();
+        if (strcmp(fn_name, "AS_SetSatellites") == 0 && p->nnumbers >= 3) {
+            hq_sat_count((int)p->numbers[0], (int)p->numbers[1], (int)p->numbers[2]);
+            return;
+        }
+        if (strcmp(fn_name, "RealizeSelected") == 0) {
+            int idx = p->nnumbers ? (int)p->numbers[0] : -1;
+            if (idx < 0) {
+                hq_sat_reset();
+                logf_("[%ld] %s %s.%s  MAP left\n", n, tag, obj_name, fn_name);
+                return;
+            }
+            static char say[2 * HQ_SIT_TEXT];
+            if (!hq_sat_say(say, sizeof say)) {
+                logf_("[%ld] %s %s.%s  MAP %d, no country drawn\n", n, tag, obj_name, fn_name,
+                      idx);
+                return;
+            }
+            logf_("[%ld] %s %s.%s  MAP %d -> \"%s\"\n", n, tag, obj_name, fn_name, idx, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
             return;
         }
     }
@@ -4191,9 +4261,12 @@ static void hq_locked_note(LONG n, void* sub, const char* screen)
         sel = *(const int32_t*)v;
     char label[FOCUS_MAX_LABEL], say[FOCUS_MAX_LABEL + 64];
     if (focus_label_at(sub, sel, label, sizeof label))
-        _snprintf_s(say, sizeof say, _TRUNCATE, "Locked by the tutorial. %s", label);
+        // The option named first: it is the one Enter picks, not a locked
+        // one. "Locked by the tutorial. LAUNCH SATELLITE" was heard as the
+        // option being blocked (2026-09-25).
+        _snprintf_s(say, sizeof say, _TRUNCATE, "%s. The tutorial holds the cursor here.", label);
     else
-        strncpy_s(say, sizeof say, "Locked by the tutorial.", _TRUNCATE);
+        strncpy_s(say, sizeof say, "The tutorial holds the cursor here.", _TRUNCATE);
     logf_("[%ld] Input        %s  LOCKED \"%s\"\n", n, screen, say);
     speech_cancel_pending();
     if (g_speak) speech_say_now(say);
@@ -6191,7 +6264,11 @@ static int mouse_to_centre(POINT* c)
 {
     HWND w = GetForegroundWindow();
     RECT r;
-    if (!w || !GetClientRect(w, &r)) return 0;
+    // A minimised window is still in front for a moment on the way back, and
+    // its "centre" is off the screen at -32000; SetCursorPos then pins the
+    // mouse to a corner. Not parked, so the next poll tries again.
+    if (!w || IsIconic(w) || !GetClientRect(w, &r) ||
+        r.right <= r.left || r.bottom <= r.top) return 0;
     c->x = (r.right - r.left) / 2;
     c->y = (r.bottom - r.top) / 2;
     if (!ClientToScreen(w, c)) return 0;
@@ -9474,19 +9551,38 @@ static void nav_lend_interface(void* hud)
                 g_pick_iface_cursor == cursor_object() &&
                 readable(g_pick_iface_seen[0], 0x60) &&
                 object_name(g_pick_iface_seen[0], name, sizeof name) && name[0];
+    const char* what = "lending back the last actor it hit";
+    if (!alive) {
+        // Nothing remembered: a fresh map, and with the mouse blocked
+        // (mouse.h) the player can no longer move it by hand to give the
+        // game something to pick, which was the only way out -- the run of
+        // 2026-09-25 after the block went in: every step "nothing decided
+        // the tile in 1500 ms". The soldier is lent instead, as nav_aim_lend
+        // does for an aim: past the test against none,
+        // GetAdjustedMousePickPoint reads only CachedHitLocation, never the
+        // interface. Kept as seen, as there, so it is what the next miss
+        // lends back; a real pick replaces it.
+        void* pawn = NULL;
+        if (cursor_chained_pawn(&pawn) && pawn && unit_is_live(pawn)) {
+            g_pick_iface_seen[0] = pawn;
+            g_pick_iface_seen[1] = pawn;
+            g_pick_iface_cursor = cursor_object();
+            alive = 1;
+            what = "none remembered, lending the soldier";
+        } else {
+            g_pick_iface_seen[0] = NULL;
+            g_pick_iface_seen[1] = NULL;
+            what = "none to lend, the game will refuse the placement";
+        }
+    }
     if (alive) {
         slot[0] = g_pick_iface_seen[0];
         slot[1] = g_pick_iface_seen[1];
         g_pick_iface_lent = slot;
-    } else {
-        g_pick_iface_seen[0] = NULL;
-        g_pick_iface_seen[1] = NULL;
     }
     if (g_pick_iface_state != 0) {
         g_pick_iface_state = 0;
-        logf_("nav: the mouse picks nothing -- %s\n",
-              alive ? "lending back the last actor it hit" :
-                      "none to lend, the game will refuse the placement");
+        logf_("nav: the mouse picks nothing -- %s\n", what);
     }
 }
 
