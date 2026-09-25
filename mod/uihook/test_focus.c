@@ -1932,6 +1932,63 @@ int main(void)
         check(scan_add(&it) == 1, "a squad member is not");
         check(scan_end() == 1, "one item in Squad");
 
+        // The Meld category: one entry per canister, placed only once seen,
+        // as the Gateway run of 2026-09-25 needed.
+        while (scan_category() != SCAN_MELD) scan_cycle_category(1);
+        check(strcmp(scan_category_name(SCAN_MELD), "Meld") == 0, "the Meld category's name");
+        scan_forget();
+        scan_begin(10, 10, 2);
+        memset(&it, 0, sizeof it);
+        it.kind = SCAN_MELD; it.unplaced = 1;
+        strcpy_s(it.name, sizeof it.name, "Meld canister");
+        strcpy_s(it.detail, sizeof it.detail, "location unknown, turns unknown");
+        scan_add(&it);
+        memset(&it, 0, sizeof it);
+        it.kind = SCAN_MELD; it.tx = 30; it.ty = 30; it.tz = 2;
+        strcpy_s(it.name, sizeof it.name, "Meld canister");
+        scan_add(&it);
+        check(scan_end() == 2, "a seen and an unseen canister");
+        scan_cycle(1);
+        check(scan_selected(&it) && !it.unplaced, "the one with a place first, however far");
+        scan_cycle(1);
+        check(scan_selected(&it) && it.unplaced, "then the one without");
+        scan_describe(&it, 10, 10, 2, say, sizeof say);
+        check(strcmp(say, "Meld canister, location unknown, turns unknown.") == 0,
+              "an unseen canister: no offset and no timer, as the HUD");
+        // A collected canister and an unseen one: both without a tile, the
+        // same name. Up from the second must reach the first, rebuilt on
+        // every press as main.c does, and so must two exactly alike.
+        {
+            const char* details[2][2] = { { "collected", "location unknown, turns unknown" },
+                                          { "location unknown, turns unknown",
+                                            "location unknown, turns unknown" } };
+            for (int pair = 0; pair < 2; pair++) {
+                scan_forget();
+                for (int press = 0; press < 3; press++) {
+                    scan_begin(10, 10, 2);
+                    for (int k = 0; k < 2; k++) {
+                        ScanItem m;
+                        memset(&m, 0, sizeof m);
+                        m.kind = SCAN_MELD; m.unplaced = 1;
+                        strcpy_s(m.name, sizeof m.name, "Meld canister");
+                        strcpy_s(m.detail, sizeof m.detail, details[pair][k]);
+                        scan_add(&m);
+                    }
+                    scan_end();
+                    scan_cycle(press < 2 ? 1 : -1);
+                }
+                check(scan_index() == 1, pair ? "Up between two identical canisters"
+                                              : "Up from the unseen canister to the collected one");
+            }
+        }
+        scan_cycle_floor(1, 3);
+        scan_cycle_floor(1, 3);
+        scan_cycle_floor(1, 3);
+        scan_begin(10, 10, 2);
+        check(scan_add(&it) == 0, "a storey filter leaves out what has no place");
+        while (scan_floor() != SCAN_ALL_FLOORS) scan_cycle_floor(1, 3);
+        memset(&it, 0, sizeof it);
+
         // Alt steps the storey filter, and runs off the end back to all.
         while (scan_category() != SCAN_ALL) scan_cycle_category(1);
         check(scan_cycle_floor(1, 3) == 0, "Alt starts at the bottom storey");

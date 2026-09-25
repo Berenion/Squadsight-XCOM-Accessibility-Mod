@@ -1381,6 +1381,39 @@ static void capture_body(const char* tag, LONG n, void* stack)
     // draws. See alert_note.
     alert_flush(n, tag, object);
 
+    // EW's Meld counters and the arrow at a canister are redrawn every frame
+    // (UISpecialMissionHUD_MeldStats subscribes UpdatePanel to the UI
+    // update): 9,110 of the Gateway run's 10,807 lines. Nothing here reads
+    // them -- the scanner's Meld category asks the canisters themselves --
+    // so a call is logged only when it is not one of the last few sent.
+    if (strncmp(obj_name, "UISpecialMissionHUD_TurnCounter", 31) == 0 ||
+        strncmp(obj_name, "UISpecialMissionHUD_Arrows", 26) == 0) {
+        static struct { void* obj; char fn[48]; char last[160]; } s_seen[24];
+        static int s_next;
+        char now[160];
+        size_t used = 0;
+        now[0] = 0;
+        for (int i = 0; i < p->nstrings && used + 1 < sizeof now; i++) {
+            int k = _snprintf_s(now + used, sizeof now - used, _TRUNCATE, "%s|", p->strings[i]);
+            used = k < 0 ? sizeof now - 1 : used + (size_t)k;
+        }
+        for (int i = 0; i < p->nnumbers && used + 1 < sizeof now; i++) {
+            int k = _snprintf_s(now + used, sizeof now - used, _TRUNCATE, "%g|", p->numbers[i]);
+            used = k < 0 ? sizeof now - 1 : used + (size_t)k;
+        }
+        // Keyed on the whole call: two arrows alternate on one object, and
+        // either would count as a change every frame against the other.
+        for (int i = 0; i < 24; i++)
+            if (s_seen[i].obj == object && strcmp(s_seen[i].fn, fn_name) == 0 &&
+                strcmp(s_seen[i].last, now) == 0)
+                return;
+        int slot = s_next;
+        s_next = (s_next + 1) % 24;
+        s_seen[slot].obj = object;
+        strncpy_s(s_seen[slot].fn, sizeof s_seen[slot].fn, fn_name, _TRUNCATE);
+        strncpy_s(s_seen[slot].last, sizeof s_seen[slot].last, now, _TRUNCATE);
+    }
+
     // Which layer the player is in, for keys read off the game's thread:
     // Delete means the selected soldier in a mission and the base's status
     // at the base, and the key thread cannot ask the game which it is.
@@ -7535,24 +7568,59 @@ static void scan_describe_meld(void* actor)
 {
     ScanItem it;
     memset(&it, 0, sizeof it);
-    it.kind = SCAN_OBJECTIVES;
+    it.kind = SCAN_MELD;
+    strncpy_s(it.name, sizeof it.name, "Meld canister", _TRUNCATE);
 
-    // How long it lasts is the whole decision about a canister, and it is an
-    // int -- unlike m_bCollected, which is a bool, and a bool in this build
-    // shares its dword with its neighbours (props: "no BitMask"). So a
-    // collected canister is not filtered out; one whose timer has run out is.
+    // How long it lasts is the whole decision about a canister: -1 when it
+    // has no timer (the Meld tutorial's), 0 once it has run out.
     const void* v;
     int turns = -1;
     if (field_ptr(actor, "m_iTurnsUntilDestroyed", &g_meld_turns, sizeof(int32_t), &v))
         turns = *(const int32_t*)v;
 
-    if (turns == 0) return;                     // its timer has run out
-    if (turns > 0)
-        _snprintf_s(it.name, sizeof it.name, _TRUNCATE,
-                    "Meld canister, %d turn%s left", turns, turns == 1 ? "" : "s");
-    else
-        strncpy_s(it.name, sizeof it.name, "Meld canister", _TRUNCATE);
+    // Where it is, only as far as the HUD tells a sighted player
+    // (UISpecialMissionHUD_MeldStats.UpdatePanel): a canister nobody has seen
+    // is "LOCATION UNKNOWN" and gets no arrow; one seen is pointed at from
+    // then on, with its countdown -- "?" until then; one collected is
+    // "COLLECTED" (m_strRecoveredLabel), one run out "LOST". The first Gateway run (2026-09-25) had the unseen one's
+    // tile and timer under Objectives. m_bHasBeenSeen,
+    // m_bVisibleToSquad and m_bCollected share a dword, so they are read
+    // only once the bool mask is known; before that it is placed as seen.
+    int seen = 1, got = 0;
+    if (props_mask_offset()) {
+        static const void* s_cls;
+        static const void* s_seen;
+        static const void* s_got;
+        uint32_t class_off = props_class_offset();
+        const void* cls = class_off && readable((uint8_t*)actor + class_off, sizeof(void*))
+                              ? *(void* const*)((uint8_t*)actor + class_off) : NULL;
+        if (cls && cls != s_cls) {
+            s_cls = cls;
+            s_seen = object_field_prop(actor, "m_bHasBeenSeen");
+            s_got = object_field_prop(actor, "m_bCollected");
+        }
+        if (s_seen) props_read_object_bool(s_seen, actor, &seen);
+        if (s_got) props_read_object_bool(s_got, actor, &got);
+    }
 
+    char timer[32] = "";
+    if (turns > 0)
+        _snprintf_s(timer, sizeof timer, _TRUNCATE, "%d turn%s left", turns,
+                    turns == 1 ? "" : "s");
+    if (got || turns == 0) {
+        it.unplaced = 1;
+        strncpy_s(it.detail, sizeof it.detail, got ? "collected" : "lost", _TRUNCATE);
+        world_keep(&it);
+        return;
+    }
+    if (!seen) {
+        it.unplaced = 1;
+        // The HUD's counter shows "?" for its turns until it is seen.
+        strncpy_s(it.detail, sizeof it.detail, "location unknown, turns unknown", _TRUNCATE);
+        world_keep(&it);
+        return;
+    }
+    strncpy_s(it.detail, sizeof it.detail, timer, _TRUNCATE);
     float world[3];
     if (!actor_location(actor, &g_meld_loc, world)) return;
     if (scan_item_at(&it, world, 0.0f)) world_keep(&it);
@@ -7603,6 +7671,33 @@ static int is_window(void* actor)
     return strstr(mesh, "Window") != NULL || strstr(mesh, "window") != NULL;
 }
 
+// Whether a Meld canister is one on the map. The Meld walk of 2026-09-25
+// found three where the HUD had two counters, and the third said "lost"
+// every time: m_iTurnsUntilDestroyed at its default 0. Class defaults are
+// already dropped by name (objects.c); what is left is a template kept in a
+// package. The HUD counts AllActors -- the actors in a level -- so the same
+// test is made here: the canister's Outer is a Level. When the Outer cannot
+// be read, the names archetypes and defaults go by are refused instead.
+static FieldSlot g_meld_outer;
+static int meld_on_map(void* actor)
+{
+    char name[SCAN_NAME] = "?", outer_name[SCAN_NAME] = "?", outer_cls[SCAN_NAME] = "?";
+    object_name(actor, name, sizeof name);
+    const void* v;
+    void* outer = NULL;
+    if (field_ptr(actor, "Outer", &g_meld_outer, sizeof(void*), &v)) outer = *(void* const*)v;
+    int ok;
+    if (outer && object_class_name(outer, outer_cls, sizeof outer_cls)) {
+        object_name(outer, outer_name, sizeof outer_name);
+        ok = strcmp(outer_cls, "Level") == 0;
+    } else {
+        ok = strncmp(name, "ARC_", 4) != 0 && strncmp(name, "Default__", 9) != 0;
+    }
+    logf_("scan: Meld canister %s in %s (%s) -- %s\n", name, outer_name, outer_cls,
+          ok ? "on the map" : "not on the map, left out");
+    return ok;
+}
+
 static int scan_collect_world(void* actor, int which, int idx, void* ctx)
 {
     (void)ctx;
@@ -7610,6 +7705,7 @@ static int scan_collect_world(void* actor, int which, int idx, void* ctx)
     // Every destructible on the map comes through, nearly a thousand; only
     // the windows are kept.
     if (g_scan_kinds[which] == 3 && !is_window(actor)) return 1;
+    if (g_scan_kinds[which] == 2 && !meld_on_map(actor)) return 1;
     g_wactors[g_wactor_n].actor = actor;
     g_wactors[g_wactor_n].idx   = idx;
     g_wactors[g_wactor_n].kind  = g_scan_kinds[which];
@@ -7777,9 +7873,9 @@ static void doors_refresh(const CursorGrid* g, int tx, int ty, int doors, int wi
 // asks for the bool AND for X + Y + Z != 0, and the vector test is the one
 // that survives having no mask.
 //
-// Filed under the objectives, because a tutorial waypoint and a Meld canister
-// are the same thing to a player working out where to go -- which is the
-// grouping the XCOM 2 mod arrived at for the same reason.
+// Filed under the objectives, because a tutorial waypoint is where the player
+// has to go. Meld canisters were here too, and have their own category now
+// (SCAN_MELD): one entry each, placed only once seen.
 //
 // What is NOT here: SeqAct_RestrictMovementCursorToCover, the tutorial's
 // other restriction, which sets bFirstMoveOutOfCover and no position at all.
@@ -7968,7 +8064,7 @@ static int scan_rebuild(void)
     // under Enemies.
     if (c == SCAN_TARGETS) scan_add_targets();
     if (c == SCAN_ALL || c == SCAN_DOORS || c == SCAN_OBJECTIVES || c == SCAN_INTERACT ||
-        c == SCAN_EXPLOSIVES)
+        c == SCAN_EXPLOSIVES || c == SCAN_MELD)
         scan_add_world();
     // Three field reads and no walk, so it costs nothing outside a tutorial
     // -- and inside one it is the only objective that matters.
@@ -8218,6 +8314,11 @@ static void scan_home(int shift)
     ScanItem it;
     if (!scan_selected(&it)) {
         scan_empty_text(scan_category(), say, sizeof say);
+        scan_say(say);
+        return;
+    }
+    if (it.unplaced) {
+        scan_describe(&it, 0, 0, 0, say, sizeof say);
         scan_say(say);
         return;
     }

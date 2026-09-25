@@ -45,6 +45,7 @@ typedef enum {
     SCAN_CIVILIANS,
     SCAN_DOORS,
     SCAN_OBJECTIVES,
+    SCAN_MELD,              // EW's Meld canisters, one entry each
     SCAN_INTERACT,
     SCAN_CATEGORIES         // not a category: how many there are
 } ScanCategory;
@@ -69,6 +70,11 @@ typedef struct {
     // Sorts ahead of distance, higher first; 0 for everything sorted by
     // distance alone. The targets use it for best shot first.
     int          rank;
+    // No tile to offer: a Meld canister nobody has seen yet, or one already
+    // recovered or lost. Said as its name and detail alone, sorted after
+    // everything that has a place, kept out of a storey filter, and Home
+    // has nowhere to take the cursor.
+    int          unplaced;
 } ScanItem;
 
 // "Everything", "Squad", "Enemies", ... -- as the category is spoken.
@@ -129,7 +135,8 @@ void scan_forget(void);
 // ---- what is said ----------------------------------------------------------
 
 // "Door, 4 north, 7 east, one floor up." -- or, with a detail, "Muton, 45%,
-// low cover, 3 north." The offset is from where the scan
+// low cover, 3 north." -- or, unplaced, "Meld canister, location unknown,
+// 5 turns left." The offset is from where the scan
 // began; the storey is left out when it is the same one.
 void scan_describe(const ScanItem* item, int from_tx, int from_ty, int from_tz,
                    char* out, size_t out_sz);

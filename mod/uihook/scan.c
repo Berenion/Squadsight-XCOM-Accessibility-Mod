@@ -4,6 +4,7 @@
 #include "tile.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 static ScanItem     g_items[SCAN_MAX];
 static int          g_n;
@@ -20,6 +21,8 @@ static int g_from[3];
 static int  g_have_sel;
 static char g_sel_name[SCAN_NAME];
 static int  g_sel_tile[3];
+static char g_sel_detail[96];
+static int  g_sel_pos;          // where it stood in the list, for a tie
 
 const char* scan_category_name(ScanCategory c)
 {
@@ -32,6 +35,7 @@ const char* scan_category_name(ScanCategory c)
     case SCAN_CIVILIANS:  return "Civilians";
     case SCAN_DOORS:      return "Doors";
     case SCAN_OBJECTIVES: return "Objectives";
+    case SCAN_MELD:       return "Meld";
     case SCAN_INTERACT:   return "Interactables";
     default:              return "Unknown";
     }
@@ -65,7 +69,7 @@ int scan_add(const ScanItem* item)
     // only its own. An item with no name is not worth cycling to.
     if (g_category != SCAN_ALL && item->kind != g_category) return 0;
     if (!item->name[0]) return 0;
-    if (g_floor != SCAN_ALL_FLOORS && item->tz != g_floor) return 0;
+    if (g_floor != SCAN_ALL_FLOORS && (item->unplaced || item->tz != g_floor)) return 0;
     g_items[g_n++] = *item;
     return 1;
 }
@@ -84,6 +88,7 @@ static int dist2(const ScanItem* it)
 // Whether `a` goes after `b`: the higher rank first, then the nearer.
 static int after(const ScanItem* a, const ScanItem* b)
 {
+    if (a->unplaced != b->unplaced) return a->unplaced;
     if (a->rank != b->rank) return a->rank < b->rank;
     return dist2(a) > dist2(b);
 }
@@ -105,19 +110,26 @@ int scan_end(void)
 
     // Put the selection back where it was. The name alone is not enough --
     // there are five doors -- and the tile alone is not either, since units
-    // move, so the name decides and the tile breaks the tie.
+    // move, so the name decides and the tile breaks the tie. Items with no
+    // tile all stand on 0, 0, 0, and two Meld canisters, one collected and
+    // one not yet seen, were the same item by name and tile: Up from the
+    // second landed back on it (2026-09-25). So the detail counts too, and
+    // among items that are the same in every way the one nearest the old
+    // place in the list is taken.
     g_index = -1;
     if (g_have_sel) {
-        int by_name = -1;
+        int by_name = -1, by_tile = -1;
         for (int i = 0; i < g_n; i++) {
             if (strcmp(g_items[i].name, g_sel_name) != 0) continue;
             if (by_name < 0) by_name = i;
-            if (g_items[i].tx == g_sel_tile[0] && g_items[i].ty == g_sel_tile[1] &&
-                g_items[i].tz == g_sel_tile[2]) {
-                g_index = i;
-                break;
-            }
+            if (g_items[i].tx != g_sel_tile[0] || g_items[i].ty != g_sel_tile[1] ||
+                g_items[i].tz != g_sel_tile[2])
+                continue;
+            if (by_tile < 0) by_tile = i;
+            if (strcmp(g_items[i].detail, g_sel_detail) != 0) continue;
+            if (g_index < 0 || abs(i - g_sel_pos) < abs(g_index - g_sel_pos)) g_index = i;
         }
+        if (g_index < 0) g_index = by_tile;     // its detail changed
         if (g_index < 0) g_index = by_name;     // it moved; follow the name
         if (g_index < 0) g_have_sel = 0;        // it is gone
     }
@@ -132,6 +144,8 @@ static void remember(int index)
     g_sel_tile[0] = g_items[index].tx;
     g_sel_tile[1] = g_items[index].ty;
     g_sel_tile[2] = g_items[index].tz;
+    strncpy_s(g_sel_detail, sizeof g_sel_detail, g_items[index].detail, _TRUNCATE);
+    g_sel_pos = index;
 }
 
 int scan_cycle(int dir)
@@ -223,6 +237,11 @@ void scan_describe(const ScanItem* item, int from_tx, int from_ty, int from_tz,
     if (!out || !out_sz) return;
     out[0] = 0;
     if (!item) return;
+    if (item->unplaced) {
+        _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s.", item->name,
+                    item->detail[0] ? ", " : "", item->detail);
+        return;
+    }
 
     char where[64];
     tile_offset_text(item->tx - from_tx, item->ty - from_ty, where, sizeof where);
