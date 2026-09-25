@@ -1242,7 +1242,18 @@ static void mission_poll(void)
 // and the engineering and Foundry ones AS_SetRebates(label, lines) as well.
 // The image was taken for a screen publishing a one-item list, and replaced
 // the buttons with its path.
-static void* g_alert_due;               // the alert waiting to be said
+//
+// A facility built (UIMissionControl_FacilityBuiltAlert) sends
+// AS_SetFacilityImageLabel("AlienContainment") after its buttons, which did
+// the same: "Options: AlienContainment", and moves unresolved. And nothing
+// else draws after it -- the first of each facility plays its cinematic --
+// so the held alert waited for a key (log of 2026-09-25, 22:45). A held
+// alert is now also said once its calls have stopped for ALERT_SETTLE_MS
+// (alert_settle, on review_pump's thread; g_alert_lock keeps the two apart).
+#define ALERT_SETTLE_MS 250
+static CRITICAL_SECTION g_alert_lock;
+static void* volatile g_alert_due;      // the alert waiting to be said
+static volatile ULONGLONG g_alert_note_at; // its last call
 static char  g_alert_title[FOCUS_MAX_LABEL];
 static char  g_alert_text[MAX_STR];
 static char  g_alert_sub[FOCUS_MAX_LABEL];
@@ -1277,16 +1288,48 @@ static void alert_say(LONG n, const char* tag, const char* obj_name, void* objec
 static void alert_flush(LONG n, const char* tag, void* object)
 {
     if (!g_alert_due || object == g_alert_due) return;
+    EnterCriticalSection(&g_alert_lock);
     void* due = g_alert_due;
     g_alert_due = NULL;
-    char name[128] = "?";
-    object_name(due, name, sizeof name);
-    alert_say(n, tag, name, due);
+    if (due && due != object) {
+        char name[128] = "?";
+        object_name(due, name, sizeof name);
+        alert_say(n, tag, name, due);
+    }
+    LeaveCriticalSection(&g_alert_lock);
 }
+
+// Says a held alert whose calls have stopped. From review_pump.
+static void alert_settle(void)
+{
+    if (!g_alert_due || GetTickCount64() - g_alert_note_at < ALERT_SETTLE_MS) return;
+    EnterCriticalSection(&g_alert_lock);
+    void* due = g_alert_due;
+    if (due && GetTickCount64() - g_alert_note_at >= ALERT_SETTLE_MS) {
+        g_alert_due = NULL;
+        char name[128] = "?";
+        object_name(due, name, sizeof name);
+        alert_say(g_calls, "Settled     ", name, due);
+    }
+    LeaveCriticalSection(&g_alert_lock);
+}
+
+static int alert_note_locked(LONG n, const char* tag, const char* obj_name, const char* fn_name,
+                             void* object, void* node, uint8_t* locals, const Payload* p);
 
 // One call on an alert. Returns 1 when it has been dealt with.
 static int alert_note(LONG n, const char* tag, const char* obj_name, const char* fn_name,
                       void* object, void* node, uint8_t* locals, const Payload* p)
+{
+    EnterCriticalSection(&g_alert_lock);
+    int done = alert_note_locked(n, tag, obj_name, fn_name, object, node, locals, p);
+    if (object == g_alert_due) g_alert_note_at = GetTickCount64();
+    LeaveCriticalSection(&g_alert_lock);
+    return done;
+}
+
+static int alert_note_locked(LONG n, const char* tag, const char* obj_name, const char* fn_name,
+                             void* object, void* node, uint8_t* locals, const Payload* p)
 {
     if (strcmp(fn_name, "AS_SetTitle") == 0) {
         frame_string(node, locals, 0, g_alert_title, sizeof g_alert_title);
@@ -1324,7 +1367,8 @@ static int alert_note(LONG n, const char* tag, const char* obj_name, const char*
                     used ? ". " : "", label, !ll ? "" : label[ll - 1] == ':' ? " " : ": ", data);
         return 1;
     }
-    if (strcmp(fn_name, "AS_SetImage") == 0) return 1;
+    if (strcmp(fn_name, "AS_SetImage") == 0 ||
+        strcmp(fn_name, "AS_SetFacilityImageLabel") == 0) return 1;
     if (strcmp(fn_name, "AS_SetButtonText") == 0 && p->nstrings) {
         focus_set(object, 0, p->strings[0]);
         return 1;
@@ -9175,6 +9219,13 @@ static DWORD WINAPI review_pump(LPVOID unused)
                 fault_log("status: poll", &f, NULL);
             }
         }
+        {
+            Fault f;
+            __try { alert_settle(); }
+            __except (fault_note(GetExceptionInformation(), &f)) {
+                fault_log("alert: settle", &f, NULL);
+            }
+        }
         Fault f;
         __try { review_poll(); }
         __except (fault_note(GetExceptionInformation(), &f)) {
@@ -10609,6 +10660,7 @@ static DWORD WINAPI init(LPVOID param)
 {
     (void)param;
     InitializeCriticalSection(&g_lock);
+    InitializeCriticalSection(&g_alert_lock);
     _set_invalid_parameter_handler(on_invalid_parameter);
 
     char path[MAX_PATH];
