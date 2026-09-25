@@ -239,6 +239,39 @@ void hq_sit_objectives(const char* brief, const char* large);
 //     "OBJECTIVES: NONE"
 int  hq_sit_lines(char lines[][HQ_SIT_TEXT], int max);
 
+// ---- Build Facilities (the base's cross-section) -----------------------------
+//
+// A grid 7 tiles wide; level 0 is the surface and never drawn, so the cursor
+// moves over levels 1..4 (XGBuildUI.GetTilesWide/High, OnCursor*). Every
+// move runs XGBuildUI.UpdateView and then the screen's GoToView(0):
+//
+//     UIBuildFacilities.UpdateData
+//         AS_UpdateFacilityCard(x, y, sName, icon, bDisabled, adjLeft, adjTop)
+//             -- once per terrain tile, then once per facility, which draws
+//                over the tile under it. icon is GetFacilityLabel's name:
+//                Rock, RockSteam, Excavated, BeingExcavated, Construction,
+//                or the facility's ("OfficerTrainingSchool"). sName is
+//                label "<br>" counter: "STEAM", "Excavating<br>5 days", the
+//                facility's name. The tile under the cursor has its STEAM
+//                label taken off (RemoveTerrainTileLabelAtIndex).
+//     UIBuildFacilities.UpdateCursor
+//         AS_SetCursor(x, y, text, iUIState)
+//             -- what Enter does and its cost ("EXCAVATE<br>COST: ..."), or
+//                why it cannot: "Disabled for Tutorial", "Requires an access
+//                lift", ... In the tutorial every tile but an empty,
+//                excavated one off the lift's column is disabled.
+//
+// Nothing said where the cursor was or what was under it. The cards are kept
+// and the cursor's tile is said with the cursor's text.
+
+#define HQ_BASE_W 7
+#define HQ_BASE_H 5
+
+void hq_base_card(int x, int y, const char* name, const char* icon);
+// What to say for the cursor at x, y with its text (line breaks already
+// stops, markup stripped). "Excavated. EXCAVATE... Level 2, column 4."
+void hq_base_cursor(int x, int y, const char* text, char* out, size_t out_sz);
+
 // ---- choosing a country on the Situation Room's map --------------------------
 //
 // Launch Satellite (UISituationRoom's SatelliteState) and EW's covert ops

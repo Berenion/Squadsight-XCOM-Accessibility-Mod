@@ -1069,6 +1069,31 @@ static int frame_local_raw(void* node, uint8_t* locals, const char* name, char* 
     return 0;
 }
 
+// A float parameter of the call, by name. The payload keeps int parameters
+// and ASValue numbers only, so UIBuildFacilities' float xloc and yloc never
+// reached it. Returns 0 when there is none.
+static int frame_float(void* node, uint8_t* locals, const char* name, float* out)
+{
+    if (!locals || !readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*))) return 0;
+    void* prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
+    for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
+        if (!readable(prop, 0x68)) return 0;
+        uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
+        uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
+        void* next     = *(void**)((uint8_t*)prop + UFIELD_NEXT);
+        if ((flags & CPF_PARM) && off < 0x1000 && props_kind(prop) == PROP_FLOAT) {
+            char pname[64];
+            object_name(prop, pname, sizeof pname);
+            if (strcmp(pname, name) == 0) {
+                *out = *(const float*)(locals + off);
+                return 1;
+            }
+        }
+        prop = next;
+    }
+    return 0;
+}
+
 // A string parameter by name with its line breaks read as stops, the way
 // strip_markup reads <br>: "+§100 per month\nNo satellites available" would
 // otherwise run together. Markup stripped.
@@ -1500,6 +1525,39 @@ static void capture_body(const char* tag, LONG n, void* stack)
         strncmp(obj_name, "UIManufacturing", 15) == 0 ||
         strncmp(obj_name, "UIFoundry", 9) == 0)
         g_eng_at = GetTickCount64();
+
+    // Build Facilities: the base's grid. See hq.h. The cards are kept, and
+    // the cursor's tile said with the cursor's text. OnInit and GoToView(0)
+    // both draw the cursor on the way in, so a second drawing of the same
+    // tile and text straight after the first is not said again.
+    if (strncmp(obj_name, "UIBuildFacilities", 17) == 0) {
+        static FrameArgs a;
+        float fx, fy;
+        int at = frame_float(node, locals, "xloc", &fx) && frame_float(node, locals, "yloc", &fy);
+        if (strcmp(fn_name, "AS_UpdateFacilityCard") == 0 && at) {
+            frame_args(node, locals, &a);
+            hq_base_card((int)fx, (int)fy, a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "");
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetCursor") == 0 && at) {
+            static char text[FRAME_ARG_TEXT], say[FRAME_ARG_TEXT + 256], said[sizeof say];
+            static ULONGLONG said_at;
+            frame_lines(node, locals, "DisplayText", text, sizeof text);
+            hq_base_cursor((int)fx, (int)fy, text, say, sizeof say);
+            ULONGLONG t = GetTickCount64();
+            if (strcmp(say, said) == 0 && t - said_at < 500) {
+                logf_("[%ld] %s %s.%s  BASE cursor redrawn\n", n, tag, obj_name, fn_name);
+                said_at = t;
+                return;
+            }
+            strncpy_s(said, sizeof said, say, _TRUNCATE);
+            said_at = t;
+            logf_("[%ld] %s %s.%s  BASE cursor -> \"%s\"\n", n, tag, obj_name, fn_name, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return;
+        }
+    }
 
     // The build queue, drawn beside Engineering and the Foundry. UpdateData
     // clears it (Invoke "clear", the only call in that frame) and adds one
@@ -2175,6 +2233,33 @@ static void capture_body(const char* tag, LONG n, void* stack)
     // The strings are read from the frame whole: the payload keeps 256
     // characters, and a research project's description stopped mid-word
     // ("... ways to improve the sold").
+    // The facility list's panel (UIChooseFacility.UpdateInfoPanelData):
+    // AS_UpdateInfo(techName, infoText, descText, imageLabel). imageLabel is
+    // GetFacilityLabel's "AlienContainment", which looks_like_asset cannot
+    // tell from a word and was read aloud; descText is why it cannot be
+    // built ("Disabled for Tutorial") "\n" the summary, which ran together;
+    // infoText's "\xC2\xA7" "85" is a sum. The name is the list's label.
+    if (strncmp(obj_name, "UIChooseFacility", 16) == 0 &&
+        strcmp(fn_name, "AS_UpdateInfo") == 0) {
+        static char raw[FRAME_ARG_TEXT], cost[FRAME_ARG_TEXT], desc[FRAME_ARG_TEXT];
+        static char detail[FOCUS_MAX_DETAIL];
+        frame_local_raw(node, locals, "infoText", raw, sizeof raw);
+        hq_cost_text(raw, cost, sizeof cost);
+        frame_lines(node, locals, "descText", desc, sizeof desc);
+        const char* parts[2];
+        int np = 0;
+        if (cost[0]) parts[np++] = cost;
+        if (desc[0]) parts[np++] = desc;
+        focus_join_detail(parts, np, detail, sizeof detail);
+        focus_set_detail(object, detail);
+        logf_("[%ld] %s %s.%s  PANEL \"%s\"\n", n, tag, obj_name, fn_name, detail);
+        if (object == g_focus_obj && !g_focus_had_panel && detail[0] &&
+            GetTickCount64() - g_focus_at < LIST_WINDOW_MS) {
+            g_focus_had_panel = 1;
+            if (g_speak && !muted()) speech_say(detail);
+        }
+        return;
+    }
     if (strcmp(fn_name, "AS_UpdateInfo") == 0 && p->nstrings) {
         static FrameArgs a;
         frame_args(node, locals, &a);

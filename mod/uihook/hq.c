@@ -614,6 +614,67 @@ int hq_sit_lines(char lines[][HQ_SIT_TEXT], int max)
     return n;
 }
 
+// ---- Build Facilities ------------------------------------------------------------
+
+static void sat_put(char* out, size_t out_sz, size_t* w, const char* s);
+
+static struct {
+    char name[128];
+    char icon[64];
+} g_base[HQ_BASE_W][HQ_BASE_H];
+
+void hq_base_card(int x, int y, const char* name, const char* icon)
+{
+    if (x < 0 || x >= HQ_BASE_W || y < 0 || y >= HQ_BASE_H) return;
+    char n[128];
+    copy_without_section(n, sizeof n, name);
+    // The steam label is taken off the tile under the cursor; the tile is
+    // no less a steam vent for that, so an empty name on the same ground
+    // keeps the one before.
+    if (!n[0] && strcmp(icon ? icon : "", g_base[x][y].icon) == 0) return;
+    strncpy_s(g_base[x][y].name, sizeof g_base[x][y].name, n, _TRUNCATE);
+    strncpy_s(g_base[x][y].icon, sizeof g_base[x][y].icon, icon ? icon : "", _TRUNCATE);
+}
+
+// The tile as words: the facility's own name when it has one, the ground
+// otherwise, with a steam vent said as such.
+static void base_tile_words(int x, int y, char* out, size_t out_sz)
+{
+    out[0] = 0;
+    if (x < 0 || x >= HQ_BASE_W || y < 0 || y >= HQ_BASE_H) return;
+    const char* name = g_base[x][y].name;
+    const char* icon = g_base[x][y].icon;
+    // "STEAM." is the whole label on a vent; said once, as a vent.
+    int steam = _strnicmp(name, "STEAM", 5) == 0 && (!name[5] || name[5] == '.');
+    const char* ground = strcmp(icon, "Rock") == 0      ? "Rock"
+                       : strcmp(icon, "RockSteam") == 0 ? "Rock"
+                       : strcmp(icon, "Excavated") == 0 ? "Excavated, empty"
+                       : strcmp(icon, "BeingExcavated") == 0 ? "Being excavated"
+                       : strcmp(icon, "Construction") == 0   ? "Under construction"
+                       : NULL;
+    if (strcmp(icon, "RockSteam") == 0) steam = 1;
+    if (ground) {
+        _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s%s", ground, steam ? ", steam vent" : "",
+                    name[0] && !steam ? ": " : "", name[0] && !steam ? name : "");
+    } else {
+        strncpy_s(out, out_sz, name[0] ? name : icon, _TRUNCATE);
+    }
+}
+
+void hq_base_cursor(int x, int y, const char* text, char* out, size_t out_sz)
+{
+    char tile[256], t[512];
+    base_tile_words(x, y, tile, sizeof tile);
+    copy_without_section(t, sizeof t, text);
+    size_t w = 0;
+    out[0] = 0;
+    sat_put(out, out_sz, &w, tile);
+    sat_put(out, out_sz, &w, t);
+    char pos[48];
+    _snprintf_s(pos, sizeof pos, _TRUNCATE, "Level %d, column %d.", y, x + 1);
+    sat_put(out, out_sz, &w, pos);
+}
+
 // ---- choosing a country on the map --------------------------------------------
 
 static struct {
