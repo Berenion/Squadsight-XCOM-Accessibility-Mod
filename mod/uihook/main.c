@@ -1398,6 +1398,68 @@ static int alert_note_locked(LONG n, const char* tag, const char* obj_name, cons
     return 0;
 }
 
+// EW's unlock notice, UISpecialUnlockDialogue: "NEW GENE MOD AVAILABLE" or
+// "NEW MEC AVAILABLE", raised by research (Meld Recombination unlocks three
+// gene mods and a MEC at once). It said nothing -- no handler, and the
+// general path found no list in it. Realize draws the last queued unlock:
+//     AS_SetTitle(title)
+//     AS_SetRequirement(GetHTMLColoredText("REQUIRES GENETICS LAB",
+//                                          has the lab ? 0 : 3))
+//     AS_SetGeneModImage(path), AS_SetGeneModData(name, summary, icon)
+//  or AS_SetMechImage(path), AS_SetMechData(mec, weapon0, summary0, icon0,
+//                                           weapon1, summary1, icon1, "OR")
+//     AS_SetButtonData("ACCEPT", icon)
+// -- the button last, so that is when it is said. Enter, Space or Escape
+// (OnUnrealCommand: 300, 511, 513, 301, 510, 405) drops that one and Realize
+// draws the next, which is said the same way. While a dialogue box is up
+// Realize only hides, and it runs again when the box closes.
+static char g_unlock_title[FOCUS_MAX_LABEL];
+static char g_unlock_req[FOCUS_MAX_LABEL];
+static char g_unlock_body[MAX_STR];
+
+static void unlock_note(LONG n, const char* tag, const char* obj_name, const char* fn_name,
+                        void* node, uint8_t* locals, const Payload* p)
+{
+    static FrameArgs a;
+    if (strcmp(fn_name, "AS_SetTitle") == 0) {
+        frame_string(node, locals, 0, g_unlock_title, sizeof g_unlock_title);
+    } else if (strcmp(fn_name, "AS_SetRequirement") == 0) {
+        // Red when the facility is not built yet; the plain text says so
+        // only by its colour.
+        char req[FOCUS_MAX_LABEL];
+        frame_string(node, locals, 0, req, sizeof req);
+        int missing = p->nstrings && p->hues[0] == HUE_BAD;
+        _snprintf_s(g_unlock_req, sizeof g_unlock_req, _TRUNCATE, "%s%s", req,
+                    missing && req[0] ? ", not built yet" : "");
+    } else if (strcmp(fn_name, "AS_SetGeneModData") == 0) {
+        frame_args(node, locals, &a);
+        const char* parts[2] = { a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "" };
+        focus_join_detail(parts, 2, g_unlock_body, sizeof g_unlock_body);
+    } else if (strcmp(fn_name, "AS_SetMechData") == 0) {
+        frame_args(node, locals, &a);
+        const char* g = a.ns > 0 ? a.s[0] : "";
+        char w0[MAX_STR], w1[MAX_STR];
+        const char* p0[2] = { a.ns > 1 ? a.s[1] : "", a.ns > 2 ? a.s[2] : "" };
+        const char* p1[2] = { a.ns > 4 ? a.s[4] : "", a.ns > 5 ? a.s[5] : "" };
+        focus_join_detail(p0, 2, w0, sizeof w0);
+        focus_join_detail(p1, 2, w1, sizeof w1);
+        const char* parts[4] = { g, w0, a.ns > 7 ? a.s[7] : "", w1 };
+        focus_join_detail(parts, 4, g_unlock_body, sizeof g_unlock_body);
+    } else if (strcmp(fn_name, "AS_SetButtonData") == 0) {
+        char button[FOCUS_MAX_LABEL], key[FOCUS_MAX_LABEL + 16];
+        frame_string(node, locals, 0, button, sizeof button);
+        _snprintf_s(key, sizeof key, _TRUNCATE, "%s%s", button[0] ? "Enter: " : "", button);
+        static char say[MAX_STR + FOCUS_MAX_LABEL * 4];
+        const char* parts[4] = { g_unlock_title, g_unlock_body, g_unlock_req, key };
+        focus_join_detail(parts, 4, say, sizeof say);
+        g_unlock_title[0] = g_unlock_req[0] = g_unlock_body[0] = 0;
+        logf_("[%ld] %s %s.%s  UNLOCK \"%s\"\n", n, tag, obj_name, fn_name, say);
+        speech_cancel_pending();
+        announce(say);
+    }
+    // The images, and anything else, are not for saying.
+}
+
 static void capture_body(const char* tag, LONG n, void* stack)
 {
     if (!readable(stack, 0x20)) {
@@ -2787,6 +2849,11 @@ static void capture_body(const char* tag, LONG n, void* stack)
     }
     if (strncmp(obj_name, "UIMissionControl_", 17) == 0 && strstr(obj_name, "Alert")) {
         if (alert_note(n, tag, obj_name, fn_name, object, node, locals, p)) return;
+    }
+    if (strncmp(obj_name, "UISpecialUnlockDialogue", 23) == 0 &&
+        strncmp(fn_name, "AS_", 3) == 0) {
+        unlock_note(n, tag, obj_name, fn_name, node, locals, p);
+        return;
     }
 
     // A council mission ("COUNCIL MISSION. GATEWAY. The latest reports..."),
