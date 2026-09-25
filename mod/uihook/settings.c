@@ -41,6 +41,7 @@ static const Spec SPEC[SET_COUNT] = {
     [SET_TICKER]     = { "Ticker",       "Message ticker",      0, 1, 1, NULL },
     [SET_OBJECTIVES] = { "Objectives",   "Objective changes",   0, 1, 1, NULL },
     [SET_NARRATIVE]  = { "Narrative",    "Comm-link messages",  0, 1, 1, NULL },
+    [SET_MOUSE]      = { "BlockMouse",   "Block the mouse",     0, 1, 1, NULL },
 };
 
 #define SECTION "settings"

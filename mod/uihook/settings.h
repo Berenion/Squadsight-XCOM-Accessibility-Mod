@@ -38,6 +38,7 @@ enum {
     SET_TICKER,         // the message ticker ("... takes a reaction shot!")
     SET_OBJECTIVES,     // objective changes, and the list shown by a script
     SET_NARRATIVE,      // comm-link lines (Central, Shen, Vahlen)
+    SET_MOUSE,          // the physical mouse ignored while the game is in front (mouse.h)
     SET_COUNT
 };
 

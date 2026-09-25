@@ -69,6 +69,7 @@
 #include "audio.h"
 #include "learn.h"
 #include "settings.h"
+#include "mouse.h"
 #include "props.h"
 #include "input.h"
 #include "../../tools/vendor/MinHook/include/MinHook.h"
@@ -5467,10 +5468,8 @@ static int walls_scan(const CursorGrid* g, int tx, int ty, float floor,
 // no world data, no cover slot -- because a field meaning "the mod could not
 // ask" would be indistinguishable from one meaning "open".
 //
-// The tile listened from is the navigation target while one is held and the
-// cursor's own tile otherwise, so the walls are alive under the mouse as well
-// as under the numpad. A scan is two questions of the game about each of the
-// (2 * SONAR_RANGE + 1)^2 tiles in range, so it is rescanned when that tile
+// The tile listened from is listen_tile's, below. A scan is two questions of
+// the game about each of the (2 * SONAR_RANGE + 1)^2 tiles in range, so it is rescanned when that tile
 // changes and at most every WALLS_SCAN_MS; while the tile does not change, only
 // every WALLS_IDLE_MS, which is there to catch a wall being blown up rather
 // than to track the player. Between scans the mixer's own glide carries the
@@ -5484,6 +5483,42 @@ static int        g_walls_have;          // a tile has been scanned
 static int        g_walls_tile[2];
 static ULONGLONG  g_walls_at;
 static ULONGLONG  g_walls_logged;
+
+// Where the field and the hearts listen from:
+//   - the navigation target while one is held;
+//   - the cursor while aiming, since the cursor is the aim;
+//   - otherwise the selected soldier.
+// Not the cursor when nothing is held: in mouse mode it sits under the mouse,
+// and the mouse is parked mid-window (mouse.h), which in the 2026-09-25 log
+// was 24 tiles from the soldier after every switch -- 28, 35 for Vargas on
+// 28, 11. The cursor is the fallback only when the soldier cannot be read.
+// The soldier's Location.Z runs a few units above the cursor's resting height
+// (83.1 against 80.0 on the same tile), so it takes the same lift off; the
+// cursor's own height is used when the two share a tile, as nav_press does.
+static int listen_tile(const CursorGrid* g, int* tx, int* ty, float* floor)
+{
+    if (nav_active() && nav_target(tx, ty)) {
+        *floor = navh_ground();
+        return 1;
+    }
+    float z;
+    int have_cursor = cursor_tile(g, tx, ty, &z);
+    if (!soldier_aiming()) {
+        int sx, sy;
+        float sz;
+        if (soldier_tile(g, &sx, &sy, &sz) &&
+            sx >= 0 && sy >= 0 && sx < g->num_x && sy < g->num_y) {
+            if (!have_cursor || sx != *tx || sy != *ty) z = sz;
+            *tx = sx;
+            *ty = sy;
+            *floor = z - NAV_CURSOR_LIFT;
+            return 1;
+        }
+    }
+    if (!have_cursor) return 0;
+    *floor = z - NAV_CURSOR_LIFT;
+    return 1;
+}
 
 static void walls_quiet(void)
 {
@@ -5506,13 +5541,7 @@ static void walls_poll(void)
     if (!on || !audio_available()) return;
     if (!cursor_grid(&g)) { walls_quiet(); return; }
 
-    if (nav_active() && nav_target(&tx, &ty)) {
-        floor = navh_ground();
-    } else {
-        float z;
-        if (!cursor_tile(&g, &tx, &ty, &z)) { walls_quiet(); return; }
-        floor = z - NAV_CURSOR_LIFT;
-    }
+    if (!listen_tile(&g, &tx, &ty, &floor)) { walls_quiet(); return; }
 
     ULONGLONG now = GetTickCount64();
     int same = g_walls_have && tx == g_walls_tile[0] && ty == g_walls_tile[1];
@@ -5646,10 +5675,8 @@ static void hearts_poll(void)
     CursorGrid g;
     int tx, ty;
     if (!cursor_grid(&g)) { audio_hearts_off(); return; }
-    if (!(nav_active() && nav_target(&tx, &ty))) {
-        float z;
-        if (!cursor_tile(&g, &tx, &ty, &z)) { audio_hearts_off(); return; }
-    }
+    float floor;
+    if (!listen_tile(&g, &tx, &ty, &floor)) { audio_hearts_off(); return; }
 
     ULONGLONG now = GetTickCount64();
     if (n >= 0 && now - at < HEARTS_SCAN_MS) {
@@ -6143,9 +6170,8 @@ static void nav_stop(const char* why)
     nav_end();
     nav_forget_interface();
     // The field is not silenced. With no target held it simply goes back to
-    // listening from wherever the cursor is, which is where the mouse has
-    // just put it -- the walls are still there, and the player has not
-    // stopped needing to hear them.
+    // listening from the selected soldier (listen_tile) -- the walls are
+    // still there, and the player has not stopped needing to hear them.
     g_nav_live = 0;
     g_nav_aim = 0;
     g_nav_parked = 0;
@@ -6161,18 +6187,46 @@ static void nav_stop(const char* why)
 // game window puts it over the battlefield. Done once per navigation, and only
 // after a key has gone unanswered, so a mouse already over the map is left
 // where it is.
-static void nav_park_mouse(void)
+static int mouse_to_centre(POINT* c)
 {
     HWND w = GetForegroundWindow();
     RECT r;
-    if (!w || !GetClientRect(w, &r)) return;
-    POINT c = { (r.right - r.left) / 2, (r.bottom - r.top) / 2 };
-    if (!ClientToScreen(w, &c)) return;
-    SetCursorPos(c.x, c.y);
+    if (!w || !GetClientRect(w, &r)) return 0;
+    c->x = (r.right - r.left) / 2;
+    c->y = (r.bottom - r.top) / 2;
+    if (!ClientToScreen(w, c)) return 0;
+    SetCursorPos(c->x, c->y);
     GetCursorPos(&g_nav_mouse);
+    return 1;
+}
+
+static void nav_park_mouse(void)
+{
+    POINT c;
+    if (!mouse_to_centre(&c)) return;
     g_nav_parked = 1;
     logf_("nav: no placement since the key; mouse moved to the window centre "
           "(%ld, %ld)\n", c.x, c.y);
+}
+
+// With the mouse blocked (mouse.h) it stays wherever it was left, and where it
+// was left may be the HUD, where the game will not path, or a screen edge,
+// where the camera scrolls for as long as it rests there. So once the block
+// takes hold in a mission -- and again each time the game comes back to the
+// front, since the mouse is free while it is away -- it is put in the middle
+// of the window, over the battlefield. g_nav_mouse follows, so a held target
+// does not read this as the mouse moving.
+static int g_mouse_parked;
+
+static void mouse_hold_poll(void)
+{
+    if (!mouse_blocking()) { g_mouse_parked = 0; return; }
+    if (g_mouse_parked) return;
+    POINT c;
+    if (!mouse_to_centre(&c)) return;
+    g_mouse_parked = 1;
+    logf_("mouse: blocked, parked at the window centre (%ld, %ld); %u device events "
+          "swallowed so far\n", c.x, c.y, mouse_swallowed());
 }
 
 // Numpad 0. The game moves a soldier from the path it has already built out
@@ -8851,6 +8905,8 @@ static void nav_poll(void)
         }
     }
 
+    mouse_hold_poll();
+
     if (!game_has_focus()) {
         // Forget what was held, so a key released while the game was in the
         // background does not read as a fresh press on return.
@@ -10251,6 +10307,10 @@ static DWORD WINAPI init(LPVOID param)
     char learn_why[256];
     learn_start(learn_why, sizeof learn_why);
     logf_("practice: %s\n", learn_why);
+
+    char mouse_why[128];
+    mouse_start(mouse_why, sizeof mouse_why);
+    logf_("mouse: %s\n", mouse_why);
 
     if (CreateThread(NULL, 0, review_pump, NULL, 0, NULL))
         logf_("review: Insert polled every %d ms, everywhere\n", REVIEW_POLL_MS);
