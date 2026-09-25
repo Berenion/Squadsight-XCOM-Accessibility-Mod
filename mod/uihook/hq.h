@@ -271,3 +271,99 @@ int hq_day_passed(const char* date_a, const char* date_b, unsigned long long now
 // "Rookie Christophe Leroy has returned to active duty."
 #define HQ_NOTICES 16
 int hq_notices_new(const char* raw, char* out, size_t out_sz);
+
+// ---- Engineering -------------------------------------------------------------
+//
+// The staff count the facility shows along the top, sent to the strategy HUD
+// on entering Research, Engineering, the Foundry and the MEC screens, and
+// sent empty on leaving:
+//
+//     UIStrategyHUD.AS_SetHumanResources(resourceName, Amount)
+//
+// Two strings and no index, which the general path took for a two-item list.
+// Kept for Delete's status line, after the date: "ENGINEERS: 10". Empty
+// clears it.
+void hq_status_human(const char* label, const char* value);
+
+// A cost or duration panel, from its raw text (markup still in), in words.
+// The game draws each requirement in its own colour and a missing one in
+// red, which is the only place Build Items says what is short:
+//
+//     UIBuildItem.AS_UpdateInfo(itemName, infoText, descText, imgPath)
+//         infoText = colored("Cost:") $ " " $ colored(req) $ "<br>" ...
+//     UIManufacturing.AS_UpdateInfo(duration $ "\n" $ cost, notes, imgPath)
+//
+// A line break (<br>, \n) is a sentence break, "\xC2\xA7" "50" is "50 credits",
+// and a red requirement is followed by "(not enough)" -- a red run ending in
+// a full stop or "!" is a sentence ("Insufficient funds.") and is left as
+// it is. "Cost: 50 credits (not enough), 10 Alloys".
+void hq_cost_text(const char* raw, char* out, size_t out_sz);
+
+// One row of Build Items (UIBuildItem.UpdateLayout), sent as pairs in one
+// Invoke("BatchAddOptions", [label, quantity, label, quantity, ...]). The
+// label is the item's name coloured by state: red when it cannot be built
+// now (iState 1: the cost is not met). The quantity is how many are in
+// storage, under the column heading from AS_SetLabels ("BUILT"). Left out
+// when none. "LASER RIFLE, BUILT: 2", "ARC THROWER, unavailable".
+void hq_build_row(const char* raw_label, int quantity, const char* qty_label,
+                  char* out, size_t out_sz);
+
+// One order in the build queue (UIStrategyHUD_BuildQueue.UpdateData):
+//
+//     AS_AddProjectToQueue(desc, engineers "", qty, eta, int uistate)
+//
+// desc "Laser Rifle (2)" or "Foundry: <project>"; qty "1/2" -- built of
+// ordered -- or "---" for a Foundry project; eta "3 Days", "12 Hours", or
+// "--" when no engineer is on it. "Laser Rifle (2), 1 of 2 done, 3 Days";
+// "Foundry: SHIV Suppression, no engineers".
+void hq_queue_row(const char* desc, const char* qty, const char* eta,
+                  char* out, size_t out_sz);
+
+// The queue as the game last drew it, for Delete in Engineering. The title
+// is AS_SetQueueTitle's first string: "CURRENT PROJECTS", or "NO CURRENT
+// PROJECTS" when it is empty.
+#define HQ_QUEUE 16
+void hq_queue_clear(void);
+void hq_queue_title(const char* title);
+void hq_queue_add(const char* row);
+
+// Engineering as list entries: the queue's title, each order, then the
+// base's status line, which carries the staff ("ENGINEERS: 10"). Returns
+// how many.
+int  hq_eng_lines(char lines[][HQ_SIT_TEXT], int max);
+
+// ---- a research report (UIScienceLabs) ----------------------------------------
+//
+// The archives (Research, "ACCESS RESEARCH ARCHIVES") and the report shown
+// when research finishes are one screen. RealizeReport sends
+//
+//     AS_SetReportTitles(TitleText, codename $ "\n" $ date)
+//     AS_SetReportItem(subject, Notes, imagePath)
+//     AS_ClearResults(), then AS_AddResults(line) per result, coloured
+//
+// on arrival (the subject empty when the list is up) and on opening an entry.
+// The report itself has no cursor: up and down scroll it
+// (AS_ScrollResearchUp / Down). Nothing read any of it; the notes were in the
+// log, cut at 256 characters.
+//
+// Kept here and said whole on arrival; up and down then walk it a piece at a
+// time. The pieces: "Weapon Fragments", each sentence of the notes, each
+// result, then "Research Report. Codename: Sagaris. March, 2015". Game thread
+// only.
+#define HQ_REPORT_PIECES 64
+#define HQ_REPORT_TEXT   1024
+
+void hq_report_titles(const char* title, const char* sub);
+void hq_report_item(const char* subject, const char* notes);
+void hq_report_results_clear(void);
+void hq_report_result(const char* text);
+
+// Whether a report is up to be read: a subject has been sent.
+int  hq_report_ready(void);
+
+// The report whole: "Weapon Fragments. <notes> Results: S.C.O.P.E. available
+// for manufacture. Research Report. Codename: Sagaris. March, 2015."
+void hq_report_text(char* out, size_t out_sz);
+
+// The pieces, as above. Returns how many.
+int  hq_report_pieces(char pieces[][HQ_REPORT_TEXT], int max);

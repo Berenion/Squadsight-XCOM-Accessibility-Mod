@@ -83,6 +83,9 @@ static const struct { const char* icon; int cmd; } g_icons[] = {
     // Not the game's: main.c gives it to "Previous soldier", whose mouse-mode
     // bar sends a frame number and no glyph.
     { "Icon_KEY_LEFT_SHIFT", FXS_KEY_LEFT_SHIFT },
+    // Not the game's either: Build Items' mouse-mode bar sends frame 3 for
+    // the item card, which F1 opens (UIBuildItem, case 600).
+    { "Icon_KEY_F1",       FXS_KEY_F1          },
 };
 
 int help_icon_cmd(const char* icon)
@@ -133,6 +136,7 @@ static const char* key_for(const char* screen, int cmd)
         case FXS_KEY_ESCAPE:   return "Escape";
         case FXS_KEY_TAB:        return "Tab";
         case FXS_KEY_LEFT_SHIFT: return "Left Shift";
+        case FXS_KEY_F1:         return "F1";
         default: break;
     }
     return input_cmd_name(input_key_for(screen, cmd));

@@ -65,6 +65,7 @@
 #define FXS_KEY_LEFT_SHIFT  514
 #define FXS_KEY_SPACEBAR    513
 #define FXS_KEY_TAB         571
+#define FXS_KEY_F1          600
 #define FXS_KEY_1           612
 #define FXS_KEY_2           613
 #define FXS_KEY_3           614

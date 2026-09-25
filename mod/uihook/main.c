@@ -406,6 +406,27 @@ static volatile ULONGLONG g_seen_tactical_at;
 // last seen somewhere else. See sitroom_up.
 static volatile ULONGLONG g_sitroom_at;
 static volatile ULONGLONG g_sitroom_left_at;
+// The same for Engineering and the screens it opens (eng_up), whose build
+// queue Delete reads there.
+static volatile ULONGLONG g_eng_at;
+static volatile ULONGLONG g_eng_left_at;
+// When Build Items and an order last drew. The strategy HUD's help bar and a
+// widget helper belong to no screen by name, so a call arriving within a
+// moment of one of these is taken as that screen's.
+static ULONGLONG g_builditem_at;
+static ULONGLONG g_man_at;
+#define ENG_SAME_DRAW_MS 100
+// Whether the build queue is taking the arrows (Review an order): only then
+// is its selection a move to say.
+static int       g_queue_editing;
+// The order open in UIManufacturing, as last said (see capture_body).
+static struct {
+    void* obj;
+    int   said;
+    char  title[128], eng[128], qty_label[64], qty[32], rush[96];
+    char  said_rush[96], said_qty[96], said_eng[128];
+    char  said_info[1024], said_notes[1024];
+} g_man;
 
 // The loadout's inventory list and its last selection (loadout_leave_locker).
 static void*     g_loadout_inv;          // the inventory list, as focus keys it
@@ -743,7 +764,9 @@ static void read_array(const FArray* a, Payload* out)
 // The array is found by what it is -- the frame's ArrayProperty whose every
 // element carries a valid ASValue type -- not by its name.
 #define ABAR_STREAM_MAX 512
-#define ABAR_TEXT       64
+// Room for a name in its <font color='#...'> wrapper: Build Items sends its
+// labels coloured (UIBuildItem.UpdateLayout), 29 characters of markup.
+#define ABAR_TEXT       128
 
 static void*     g_abar_obj;            // the container the bar was kept for
 static int       g_abar_logged_fail;
@@ -1374,6 +1397,14 @@ static void capture_body(const char* tag, LONG n, void* stack)
     if (strncmp(obj_name, "UIStrategyHUD_", 14) == 0 &&
         obj_name[14] >= '0' && obj_name[14] <= '9') {
         if (strcmp(fn_name, "ClearResources") == 0) { hq_status_resources_clear(); return; }
+        if (strcmp(fn_name, "AS_SetHumanResources") == 0) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            hq_status_human(a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "");
+            logf_("[%ld] %s %s.%s  STAFF \"%s\" \"%s\"\n", n, tag, obj_name, fn_name,
+                  a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "");
+            return;
+        }
         if (strcmp(fn_name, "AS_AddResource") == 0 && p->nstrings) {
             hq_status_resource(p->strings[0]);
             return;
@@ -1402,6 +1433,317 @@ static void capture_body(const char* tag, LONG n, void* stack)
             frame_args(node, locals, &a);
             hq_status_event(object, a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
                             a.ns > 2 ? a.s[2] : "");
+            return;
+        }
+    }
+
+    // ---- Engineering ---------------------------------------------------------
+    //
+    // Its submenu is a facility submenu like any other. What it adds is read
+    // here, from the game's full workflow (UIStrategyHUD_FSM_Engineering,
+    // UIBuildItem, UIManufacturing, UIStrategyHUD_BuildQueue, and
+    // XGEngineeringUI / XGManufacturingUI behind them). See hq.h.
+    if (strncmp(obj_name, "UIStrategyHUD_FSM_Engineering", 29) == 0 ||
+        strncmp(obj_name, "UIBuildItem", 11) == 0 ||
+        strncmp(obj_name, "UIManufacturing", 15) == 0 ||
+        strncmp(obj_name, "UIFoundry", 9) == 0)
+        g_eng_at = GetTickCount64();
+
+    // The build queue, drawn beside Engineering and the Foundry. UpdateData
+    // clears it (Invoke "clear", the only call in that frame) and adds one
+    // order per AS_AddProjectToQueue, with no index; the selection is
+    // Invoke("setSelected", [string index]) from RealizeSelected. Left to the
+    // general path, the four column headings of AS_SetQueueTitle were a list,
+    // every order replaced the one before, the order's state (3 or 4) was
+    // taken for its slot, and a lone "NO CURRENT PROJECTS" was said out of
+    // nowhere at the base.
+    if (strncmp(obj_name, "UIStrategyHUD_BuildQueue", 24) == 0) {
+        if (strcmp(fn_name, "UpdateData") == 0) {
+            focus_begin(object);
+            hq_queue_clear();
+            logf_("[%ld] %s %s.%s  QUEUE cleared\n", n, tag, obj_name, fn_name);
+            return;
+        }
+        if (strcmp(fn_name, "AS_AddProjectToQueue") == 0) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            char row[FOCUS_MAX_LABEL];
+            hq_queue_row(a.ns > 0 ? a.s[0] : "", a.ns > 2 ? a.s[2] : "",
+                         a.ns > 3 ? a.s[3] : "", row, sizeof row);
+            focus_add(object, row);
+            hq_queue_add(row);
+            logf_("[%ld] %s %s.%s  QUEUE %d = \"%s\"\n", n, tag, obj_name, fn_name,
+                  focus_count(object) - 1, row);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetQueueTitle") == 0) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            hq_queue_title(a.ns > 0 ? a.s[0] : "");
+            logf_("[%ld] %s %s.%s  QUEUE title \"%s\"\n", n, tag, obj_name, fn_name,
+                  a.ns > 0 ? a.s[0] : "");
+            return;
+        }
+        // What the queue offers, into 0's list. Y (303) on the Engineering
+        // submenu starts Review an order when there is one
+        // (UIStrategyHUD_FSM_Engineering, case 303), and 6 sends Y there.
+        // With a gamepad the game names it with its glyph; in mouse mode it
+        // says "CLICK TO EDIT" with none, or "QUEUE LOCKED" while it cannot
+        // be edited (an order open, the Foundry, the queue already active).
+        // Only the English lock is told apart: elsewhere a locked queue is
+        // listed too, and 6 on it does nothing.
+        if (strcmp(fn_name, "AS_SetHelp") == 0) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            const char* label = a.ns > 0 ? a.s[0] : "";
+            const char* icon  = a.ns > 1 ? a.s[1] : "";
+            if (!*label || _stricmp(label, "QUEUE LOCKED") == 0)
+                help_set(object, 0, "", "", 0);
+            else
+                help_set(object, 0, *icon ? label : "Review an order", "Icon_Y_TRIANGLE", 0);
+            logf_("[%ld] %s %s.%s  QUEUE help \"%s\" on %s\n", n, tag, obj_name, fn_name,
+                  label, *icon ? icon : "(no icon)");
+            return;
+        }
+        // Review an order: the queue takes the arrows until Enter opens the
+        // order or Escape gives them back. It starts with nothing selected
+        // (DeactivateEditing left -1), so the first Down lands on the first
+        // order and the first Up on the last.
+        if (strcmp(fn_name, "ActivateEditing") == 0) {
+            g_queue_editing = 1;
+            char say[128];
+            _snprintf_s(say, sizeof say, _TRUNCATE, "Review an order, %d in the queue",
+                        focus_count(object));
+            logf_("[%ld] %s %s.%s  QUEUE reviewing \"%s\"\n", n, tag, obj_name, fn_name, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return;
+        }
+        if (strcmp(fn_name, "DeactivateEditing") == 0 || strcmp(fn_name, "OnAccept") == 0) {
+            g_queue_editing = 0;
+            logf_("[%ld] %s %s.%s  QUEUE reviewing ends\n", n, tag, obj_name, fn_name);
+            return;
+        }
+        // Every redraw selects the first order when there is one; only a
+        // move while reviewing is news.
+        if (strcmp(fn_name, "RealizeSelected") == 0) {
+            int idx;
+            if (!g_queue_editing || !string_index(p, &idx) || idx < 0) {
+                logf_("[%ld] %s %s.%s  QUEUE selection (not reviewing)\n",
+                      n, tag, obj_name, fn_name);
+                return;
+            }
+            focus_announce(n, tag, obj_name, fn_name, object, idx);
+            return;
+        }
+    }
+
+    // Build Items. UpdateLayout sends the heading and column labels
+    // (AS_SetLabels(title, "ITEM", "BUILT")), the tabs' states, clears the
+    // list (Invoke "clear") and fills it in one Invoke("BatchAddOptions",
+    // [label, quantity, ...]); RealizeSelected then sends the item's panel
+    // (AS_UpdateInfo) and the selection as text (AS_SetFocus("3")). Left
+    // and right change tab, which runs all of that and then RealizeSelected
+    // once more.
+    if (strncmp(obj_name, "UIBuildItem", 11) == 0) {
+        static char s_qty_label[64];
+        g_builditem_at = GetTickCount64();
+        if (strcmp(fn_name, "AS_SetLabels") == 0) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            if (a.ns > 0 && a.s[0][0]) focus_set_title(object, a.s[0]);
+            strncpy_s(s_qty_label, sizeof s_qty_label, a.ns > 2 ? a.s[2] : "", _TRUNCATE);
+            logf_("[%ld] %s %s.%s  BUILD title \"%s\", count \"%s\"\n", n, tag, obj_name,
+                  fn_name, a.ns > 0 ? a.s[0] : "", s_qty_label);
+            return;
+        }
+        // The tab's index, which the general path took for a move to the
+        // item at that index.
+        if (strcmp(fn_name, "AS_SetTabState") == 0 ||
+            strcmp(fn_name, "AS_SetSelectedCategory") == 0)
+            return;
+        if (strcmp(fn_name, "AS_SetConfirmButton") == 0) {
+            if (p->nstrings) help_set(object, 0, p->strings[0], "Icon_A_X", 0);
+            return;
+        }
+        if (strcmp(fn_name, "UpdateLayout") == 0) {
+            AbarValue* v;
+            int nv = asvalues_from_frame(stack, &v);
+            focus_begin(object);
+            if (nv <= 0) {
+                logf_("[%ld] %s %s.%s  BUILD cleared\n", n, tag, obj_name, fn_name);
+                return;
+            }
+            int k = 0;
+            for (int i = 0; i + 1 < nv; i++) {
+                if (v[i].type != ABAR_STRING || v[i + 1].type != ABAR_NUMBER) continue;
+                char row[FOCUS_MAX_LABEL];
+                hq_build_row(v[i].s, (int)v[i + 1].n, s_qty_label, row, sizeof row);
+                focus_set(object, k, row);
+                logf_("[%ld] %s %s.%s  BUILD %d = \"%s\"\n", n, tag, obj_name, fn_name, k, row);
+                k++;
+                i++;
+            }
+            return;
+        }
+        // EU sends the rows one at a time instead, after the same clear:
+        // AS_AddOption(int iIndex, string sLabel, bool IsDisabled, int
+        // iQuantity), the label coloured the same way.
+        if (strcmp(fn_name, "AS_AddOption") == 0 && p->nnumbers >= 2) {
+            static char raw[FRAME_ARG_TEXT];
+            char row[FOCUS_MAX_LABEL];
+            frame_local_raw(node, locals, "sLabel", raw, sizeof raw);
+            hq_build_row(raw, (int)p->numbers[1], s_qty_label, row, sizeof row);
+            focus_set(object, (int)p->numbers[0], row);
+            logf_("[%ld] %s %s.%s  BUILD %d = \"%s\"\n", n, tag, obj_name, fn_name,
+                  (int)p->numbers[0], row);
+            return;
+        }
+        // The item's panel: its name (the label already says it), the cost
+        // from the raw text so a requirement short is marked, and the
+        // description.
+        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
+            static char raw[FRAME_ARG_TEXT], cost[FRAME_ARG_TEXT];
+            static FrameArgs a;
+            static char detail[FOCUS_MAX_DETAIL];
+            frame_local_raw(node, locals, "infoText", raw, sizeof raw);
+            hq_cost_text(raw, cost, sizeof cost);
+            frame_args(node, locals, &a);
+            const char* parts[2];
+            int np = 0;
+            if (cost[0]) parts[np++] = cost;
+            if (a.ns > 2 && a.s[2][0]) parts[np++] = a.s[2];
+            focus_join_detail(parts, np, detail, sizeof detail);
+            focus_set_detail(object, detail);
+            logf_("[%ld] %s %s.%s  PANEL \"%s\"\n", n, tag, obj_name, fn_name, detail);
+            if (object == g_focus_obj && !g_focus_had_panel && detail[0] &&
+                GetTickCount64() - g_focus_at < LIST_WINDOW_MS) {
+                g_focus_had_panel = 1;
+                if (g_speak && !muted()) speech_say(detail);
+            }
+            return;
+        }
+        // A tab change selects twice, the second time with the same item and
+        // the same panel; said again, it cut the first off, heading and all.
+        if (strcmp(fn_name, "AS_SetFocus") == 0) {
+            static void*     s_obj;
+            static int       s_idx = -1;
+            static char      s_said[FOCUS_MAX_LABEL + FOCUS_MAX_DETAIL];
+            static ULONGLONG s_at;
+            int idx;
+            if (!string_index(p, &idx) || idx < 0) return;
+            static char label[FOCUS_MAX_LABEL], detail[FOCUS_MAX_DETAIL];
+            static char key[FOCUS_MAX_LABEL + FOCUS_MAX_DETAIL];
+            ULONGLONG d_at, t = GetTickCount64();
+            if (!focus_label_at(object, idx, label, sizeof label)) label[0] = 0;
+            if (!focus_detail(object, detail, sizeof detail, &d_at)) detail[0] = 0;
+            _snprintf_s(key, sizeof key, _TRUNCATE, "%s|%s", label, detail);
+            if (object == s_obj && idx == s_idx && t - s_at < 1500 &&
+                strcmp(key, s_said) == 0) {
+                focus_set_detail(object, "");
+                logf_("[%ld] %s %s.%s  FOCUS %d (said, same again)\n",
+                      n, tag, obj_name, fn_name, idx);
+                return;
+            }
+            s_obj = object;
+            s_idx = idx;
+            s_at = t;
+            strncpy_s(s_said, sizeof s_said, key, _TRUNCATE);
+            focus_announce(n, tag, obj_name, fn_name, object, idx);
+            return;
+        }
+    }
+
+    // An order (UIManufacturing): a new one from Build Items, or one already
+    // in the queue from Review an order. The screen is not a list. Every
+    // redraw -- arriving, the quantity changing, rush toggled -- goes
+    // UpdateData (the buttons through SetHelp), RefreshDisplay (AS_SetTitle,
+    // AS_SetEngineerLine, the quantity spinner through the widget helper,
+    // AS_SetQuantityLine for an order already placed), then AS_UpdateInfo
+    // (the duration and cost, the notes). So the order is gathered and said
+    // at AS_UpdateInfo: whole on arrival, then only what changed.
+    //
+    // The quantity is a spinner on a UIWidgetHelper, which by name belongs
+    // to no screen. Its calls come in the same redraw as the order's, so a
+    // helper call within a moment of one is the order's. Up and down move
+    // it (the spinner is vertical), and so do left and right.
+    if (strncmp(obj_name, "UIWidgetHelper", 14) == 0 && g_man_at &&
+        GetTickCount64() - g_man_at < ENG_SAME_DRAW_MS) {
+        if (strstr(fn_name, "SpinnerValue") && p->nstrings) {
+            strncpy_s(g_man.qty, sizeof g_man.qty, p->strings[0], _TRUNCATE);
+            logf_("[%ld] %s %s.%s  ORDER quantity \"%s\"\n", n, tag, obj_name, fn_name,
+                  g_man.qty);
+        }
+        return;
+    }
+    if (strncmp(obj_name, "UIManufacturing", 15) == 0) {
+        g_man_at = GetTickCount64();
+        if (object != g_man.obj) {
+            memset(&g_man, 0, sizeof g_man);
+            g_man.obj = object;
+        }
+        static FrameArgs a;
+        if (strcmp(fn_name, "AS_SetTitle") == 0) {
+            frame_args(node, locals, &a);
+            strncpy_s(g_man.title, sizeof g_man.title, a.ns > 0 ? a.s[0] : "", _TRUNCATE);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetEngineerLine") == 0) {
+            frame_args(node, locals, &a);
+            _snprintf_s(g_man.eng, sizeof g_man.eng, _TRUNCATE, "%s %s",
+                        a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "");
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetQuantityLine") == 0) {
+            frame_args(node, locals, &a);
+            strncpy_s(g_man.qty_label, sizeof g_man.qty_label, a.ns > 0 ? a.s[0] : "", _TRUNCATE);
+            strncpy_s(g_man.qty, sizeof g_man.qty, a.ns > 1 ? a.s[1] : "", _TRUNCATE);
+            return;
+        }
+        // Rush construction's button says whether it is on ("Rush
+        // Construction YES"), so it is kept as part of the order; the call
+        // goes on to the help bar below.
+        if (strcmp(fn_name, "AS_SetHelp") == 0 && p->nnumbers && (int)p->numbers[0] == 2) {
+            frame_args(node, locals, &a);
+            strncpy_s(g_man.rush, sizeof g_man.rush, a.ns > 0 ? a.s[0] : "", _TRUNCATE);
+        }
+        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
+            static char raw[FRAME_ARG_TEXT], info[FRAME_ARG_TEXT], notes[FRAME_ARG_TEXT];
+            static char say[FOCUS_MAX_DETAIL];
+            frame_local_raw(node, locals, "infoText", raw, sizeof raw);
+            hq_cost_text(raw, info, sizeof info);
+            frame_args(node, locals, &a);
+            strncpy_s(notes, sizeof notes, a.ns > 1 ? a.s[1] : "", _TRUNCATE);
+            char qty[96];
+            if (g_man.qty[0])
+                _snprintf_s(qty, sizeof qty, _TRUNCATE, "%s %s",
+                            g_man.qty_label[0] ? g_man.qty_label : "QUANTITY:", g_man.qty);
+            else
+                qty[0] = 0;
+            const char* parts[6];
+            int np = 0;
+            int first = !g_man.said;
+            if (first && g_man.title[0]) parts[np++] = g_man.title;
+            if (!first && g_man.rush[0] && strcmp(g_man.rush, g_man.said_rush) != 0)
+                parts[np++] = g_man.rush;
+            if (qty[0] && (first || strcmp(qty, g_man.said_qty) != 0)) parts[np++] = qty;
+            if (g_man.eng[0] && (first || strcmp(g_man.eng, g_man.said_eng) != 0))
+                parts[np++] = g_man.eng;
+            if (info[0] && (first || strcmp(info, g_man.said_info) != 0)) parts[np++] = info;
+            if (notes[0] && (first || strcmp(notes, g_man.said_notes) != 0)) parts[np++] = notes;
+            focus_join_detail(parts, np, say, sizeof say);
+            g_man.said = 1;
+            strncpy_s(g_man.said_rush, sizeof g_man.said_rush, g_man.rush, _TRUNCATE);
+            strncpy_s(g_man.said_qty, sizeof g_man.said_qty, qty, _TRUNCATE);
+            strncpy_s(g_man.said_eng, sizeof g_man.said_eng, g_man.eng, _TRUNCATE);
+            strncpy_s(g_man.said_info, sizeof g_man.said_info, info, _TRUNCATE);
+            strncpy_s(g_man.said_notes, sizeof g_man.said_notes, notes, _TRUNCATE);
+            logf_("[%ld] %s %s.%s  ORDER %s\"%s\"\n", n, tag, obj_name, fn_name,
+                  first ? "" : "change ", say);
+            if (say[0]) {
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_now(say);
+            }
             return;
         }
     }
@@ -1438,7 +1780,7 @@ static void capture_body(const char* tag, LONG n, void* stack)
     // Back at the facility row: out of the room, whatever drew last.
     if (strncmp(obj_name, "UIStrategyHUD_FacilityMenu", 26) == 0 &&
         strcmp(fn_name, "OnReceiveFocus") == 0)
-        g_sitroom_left_at = GetTickCount64();
+        g_sitroom_left_at = g_eng_left_at = GetTickCount64();
 
     // The mission's objectives. See mission.h. Kept, and said once a burst
     // of changes is over (mission_poll).
@@ -1670,6 +2012,15 @@ static void capture_body(const char* tag, LONG n, void* stack)
                 label = pc;
                 if (strcmp(pc, "Back") == 0) icon = "Icon_B_CIRCLE";
                 else if (strcmp(pc, "Accept") == 0) icon = "Icon_A_X";
+                // On Build Items frame 3 is the item card, not Accept:
+                // UIBuildItem adds it with OnMouseAccept, which opens the
+                // card, as F1 does (case 600). Enter is MANUFACTURE, which
+                // the screen's own confirm button names.
+                if (strcmp(pc, "Accept") == 0 &&
+                    GetTickCount64() - g_builditem_at < ENG_SAME_DRAW_MS) {
+                    label = "Details";
+                    icon = "Icon_KEY_F1";
+                }
                 else if (strcmp(pc, "Previous soldier") == 0) icon = "Icon_KEY_LEFT_SHIFT";
                 else if (strcmp(pc, "Next soldier") == 0) icon = "Icon_KEY_TAB";
             }
@@ -2010,6 +2361,154 @@ static void capture_body(const char* tag, LONG n, void* stack)
     // filled -- see alert_note for when that is.
     if (strncmp(obj_name, "UIMissionControl_", 17) == 0 && strstr(obj_name, "Alert")) {
         if (alert_note(n, tag, obj_name, fn_name, object, node, locals, p)) return;
+    }
+
+    // A council mission ("COUNCIL MISSION. GATEWAY. The latest reports..."),
+    // EW's covert op (UIInfiltratorMission) and a council request: each
+    // screen's UpdateData sends its whole text in one call, then its two
+    // buttons (NUM_BUTTONS, both builds):
+    //     AS_OpenMissionRequest(Title, subtitle, DescriptionText, reward,
+    //                           topSecretLabel)
+    //     AS_OpenSalesRequest(Title, subtitle, requestLabel, requestData,
+    //         storageLabel, storageData, timeLabel, timeData,
+    //         DescriptionText, reward, imagePath, float, topSecretLabel)
+    //     AS_SetButtonData(int, label, bool disabled)  x2
+    // and a request fulfilled one call with its one button:
+    //     AS_OpenRequestCompleteDialog(Title, subtitle, Description,
+    //                                  rewards, buttonLabel)
+    // The text went nowhere; the log of 2026-09-25 heard only LAUNCH MISSION
+    // and NOT NOW. Said like an alert (alert_say) once the second button is
+    // in. "Not now" is disabled in the tutorial (ISCONTROLLED), and says so.
+    if (strncmp(obj_name, "UIFundingCouncil", 16) == 0 ||
+        strncmp(obj_name, "UIInfiltratorMission", 20) == 0) {
+        int mission = strcmp(fn_name, "AS_OpenMissionRequest") == 0;
+        int sales = strcmp(fn_name, "AS_OpenSalesRequest") == 0;
+        int done = strcmp(fn_name, "AS_OpenRequestCompleteDialog") == 0;
+        if (mission || sales || done) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            focus_begin(object);
+            g_alert_due = NULL;
+            strncpy_s(g_alert_title, sizeof g_alert_title, a.ns > 0 ? a.s[0] : "", _TRUNCATE);
+            strncpy_s(g_alert_sub, sizeof g_alert_sub, a.ns > 1 ? a.s[1] : "", _TRUNCATE);
+            g_alert_rebates[0] = 0;
+            static char req[3][FRAME_ARG_TEXT + 64];
+            const char* parts[6];
+            int np = 0;
+            if (sales) {
+                // "REQUESTED: 2 Sectoid Corpses", the storage and the time
+                // left; the description and the reward after.
+                for (int i = 0; i < 3; i++) {
+                    const char* label = a.ns > 2 + 2 * i ? a.s[2 + 2 * i] : "";
+                    const char* data = a.ns > 3 + 2 * i ? a.s[3 + 2 * i] : "";
+                    size_t ll = strlen(label);
+                    _snprintf_s(req[i], sizeof req[i], _TRUNCATE, "%s%s%s", label,
+                                !ll || !data[0] ? "" : label[ll - 1] == ':' ? " " : ": ", data);
+                }
+                parts[np++] = a.ns > 8 ? a.s[8] : "";
+                for (int i = 0; i < 3; i++) parts[np++] = req[i];
+                parts[np++] = a.ns > 9 ? a.s[9] : "";
+            } else {
+                parts[np++] = a.ns > 2 ? a.s[2] : "";
+                parts[np++] = a.ns > 3 ? a.s[3] : "";
+            }
+            focus_join_detail(parts, np, g_alert_text, sizeof g_alert_text);
+            logf_("[%ld] %s %s.%s  REQUEST \"%s\" \"%s\" \"%s\"\n", n, tag, obj_name, fn_name,
+                  g_alert_title, g_alert_sub, g_alert_text);
+            if (done) {
+                if (a.ns > 4 && a.s[4][0]) focus_set(object, 0, a.s[4]);
+                alert_say(n, tag, obj_name, object);
+            }
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetButtonData") == 0 && p->nnumbers && p->nstrings) {
+            alert_note(n, tag, obj_name, fn_name, object, node, locals, p);
+            if ((int)p->numbers[0] == 1 && (g_alert_title[0] || g_alert_text[0]))
+                alert_say(n, tag, obj_name, object);
+            return;
+        }
+    }
+
+    // The research archives, and the report shown when research finishes:
+    // one screen, UIScienceLabs. See hq_report_*. The list is
+    //     AS_ClearArchives(), AS_SetArchiveTitle("ARCHIVES"),
+    //     AS_AddOption(int i, label, bool), AS_SetListSelection(int i)
+    // with no second int, so the general path took SetListSelection for a
+    // container's (widget, item) pair and read "All" from another screen's
+    // list. The report is gathered and said whole when the list is put away
+    // (AS_EnableArchives(false), the last call of GoToView(3) and of OnInit
+    // straight into a report); up and down, which only scroll it, walk it.
+    if (strncmp(obj_name, "UIScienceLabs", 13) == 0) {
+        static char s_rep[HQ_REPORT_PIECES][HQ_REPORT_TEXT];
+        static int  s_rep_n, s_rep_at;
+        if (strcmp(fn_name, "AS_ClearArchives") == 0) { focus_begin(object); return; }
+        if (strcmp(fn_name, "AS_SetArchiveTitle") == 0) {
+            char t[FOCUS_MAX_LABEL];
+            frame_string(node, locals, 0, t, sizeof t);
+            if (t[0]) focus_set_title(object, t);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetTopSecretText") == 0) return;
+        if (strcmp(fn_name, "AS_AddOption") == 0 && p->nnumbers && p->nstrings) {
+            focus_set(object, (int)p->numbers[0], p->strings[0]);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetListSelection") == 0 && p->nnumbers) {
+            focus_announce(n, tag, obj_name, fn_name, object, (int)p->numbers[0]);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetReportTitles") == 0) {
+            static char t[512], sub[512];
+            frame_string(node, locals, 0, t, sizeof t);
+            // Raw: the codename and the date are split by "\n".
+            if (!frame_local_raw(node, locals, "subTitleText", sub, sizeof sub))
+                frame_string(node, locals, 1, sub, sizeof sub);
+            hq_report_titles(t, sub);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetReportItem") == 0) {
+            static char subject[512], notes[MAX_STR];
+            frame_string(node, locals, 0, subject, sizeof subject);
+            frame_string(node, locals, 1, notes, sizeof notes);
+            hq_report_item(subject, notes);
+            return;
+        }
+        if (strcmp(fn_name, "AS_ClearResults") == 0) { hq_report_results_clear(); return; }
+        if (strcmp(fn_name, "AS_AddResults") == 0) {
+            char r[512];
+            frame_string(node, locals, 0, r, sizeof r);
+            hq_report_result(r);
+            return;
+        }
+        if (strcmp(fn_name, "AS_EnableArchives") == 0) {
+            s_rep_n = 0;
+            if (p->nbools && !p->bools[0] && hq_report_ready()) {
+                static char say[MAX_STR + 2048];
+                hq_report_text(say, sizeof say);
+                s_rep_n = hq_report_pieces(s_rep, HQ_REPORT_PIECES);
+                s_rep_at = -1;
+                logf_("[%ld] %s %s.%s  REPORT %d pieces \"%s\"\n", n, tag, obj_name, fn_name,
+                      s_rep_n, say);
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_now(say);
+            }
+            return;
+        }
+        int down = strcmp(fn_name, "AS_ScrollResearchDown") == 0;
+        if (down || strcmp(fn_name, "AS_ScrollResearchUp") == 0) {
+            if (!s_rep_n) return;
+            const char* edge = "";
+            s_rep_at += down ? 1 : -1;
+            if (s_rep_at >= s_rep_n) { s_rep_at = s_rep_n - 1; edge = "End. "; }
+            if (s_rep_at < 0)        { s_rep_at = 0;           edge = "Top. "; }
+            char say[HQ_REPORT_TEXT + 8];
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s", edge, s_rep[s_rep_at]);
+            logf_("[%ld] %s %s.%s  REPORT %d \"%s\"\n", n, tag, obj_name, fn_name, s_rep_at,
+                  say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return;
+        }
     }
 
     // An item card (F1 on the loadout, and wherever else UIItemCards opens):
@@ -3014,6 +3513,33 @@ static void sitroom_key_reached(const char* screen)
     g_sitroom_left_at = GetTickCount64();
 }
 
+// Whether a key reaching `screen` says the player is in Engineering -- its
+// submenu, Build Items, an order, the Foundry -- or somewhere else. The
+// strategy HUD, the facility menu and the build queue see every key at the
+// base, so they say nothing either way.
+static void eng_key_reached(const char* screen)
+{
+    if (strncmp(screen, "UIStrategyHUD_FSM_Engineering", 29) == 0 ||
+        strncmp(screen, "UIBuildItem", 11) == 0 ||
+        strncmp(screen, "UIManufacturing", 15) == 0 ||
+        strncmp(screen, "UIFoundry", 9) == 0) {
+        g_eng_at = GetTickCount64();
+        return;
+    }
+    if ((strncmp(screen, "UIStrategyHUD_", 14) == 0 && screen[14] >= '0' && screen[14] <= '9') ||
+        strncmp(screen, "UIStrategyHUD_FacilityMenu", 26) == 0 ||
+        strncmp(screen, "UIStrategyHUD_BuildQueue", 24) == 0)
+        return;
+    g_eng_left_at = GetTickCount64();
+}
+
+// Whether Delete should read Engineering's queue: as sitroom_up.
+static int eng_up(void)
+{
+    return g_eng_at && g_eng_at > g_eng_left_at &&
+           g_seen_strategy_at && g_seen_tactical_at <= g_seen_strategy_at;
+}
+
 // Whether Delete should open the Situation Room rather than the base's
 // status: the room drew or took a key more recently than the player was seen
 // anywhere else, and the base more recently than a mission.
@@ -3036,6 +3562,7 @@ static int rewrite_cmd(LONG n, void* stack)
     char screen[128] = "?";
     object_name(object, screen, sizeof screen);
     sitroom_key_reached(screen);
+    eng_key_reached(screen);
     alert_flush(n, "Input       ", object);
 
     void* prop = NULL;
@@ -8080,7 +8607,8 @@ static volatile LONG g_review_stop;
 //
 // In the Situation Room it opens the room as a list instead (hq_sit_lines),
 // on Insert's machinery, so the same keys walk and close it; Delete closes it
-// too.
+// too. In Engineering it opens the build queue the same way (hq_eng_lines),
+// with the status line as its last entry.
 static int g_status_was;
 static void status_poll(void)
 {
@@ -8100,6 +8628,18 @@ static void status_poll(void)
         int opened = history_page_open("Situation Room", (const char (*)[HISTORY_PAGE_TEXT])lines,
                                        n, say, sizeof say);
         logf_("sitroom: %s, %d entries \"%s\"\n", opened ? "opened" : "nothing to open", n, say);
+        speech_cancel_pending();
+        if (g_speak) speech_say_now(say);
+        return;
+    }
+    if (eng_up()) {
+        static char lines[HISTORY_PAGE_MAX][HISTORY_PAGE_TEXT];
+        static char say[HISTORY_PAGE_TEXT + 64];
+        int n = hq_eng_lines(lines, HISTORY_PAGE_MAX);
+        g_menu_polled_at = GetTickCount64();
+        int opened = history_page_open("Engineering", (const char (*)[HISTORY_PAGE_TEXT])lines,
+                                       n, say, sizeof say);
+        logf_("engineering: %s, %d entries \"%s\"\n", opened ? "opened" : "nothing to open", n, say);
         speech_cancel_pending();
         if (g_speak) speech_say_now(say);
         return;

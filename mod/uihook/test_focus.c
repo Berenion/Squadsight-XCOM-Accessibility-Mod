@@ -2386,6 +2386,82 @@ int main(void)
               "a new date after a silence is a jump -- a load, a mission");
         check(hq_day_passed("1 January", "2016", 1300 + HQ_DAY_GAP_MS), "the year turning is a day");
 
+        // Engineering, built as UIBuildItem.UpdateItemDesc and
+        // UIManufacturing.GetDuration / GetCost build their panels.
+        hq_cost_text("<font color='#67E8ED'>Cost:</font> <font color='#EE1C25'>\xC2\xA7" "50</font><br>"
+                     "<font color='#67E8ED'>10 Alloys</font><br>", pr, sizeof pr);
+        check(strcmp(pr, "Cost: 50 credits (not enough). 10 Alloys.") == 0,
+              "a build cost, the short requirement marked");
+        hq_cost_text("<font color='#FFD038'>Project Duration: 3 Days</font>\n"
+                     "<font color='#FFD038'>Project Cost:</font> <font color='#67E8ED'>\xC2\xA7" "1,200</font>,"
+                     " <font color='#EE1C25'>10 Alloys</font>\n"
+                     "<font color='#EE1C25'>Insufficient Alloys.</font>\n", pr, sizeof pr);
+        check(strcmp(pr, "Project Duration: 3 Days. Project Cost: 1,200 credits, "
+                         "10 Alloys (not enough). Insufficient Alloys.") == 0,
+              "an order's duration and cost, a red sentence left alone");
+        hq_cost_text("", pr, sizeof pr);
+        check(!pr[0], "no cost says nothing");
+
+        hq_build_row("<font color='#67E8ED'>LASER RIFLE</font>", 2, "BUILT", pr, sizeof pr);
+        check(strcmp(pr, "LASER RIFLE, BUILT: 2") == 0, "an item with some in stores");
+        hq_build_row("<font color='#EE1C25'>ARC THROWER</font>", 0, "BUILT", pr, sizeof pr);
+        check(strcmp(pr, "ARC THROWER, unavailable") == 0, "an item that cannot be built now");
+
+        hq_queue_row("Laser Rifle (2)", "1/2", "3 Days", pr, sizeof pr);
+        check(strcmp(pr, "Laser Rifle (2), 1 of 2 done, 3 Days") == 0, "an order in the queue");
+        hq_queue_row("Foundry: SHIV Suppression", "---", "--", pr, sizeof pr);
+        check(strcmp(pr, "Foundry: SHIV Suppression, no engineers") == 0,
+              "a Foundry project with nobody on it");
+
+        hq_status_human("ENGINEERS", "10");
+        check(hq_status_line(pr, sizeof pr) && strstr(pr, "1:05. ENGINEERS: 10. CREDITS") != NULL,
+              "the staff after the date");
+        {
+            static char eng[HQ_SIT_LINES][HQ_SIT_TEXT];
+            hq_queue_clear();
+            hq_queue_title("CURRENT PROJECTS");
+            hq_queue_add("Laser Rifle (2), 1 of 2 done, 3 Days");
+            int k = hq_eng_lines(eng, HQ_SIT_LINES);
+            check(k == 3 && strcmp(eng[0], "CURRENT PROJECTS") == 0 &&
+                  strncmp(eng[2], "1 March 2015", 12) == 0,
+                  "Engineering's page: the queue, then the status");
+        }
+        hq_status_human("", "");
+        check(hq_status_line(pr, sizeof pr) && !strstr(pr, "ENGINEERS"),
+              "leaving the facility clears the staff");
+
+        // A research report, as the EW log of 2026-09-25 drew the archives.
+        {
+            static char rep[HQ_REPORT_PIECES][HQ_REPORT_TEXT];
+            static char whole[8192];
+            hq_report_titles("Research Report", "Codename: \n");
+            hq_report_item("", "");
+            hq_report_results_clear();
+            check(!hq_report_ready(), "the archives' list up: no report to read");
+            hq_report_titles("Research Report", "Codename: Sagaris\nMarch, 2015");
+            hq_report_item("Weapon Fragments",
+                           "Although the fragments provide a limited glimpse... that it is "
+                           "vastly superior. Dr. Shen agrees! We will learn more.");
+            hq_report_result("S.C.O.P.E. available for manufacture.");
+            check(hq_report_ready(), "an entry opened: a report to read");
+            hq_report_text(whole, sizeof whole);
+            check(strcmp(whole, "Weapon Fragments. Although the fragments provide a limited "
+                                "glimpse... that it is vastly superior. Dr. Shen agrees! We "
+                                "will learn more. Results: S.C.O.P.E. available for "
+                                "manufacture. Research Report. Codename: Sagaris. March, "
+                                "2015.") == 0,
+                  "the report whole, the heading last");
+            int k = hq_report_pieces(rep, HQ_REPORT_PIECES);
+            check(k == 6 && strcmp(rep[0], "Weapon Fragments") == 0 &&
+                  strcmp(rep[1], "Although the fragments provide a limited glimpse... that "
+                                 "it is vastly superior.") == 0 &&
+                  strcmp(rep[2], "Dr. Shen agrees!") == 0 &&
+                  strcmp(rep[3], "We will learn more.") == 0 &&
+                  strcmp(rep[4], "Results: S.C.O.P.E. available for manufacture.") == 0 &&
+                  strcmp(rep[5], "Research Report. Codename: Sagaris. March, 2015.") == 0,
+                  "the report a sentence at a time, not split at Dr. or an ellipsis");
+        }
+
         // The Situation Room, as the EW log of 2026-09-24 drew it.
         {
             static char sit[HQ_SIT_LINES][HQ_SIT_TEXT];

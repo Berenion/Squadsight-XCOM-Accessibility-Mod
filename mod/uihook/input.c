@@ -102,6 +102,15 @@ static const Remap g_remaps[] = {
     // and nothing else; Up and Down pick among the promoted first, since a
     // mouse-mode screen starts with nobody selected. No digit has a case.
     { "UIDebrief",         FXS_KEY_1,   FXS_BUTTON_Y,       "Promote" },
+
+    // An order in Engineering (UIManufacturing): deleting one already in the
+    // queue is X (302) and rush construction is Y (303), with the letters X
+    // and Y (538, 539) beside them -- neither arrives in the headquarters.
+    // No description: the screen's own bar names both only when they apply
+    // (SetHelp 1 only for an order already placed, SetHelp 2 only when a
+    // rush is possible), so 0 lists them only then.
+    { "UIManufacturing",   FXS_KEY_1,   FXS_BUTTON_X,       NULL },
+    { "UIManufacturing",   FXS_KEY_2,   FXS_BUTTON_Y,       NULL },
 };
 
 int input_remap(const char* screen, int cmd)

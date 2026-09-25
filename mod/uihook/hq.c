@@ -339,6 +339,7 @@ int hq_summary_factors(const char* raw, char* out, size_t out_sz)
 static char g_res[HQ_RESOURCES][64];
 static int  g_nres;
 static char g_date[64];
+static char g_human[64];               // "ENGINEERS: 10" (hq_status_human)
 typedef struct {
     const void* list;
     char        ev[HQ_EVENTS][96];
@@ -454,9 +455,10 @@ int hq_status_line(char* out, size_t out_sz)
     out[0] = 0;
     st_lock();
     const EventList* ev = g_evl[0].n >= g_evl[1].n ? &g_evl[0] : &g_evl[1];
-    int any = g_date[0] || g_nres || ev->n;
+    int any = g_date[0] || g_human[0] || g_nres || ev->n;
     size_t used = 0;
     if (g_date[0]) put_piece(out, out_sz, &used, "", g_date);
+    if (g_human[0]) put_piece(out, out_sz, &used, used ? ". " : "", g_human);
     for (int i = 0; i < g_nres; i++) put_piece(out, out_sz, &used, used ? ". " : "", g_res[i]);
     for (int i = 0; i < ev->n; i++) put_piece(out, out_sz, &used, used ? ". " : "", ev->ev[i]);
     st_unlock();
@@ -670,4 +672,321 @@ int hq_notices_new(const char* raw, char* out, size_t out_sz)
     memcpy(g_notice, now, sizeof now);
     g_nnotice = nnow;
     return fresh;
+}
+
+// ---- Engineering ----------------------------------------------------------------
+
+static char g_queue_title[64];
+static char g_queue[HQ_QUEUE][HQ_SIT_TEXT];
+static int  g_nqueue;
+
+void hq_status_human(const char* label, const char* value)
+{
+    st_lock();
+    if (!label || !*label) {
+        g_human[0] = 0;
+    } else {
+        size_t n = strlen(label);
+        _snprintf_s(g_human, sizeof g_human, _TRUNCATE, "%s%s %s", label,
+                    label[n - 1] == ':' ? "" : ":", value ? value : "");
+    }
+    st_unlock();
+}
+
+// A sentence break in hq_cost_text: a full stop unless the text already
+// ends in punctuation, then a space. Nothing at the very start.
+static void cost_break(char* out, size_t out_sz, size_t* w)
+{
+    while (*w && out[*w - 1] == ' ') (*w)--;
+    if (!*w) return;
+    if (!strchr(".!?:;,", out[*w - 1]) && *w + 1 < out_sz) out[(*w)++] = '.';
+    if (*w + 1 < out_sz) out[(*w)++] = ' ';
+}
+
+static void cost_puts(char* out, size_t out_sz, size_t* w, const char* s)
+{
+    for (; *s && *w + 1 < out_sz; s++) out[(*w)++] = *s;
+}
+
+void hq_cost_text(const char* raw, char* out, size_t out_sz)
+{
+    if (!out || !out_sz) return;
+    size_t w = 0;
+    int red = 0;
+    size_t run = 0;             // where the current coloured run began
+    for (const char* r = raw ? raw : ""; *r; r++) {
+        if (*r == '<') {
+            const char* end = strchr(r, '>');
+            if (!end) break;
+            int closing = r[1] == '/';
+            const char* t = r + 1 + closing;
+            if (!closing && _strnicmp(t, "br", 2) == 0) {
+                cost_break(out, out_sz, &w);
+            } else if (!closing && _strnicmp(t, "font", 4) == 0) {
+                const char* c = strstr(r, "color='#");
+                red = c && c < end && _strnicmp(c + 8, "EE1C25", 6) == 0;
+                run = w;
+            } else if (closing && _strnicmp(t, "font", 4) == 0) {
+                size_t e = w;
+                while (e > run && out[e - 1] == ' ') e--;
+                if (red && e > run && !strchr(".!?", out[e - 1])) {
+                    w = e;
+                    cost_puts(out, out_sz, &w, " (not enough)");
+                }
+                red = 0;
+            }
+            r = end;
+            continue;
+        }
+        if (*r == '\n' || *r == '\r') { cost_break(out, out_sz, &w); continue; }
+        // The section sign before a sum: the sum, then what it is.
+        if ((unsigned char)r[0] == 0xC2 && (unsigned char)r[1] == 0xA7) {
+            r += 2;
+            int digits = 0;
+            while ((*r >= '0' && *r <= '9') ||
+                   ((*r == ',' || *r == '.') && r[1] >= '0' && r[1] <= '9')) {
+                if (w + 1 < out_sz) out[w++] = *r;
+                r++;
+                digits++;
+            }
+            if (digits) cost_puts(out, out_sz, &w, " credits");
+            r--;
+            continue;
+        }
+        if (*r == ',') {
+            if (w + 1 < out_sz) out[w++] = ',';
+            if (r[1] != ' ' && w + 1 < out_sz) out[w++] = ' ';
+            continue;
+        }
+        if (w + 1 < out_sz) out[w++] = *r;
+    }
+    out[w] = 0;
+    // One space at a time, none at either end.
+    size_t o = 0;
+    int space = 0;
+    for (size_t i = 0; out[i]; i++) {
+        char c = out[i] == '\t' ? ' ' : out[i];
+        if (c == ' ') { if (o && !space) out[o++] = ' '; space = 1; continue; }
+        // "(not enough) ," from a comma outside the run: close it up.
+        if ((c == ',' || c == '.') && o && out[o - 1] == ' ') o--;
+        out[o++] = c;
+        space = 0;
+    }
+    while (o && out[o - 1] == ' ') o--;
+    out[o] = 0;
+}
+
+void hq_build_row(const char* raw_label, int quantity, const char* qty_label,
+                  char* out, size_t out_sz)
+{
+    if (!out || !out_sz) return;
+    char name[128];
+    strip_tags(raw_label ? raw_label : "", name, sizeof name);
+    int red = raw_label && strstr(raw_label, "EE1C25") != NULL;
+    char qty[64] = "";
+    if (quantity > 0) {
+        if (qty_label && *qty_label)
+            _snprintf_s(qty, sizeof qty, _TRUNCATE, ", %s%s %d", qty_label,
+                        qty_label[strlen(qty_label) - 1] == ':' ? "" : ":", quantity);
+        else
+            _snprintf_s(qty, sizeof qty, _TRUNCATE, ", %d", quantity);
+    }
+    _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s", name, red ? ", unavailable" : "", qty);
+}
+
+void hq_queue_row(const char* desc, const char* qty, const char* eta,
+                  char* out, size_t out_sz)
+{
+    if (!out || !out_sz) return;
+    char done[64] = "";
+    const char* slash = qty ? strchr(qty, '/') : NULL;
+    if (slash && slash > qty && slash[1])
+        _snprintf_s(done, sizeof done, _TRUNCATE, ", %.*s of %s done",
+                    (int)(slash - qty), qty, slash + 1);
+    const char* when = !eta || !*eta ? "" : strcmp(eta, "--") == 0 ? "no engineers" : eta;
+    _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s%s", desc ? desc : "", done,
+                *when ? ", " : "", when);
+}
+
+void hq_queue_clear(void) { st_lock(); g_nqueue = 0; st_unlock(); }
+
+void hq_queue_title(const char* title)
+{
+    st_lock();
+    strncpy_s(g_queue_title, sizeof g_queue_title, title ? title : "", _TRUNCATE);
+    st_unlock();
+}
+
+void hq_queue_add(const char* row)
+{
+    if (!row || !*row) return;
+    st_lock();
+    if (g_nqueue < HQ_QUEUE)
+        strncpy_s(g_queue[g_nqueue++], sizeof g_queue[0], row, _TRUNCATE);
+    st_unlock();
+}
+
+int hq_eng_lines(char lines[][HQ_SIT_TEXT], int max)
+{
+    int n = 0;
+    st_lock();
+    if (g_queue_title[0] && n < max)
+        strncpy_s(lines[n++], HQ_SIT_TEXT, g_queue_title, _TRUNCATE);
+    for (int i = 0; i < g_nqueue && n < max; i++)
+        strncpy_s(lines[n++], HQ_SIT_TEXT, g_queue[i], _TRUNCATE);
+    st_unlock();
+    // Takes the lock itself.
+    if (n < max && hq_status_line(lines[n], HQ_SIT_TEXT)) n++;
+    return n;
+}
+
+// ---- a research report ----------------------------------------------------------
+
+static char g_rep_title[128];
+static char g_rep_sub[256];
+static char g_rep_subject[256];
+static char g_rep_notes[4096];
+static char g_rep_results[16][256];
+static int  g_rep_nresults;
+
+// Trimmed, with line breaks as sentence breaks: the codename and the date
+// are one string split by "\n".
+static void rep_copy(char* out, size_t out_sz, const char* in)
+{
+    size_t w = 0;
+    out[0] = 0;
+    for (const char* r = in ? in : ""; *r && w + 3 < out_sz; r++) {
+        if (*r == '\r') continue;
+        if (*r == '\n') {
+            while (w && out[w - 1] == ' ') w--;
+            if (w && !strchr(".!?:;,", out[w - 1])) out[w++] = '.';
+            if (w) out[w++] = ' ';
+            continue;
+        }
+        if (*r == ' ' && (!w || out[w - 1] == ' ')) continue;
+        out[w++] = *r;
+    }
+    while (w && out[w - 1] == ' ') w--;
+    out[w] = 0;
+}
+
+void hq_report_titles(const char* title, const char* sub)
+{
+    rep_copy(g_rep_title, sizeof g_rep_title, title);
+    rep_copy(g_rep_sub, sizeof g_rep_sub, sub);
+}
+
+void hq_report_item(const char* subject, const char* notes)
+{
+    rep_copy(g_rep_subject, sizeof g_rep_subject, subject);
+    rep_copy(g_rep_notes, sizeof g_rep_notes, notes);
+}
+
+void hq_report_results_clear(void) { g_rep_nresults = 0; }
+
+void hq_report_result(const char* text)
+{
+    if (!text || !*text || g_rep_nresults >= 16) return;
+    rep_copy(g_rep_results[g_rep_nresults], sizeof g_rep_results[0], text);
+    if (g_rep_results[g_rep_nresults][0]) g_rep_nresults++;
+}
+
+int hq_report_ready(void) { return g_rep_subject[0] != 0; }
+
+// Ends a piece with a full stop unless it already has one.
+static void rep_stop(char* s, size_t sz)
+{
+    size_t n = strlen(s);
+    if (n && !strchr(".!?", s[n - 1]) && n + 1 < sz) { s[n] = '.'; s[n + 1] = 0; }
+}
+
+// The title and the codename line: "Research Report. Codename: Sagaris. March, 2015."
+static void rep_heading(char* out, size_t out_sz)
+{
+    _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s", g_rep_title,
+                g_rep_title[0] && g_rep_sub[0] ? ". " : "", g_rep_sub);
+    rep_stop(out, out_sz);
+}
+
+// A sentence ends at . ! or ? (and any closing quote or bracket after it),
+// followed by a space and a capital, a digit or an opening quote. Not after
+// a short capitalised word -- "Dr. Vahlen", "Mr. Shen" -- nor inside an
+// acronym, "S.C.O.P.E. available", which is followed by lower case anyway.
+static int rep_sentence_end(const char* s, const char* p)
+{
+    if (!strchr(".!?", *p)) return 0;
+    const char* q = p + 1;
+    while (*q == '"' || *q == '\'' || *q == ')') q++;
+    if (*q != ' ') return 0;
+    unsigned char next = (unsigned char)q[1];
+    if (!((next >= 'A' && next <= 'Z') || (next >= '0' && next <= '9') || next == '"' ||
+          next == '\'' || next >= 0x80))
+        return 0;
+    if (*p == '.') {
+        const char* w = p;
+        while (w > s && w[-1] != ' ') w--;
+        size_t len = (size_t)(p - w);
+        if (len && len <= 3 && w[0] >= 'A' && w[0] <= 'Z') {
+            int lower = 1;
+            for (const char* c = w + 1; c < p; c++) lower &= *c >= 'a' && *c <= 'z';
+            if (lower) return 0;
+        }
+    }
+    return (int)(q - p);
+}
+
+int hq_report_pieces(char pieces[][HQ_REPORT_TEXT], int max)
+{
+    int k = 0;
+    if (g_rep_subject[0] && k < max)
+        strncpy_s(pieces[k++], HQ_REPORT_TEXT, g_rep_subject, _TRUNCATE);
+    const char* s = g_rep_notes;
+    const char* start = s;
+    for (const char* p = s; *p && k < max; p++) {
+        int tail = rep_sentence_end(s, p);
+        if (!tail && p[1]) continue;
+        size_t len = (size_t)(p - start) + (tail ? (size_t)tail : 1);
+        if (len >= HQ_REPORT_TEXT) len = HQ_REPORT_TEXT - 1;
+        memcpy(pieces[k], start, len);
+        pieces[k][len] = 0;
+        if (pieces[k][0]) k++;
+        start = p + (tail ? tail : 1);
+        while (*start == ' ') start++;
+        p = start - 1;
+        if (!*start) break;
+    }
+    for (int i = 0; i < g_rep_nresults && k < max; i++) {
+        _snprintf_s(pieces[k], HQ_REPORT_TEXT, _TRUNCATE, "%s%s", i ? "" : "Results: ",
+                    g_rep_results[i]);
+        rep_stop(pieces[k], HQ_REPORT_TEXT);
+        k++;
+    }
+    if ((g_rep_title[0] || g_rep_sub[0]) && k < max) rep_heading(pieces[k++], HQ_REPORT_TEXT);
+    return k;
+}
+
+void hq_report_text(char* out, size_t out_sz)
+{
+    size_t used = 0;
+    out[0] = 0;
+    char piece[512];
+    if (g_rep_subject[0]) {
+        strncpy_s(piece, sizeof piece, g_rep_subject, _TRUNCATE);
+        rep_stop(piece, sizeof piece);
+        put_piece(out, out_sz, &used, "", piece);
+    }
+    if (g_rep_notes[0]) {
+        put_piece(out, out_sz, &used, used ? " " : "", g_rep_notes);
+        size_t n = strlen(out);
+        if (n && !strchr(".!?\"'", out[n - 1])) put_piece(out, out_sz, &used, "", ".");
+    }
+    for (int i = 0; i < g_rep_nresults; i++) {
+        strncpy_s(piece, sizeof piece, g_rep_results[i], _TRUNCATE);
+        rep_stop(piece, sizeof piece);
+        put_piece(out, out_sz, &used, used ? (i ? " " : " Results: ") : "Results: ", piece);
+    }
+    if (g_rep_title[0] || g_rep_sub[0]) {
+        rep_heading(piece, sizeof piece);
+        put_piece(out, out_sz, &used, used ? " " : "", piece);
+    }
 }
