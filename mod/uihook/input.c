@@ -111,6 +111,17 @@ static const Remap g_remaps[] = {
     // rush is possible), so 0 lists them only then.
     { "UIManufacturing",   FXS_KEY_1,   FXS_BUTTON_X,       NULL },
     { "UIManufacturing",   FXS_KEY_2,   FXS_BUTTON_Y,       NULL },
+
+    // The interception (UIInterceptionEngagement). Its switch has only the
+    // gamepad's buttons: aim on X (302), dodge on A (300), track on Y (303),
+    // abort on B (301) -- no Enter, no Escape, no letter -- so on a keyboard
+    // the whole fight was the mouse's. The digits arrive in the
+    // headquarters and the screen has no case for them. Escape is left
+    // alone: an abort one keystroke from "back" would be too easy to make.
+    { "UIInterceptionEngagement", FXS_KEY_1, FXS_BUTTON_X,  "Aim" },
+    { "UIInterceptionEngagement", FXS_KEY_2, FXS_BUTTON_A,  "Dodge" },
+    { "UIInterceptionEngagement", FXS_KEY_3, FXS_BUTTON_Y,  "Track" },
+    { "UIInterceptionEngagement", FXS_KEY_4, FXS_BUTTON_B,  "Abort" },
 };
 
 int input_remap(const char* screen, int cmd)
@@ -164,6 +175,7 @@ const char* input_cmd_name(int cmd)
         case FXS_KEY_1:          return "1";
         case FXS_KEY_2:          return "2";
         case FXS_KEY_3:          return "3";
+        case FXS_KEY_4:          return "4";
         case FXS_KEY_6:          return "6";
         case FXS_KEY_7:          return "7";
         default:                 return NULL;

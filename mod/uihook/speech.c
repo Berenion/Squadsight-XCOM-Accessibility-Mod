@@ -16,9 +16,13 @@
 #include "speech.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 #define QUEUE_SIZE 32
-#define MAX_UTTER  512
+// Long enough for the longest single event: a mission briefing with its
+// objectives and tip ran to 611 characters (2026-09-25), and at the old 512
+// MultiByteToWideChar refused it and the whole briefing was dropped unheard.
+#define MAX_UTTER  4096
 
 typedef int(__cdecl* TolkLoadFn)(void);
 typedef int(__cdecl* TolkOutputFn)(const wchar_t*, int);
@@ -250,13 +254,33 @@ int speech_init(const char* dll_dir, char* why, size_t why_sz)
     return g_thread != NULL;
 }
 
+// UTF-8 to UTF-16 into a buffer of MAX_UTTER. Text too long for it is cut to
+// what fits rather than dropped: the conversion fails outright on a buffer
+// that is too small, which is how an over-long line used to vanish.
+static int to_wide(const char* utf8, wchar_t* out)
+{
+    int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, out, MAX_UTTER);
+    if (n > 0) return n;
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) return 0;
+    int need = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
+    if (need <= 0) return 0;
+    wchar_t* all = (wchar_t*)malloc((size_t)need * sizeof(wchar_t));
+    if (!all) return 0;
+    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, all, need);
+    memcpy(out, all, (MAX_UTTER - 1) * sizeof(wchar_t));
+    out[MAX_UTTER - 1] = 0;
+    free(all);
+    return MAX_UTTER;
+}
+
 static void enqueue(const char* utf8, int interrupt)
 {
     if (!g_thread || !utf8 || !*utf8) return;
 
-    wchar_t wide[MAX_UTTER];
-    int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, MAX_UTTER);
-    if (n <= 0) return;
+    // Per thread, not on the stack: callers are often deep in the game's
+    // script VM, and this is 8 KB.
+    static __declspec(thread) wchar_t wide[MAX_UTTER];
+    if (to_wide(utf8, wide) <= 0) return;
 
     EnterCriticalSection(&g_qlock);
     if (interrupt) {
@@ -292,8 +316,10 @@ void speech_say_now(const char* utf8)
 void speech_say_after(const char* utf8, unsigned delay_ms)
 {
     if (!g_thread || !utf8 || !*utf8) return;
-    wchar_t wide[MAX_UTTER];
-    if (MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, MAX_UTTER) <= 0) return;
+    // Per thread, not on the stack: callers are often deep in the game's
+    // script VM, and this is 8 KB.
+    static __declspec(thread) wchar_t wide[MAX_UTTER];
+    if (to_wide(utf8, wide) <= 0) return;
 
     EnterCriticalSection(&g_qlock);
     wcscpy_s(g_pending, MAX_UTTER, wide);

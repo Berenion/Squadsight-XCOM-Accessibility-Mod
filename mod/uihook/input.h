@@ -69,6 +69,7 @@
 #define FXS_KEY_1           612
 #define FXS_KEY_2           613
 #define FXS_KEY_3           614
+#define FXS_KEY_4           615
 #define FXS_KEY_6           617
 #define FXS_KEY_7           618
 #define FXS_KEY_0           621

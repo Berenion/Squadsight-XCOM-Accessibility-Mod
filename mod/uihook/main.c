@@ -1308,6 +1308,22 @@ static int alert_note(LONG n, const char* tag, const char* obj_name, const char*
         focus_join_detail(parts, 2, g_alert_rebates, sizeof g_alert_rebates);
         return 1;
     }
+    // A UFO's particulars (UIMissionControl_UFOAlert.UpdateData): each is
+    // AS_SetContact / AS_SetLocation / AS_SetSize / AS_SetClass(label,
+    // data), and they went nowhere -- the alert said its title and its
+    // buttons. Added to the text as "CONTACT: Small, LOCATION: ...".
+    if ((strcmp(fn_name, "AS_SetContact") == 0 || strcmp(fn_name, "AS_SetLocation") == 0 ||
+         strcmp(fn_name, "AS_SetSize") == 0 || strcmp(fn_name, "AS_SetClass") == 0)) {
+        static FrameArgs a;
+        frame_args(node, locals, &a);
+        const char* label = a.ns > 0 ? a.s[0] : "";
+        const char* data = a.ns > 1 ? a.s[1] : "";
+        if (!data[0]) return 1;
+        size_t ll = strlen(label), used = strlen(g_alert_text);
+        _snprintf_s(g_alert_text + used, sizeof g_alert_text - used, _TRUNCATE, "%s%s%s%s",
+                    used ? ". " : "", label, !ll ? "" : label[ll - 1] == ':' ? " " : ": ", data);
+        return 1;
+    }
     if (strcmp(fn_name, "AS_SetImage") == 0) return 1;
     if (strcmp(fn_name, "AS_SetButtonText") == 0 && p->nstrings) {
         focus_set(object, 0, p->strings[0]);
@@ -1525,6 +1541,118 @@ static void capture_body(const char* tag, LONG n, void* stack)
         strncmp(obj_name, "UIManufacturing", 15) == 0 ||
         strncmp(obj_name, "UIFoundry", 9) == 0)
         g_eng_at = GetTickCount64();
+
+    // The interception (UIInterceptionEngagement): a fight played back in
+    // real time from a script the game has already rolled. Nothing in it was
+    // said -- ship 0 is the UFO, 1 the interceptor -- and everything it shows
+    // comes through these calls:
+    //     AS_SetHP(ship, hp, bool initialization, weaponID)
+    //         -- initialization once per ship in OnInit, the full hull; then
+    //            once per hit as the damage lands (Playback)
+    //     AS_SetAimButton(label, state) / AS_SetDodgeButton(label, state) /
+    //     AS_SetTrackButton(label, trackingText, state)
+    //         -- 0 available, 2 none left, 3 not researched
+    //     AS_BeginIntroSequence() -- the link comes up; the fight follows
+    //     AS_SetEnemyEscapeTimer(tenths) -- "CONTACT LOSS IN", each tenth
+    //     AS_DisplayEffectEvent(type, description, bool enabled, data)
+    //         -- 0 aim, 1 dodge, 2 track, on when used and off when spent
+    //     AS_SetAbortLabel("ABORTING...") / ("ABORTED")
+    //     AS_ShowResults(report, battleResult, leaveLabel)
+    // and AS_AttackEvent / AS_MovementEvent for every shot, which the hits
+    // already cover. The keys are input.c's 1 to 4.
+    if (strncmp(obj_name, "UIInterceptionEngagement", 24) == 0) {
+        static int hp[2], hp_max[2], ability[3] = { 3, 3, 3 }, secs_said = -1;
+        static char title[128];
+        static const char* const names[3] = { "Aim", "Dodge", "Track" };
+        char say[FRAME_ARG_TEXT + 256];
+        say[0] = 0;
+        int now = 1;                    // said at once, cutting what was said
+        if (strcmp(fn_name, "AS_SetResultsTitleLabels") == 0) {
+            frame_string(node, locals, 0, title, sizeof title);
+            hp[0] = hp[1] = hp_max[0] = hp_max[1] = 0;
+            ability[0] = ability[1] = ability[2] = 3;
+            secs_said = -1;
+        } else if (strcmp(fn_name, "AS_SetHP") == 0 && p->nnumbers >= 2) {
+            int ship = (int)p->numbers[0], v = (int)p->numbers[1];
+            if (ship < 0 || ship > 1) return;
+            if (p->nbools && p->bools[0]) {
+                hp[ship] = hp_max[ship] = v;
+            } else if (v != hp[ship]) {
+                hp[ship] = v;
+                int pct = hp_max[ship] > 0 ? (v * 100 + hp_max[ship] - 1) / hp_max[ship] : 0;
+                if (v <= 0)
+                    strcpy_s(say, sizeof say, ship == 0 ? "UFO down." : "Interceptor shot down.");
+                else if (ship == 0)
+                    _snprintf_s(say, sizeof say, _TRUNCATE, "UFO hit, %d%%.", pct);
+                else
+                    _snprintf_s(say, sizeof say, _TRUNCATE, "We're hit, %d%%.", pct);
+            }
+        } else if ((strcmp(fn_name, "AS_SetAimButton") == 0 ||
+                    strcmp(fn_name, "AS_SetDodgeButton") == 0 ||
+                    strcmp(fn_name, "AS_SetTrackButton") == 0) && p->nnumbers) {
+            int k = fn_name[6] == 'A' ? 0 : fn_name[6] == 'D' ? 1 : 2;
+            ability[k] = (int)p->numbers[0];
+        } else if (strcmp(fn_name, "AS_BeginIntroSequence") == 0) {
+            size_t w = 0;
+            w += _snprintf_s(say, sizeof say, _TRUNCATE, "%s. UFO %d, interceptor %d.",
+                             title[0] ? title : "Interception", hp_max[0], hp_max[1]);
+            int any = 0;
+            for (int k = 0; k < 3; k++) {
+                if (ability[k] != 0) continue;
+                w += _snprintf_s(say + w, sizeof say - w, _TRUNCATE, "%s%d %s",
+                                 any ? ", " : " ", k + 1, names[k]);
+                any = 1;
+            }
+            _snprintf_s(say + w, sizeof say - w, _TRUNCATE, "%s4 Abort.", any ? ", " : " ");
+        } else if (strcmp(fn_name, "AS_SetEnemyEscapeTimer") == 0 && p->nnumbers) {
+            // Whole seconds, rounded up: 4.3 s left is "5" until it is 4.
+            int secs = ((int)p->numbers[0] + 9) / 10;
+            static const int marks[] = { 10, 5, 3, 2, 1 };
+            if (secs_said < 0) {
+                _snprintf_s(say, sizeof say, _TRUNCATE, "Contact loss in %d seconds.", secs);
+                now = 0;
+            } else if (secs > secs_said) {
+                secs_said = secs;       // tracking ended and the clock was reset
+            } else {
+                for (int i = 0; i < 5; i++)
+                    if (secs <= marks[i] && secs_said > marks[i]) {
+                        _snprintf_s(say, sizeof say, _TRUNCATE, "%d.", secs);
+                        break;
+                    }
+            }
+            if (secs_said < 0 || say[0]) secs_said = secs;
+        } else if (strcmp(fn_name, "AS_DisplayEffectEvent") == 0 && p->nnumbers) {
+            int k = (int)p->numbers[0];
+            if (p->nbools && p->bools[0]) {
+                frame_lines(node, locals, "effectDescription", say, sizeof say);
+            } else if (k >= 0 && k < 3) {
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s over.", names[k]);
+            }
+        } else if (strcmp(fn_name, "AS_SetAbortLabel") == 0) {
+            char label[64];
+            frame_string(node, locals, 0, label, sizeof label);
+            if (_strnicmp(label, "ABORTING", 8) == 0) strcpy_s(say, sizeof say, label);
+        } else if (strcmp(fn_name, "AS_ShowResults") == 0) {
+            char report[FRAME_ARG_TEXT], leave[64];
+            frame_lines(node, locals, "report", report, sizeof report);
+            frame_string(node, locals, 1, leave, sizeof leave);
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s", report,
+                        leave[0] ? " Enter: " : "", leave, leave[0] ? "." : "");
+        } else if (strcmp(fn_name, "AS_AttackEvent") == 0 ||
+                   strcmp(fn_name, "AS_MovementEvent") == 0) {
+            return;                     // every shot; the hits are said
+        }
+        if (say[0]) {
+            logf_("[%ld] %s %s.%s  INTERCEPT \"%s\"\n", n, tag, obj_name, fn_name, say);
+            if (g_speak && !muted()) {
+                if (now) { speech_cancel_pending(); speech_say_now(say); }
+                else speech_say(say);
+            }
+        } else if (strcmp(fn_name, "AS_SetEnemyEscapeTimer") != 0) {
+            logf_("[%ld] %s %s.%s  INTERCEPT (kept)\n", n, tag, obj_name, fn_name);
+        }
+        return;
+    }
 
     // Build Facilities: the base's grid. See hq.h. The cards are kept, and
     // the cursor's tile said with the cursor's text. OnInit and GoToView(0)
@@ -2548,6 +2676,71 @@ static void capture_body(const char* tag, LONG n, void* stack)
     // selected on arrival -- the alert said nothing at all, and up/down on it
     // were silent. It is said whole, as an event (alert_say), once it is
     // filled -- see alert_note for when that is.
+    // Scrambling interceptors: the UFO alert's ShipSelection state
+    // (UIMissionControl_UFORadarContactAlert) lists the squadron in the alert
+    // itself --
+    //     global.UpdateData()  -- the title and particulars again
+    //     AS_AddShip(name, weapon, status, icon, bool disabled) per jet
+    //     AS_ActivateShipList(launchLabel)
+    //     AS_SetShipFocus(old, false); AS_SetShipFocus(new, true)
+    // with no index on AddShip, so the rows are counted from the title. Up
+    // and down wrap; Enter launches the focused jet, or plays the bad sound
+    // on a disabled one. The title and particulars sent again are not a new
+    // alert, and are dropped.
+    if (strncmp(obj_name, "UIMissionControl_UFORadarContactAlert", 37) == 0) {
+        static char ships[8][FOCUS_MAX_LABEL];
+        static int nships;
+        static ULONGLONG listed_at;
+        static FrameArgs a;
+        if (strcmp(fn_name, "AS_SetTitle") == 0) nships = 0;
+        if (strcmp(fn_name, "AS_AddShip") == 0) {
+            frame_args(node, locals, &a);
+            if (nships < 8) {
+                _snprintf_s(ships[nships], sizeof ships[nships], _TRUNCATE, "%s, %s, %s%s",
+                            a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
+                            a.ns > 2 ? a.s[2] : "", a.nb > 0 && a.b[0] ? ", unavailable" : "");
+                logf_("[%ld] %s %s.%s  SHIP %d = \"%s\"\n", n, tag, obj_name, fn_name, nships,
+                      ships[nships]);
+                nships++;
+            }
+            return;
+        }
+        if (strcmp(fn_name, "AS_ActivateShipList") == 0) {
+            char label[128], say[FOCUS_MAX_LABEL * 8 + 160];
+            frame_string(node, locals, 0, label, sizeof label);
+            g_alert_due = NULL;
+            g_alert_title[0] = g_alert_text[0] = g_alert_sub[0] = g_alert_rebates[0] = 0;
+            size_t w = 0;
+            w += _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%d interceptor%s", label,
+                             label[0] ? ". " : "", nships, nships == 1 ? "" : "s");
+            for (int i = 0; i < nships && w < sizeof say; i++)
+                w += _snprintf_s(say + w, sizeof say - w, _TRUNCATE, "%s%s",
+                                 i ? ". " : ": ", ships[i]);
+            _snprintf_s(say + w, sizeof say - w, _TRUNCATE, ".");
+            logf_("[%ld] %s %s.%s  SHIPS \"%s\"\n", n, tag, obj_name, fn_name, say);
+            listed_at = GetTickCount64();
+            speech_cancel_pending();
+            announce(say);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetShipFocus") == 0) {
+            if (!p->nnumbers || !p->nbools || !p->bools[0]) return;
+            int i = (int)p->numbers[0];
+            if (i < 0 || i >= nships) return;
+            logf_("[%ld] %s %s.%s  SHIP focus %d -> \"%s\"\n", n, tag, obj_name, fn_name, i,
+                  ships[i]);
+            // Straight after the list, the first row is selected for the
+            // player: the list has just named it, and cutting it off would
+            // lose the rest.
+            if (GetTickCount64() - listed_at < 500) return;
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(ships[i]);
+            return;
+        }
+        if (strcmp(fn_name, "AS_DeactivateShipList") == 0) return;
+        // The particulars sent again for the ship list: kept out of the next
+        // alert (AS_ActivateShipList clears them).
+    }
     if (strncmp(obj_name, "UIMissionControl_", 17) == 0 && strstr(obj_name, "Alert")) {
         if (alert_note(n, tag, obj_name, fn_name, object, node, locals, p)) return;
     }
