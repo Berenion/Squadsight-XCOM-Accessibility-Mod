@@ -292,3 +292,46 @@ void tile_height_step(float delta, char* out, size_t out_sz)
         _snprintf_s(out, out_sz, _TRUNCATE, "%d storeys %s.", halves / 2, way);
 }
 
+// "Floater" -> "Floaters", "Thin Man" -> "Thin Men", "Chryssalis" ->
+// "Chryssalises". Good enough for the names the game gives units and meshes.
+static void plural(const char* name, char* out, size_t out_sz)
+{
+    size_t n = strlen(name);
+    if (n >= 3 && strcmp(name + n - 3, "Man") == 0)
+        _snprintf_s(out, out_sz, _TRUNCATE, "%.*sMen", (int)(n - 3), name);
+    else if (n && (name[n - 1] == 's' || name[n - 1] == 'x'))
+        _snprintf_s(out, out_sz, _TRUNCATE, "%ses", name);
+    else
+        _snprintf_s(out, out_sz, _TRUNCATE, "%ss", name);
+}
+
+void tile_names_counted(const char* const* names, int n, int total, char* out, size_t out_sz)
+{
+    size_t used = 0;
+    out[0] = 0;
+    char done[TILE_NAMES_MAX];
+    if (n > TILE_NAMES_MAX) n = TILE_NAMES_MAX;
+    memset(done, 0, sizeof done);
+    int parts = 0;
+    for (int i = 0; i < n; i++) {
+        if (done[i]) continue;
+        int same = 1;
+        for (int j = i + 1; j < n; j++)
+            if (!done[j] && strcmp(names[j], names[i]) == 0) { done[j] = 1; same++; }
+        char t[96];
+        if (same > 1) {
+            char many[80];
+            plural(names[i], many, sizeof many);
+            _snprintf_s(t, sizeof t, _TRUNCATE, "%d %s", same, many);
+        } else {
+            _snprintf_s(t, sizeof t, _TRUNCATE, "%s", names[i]);
+        }
+        if (parts++) append(out, out_sz, &used, ", ");
+        append(out, out_sz, &used, t);
+    }
+    if (total > n) {
+        char t[32];
+        _snprintf_s(t, sizeof t, _TRUNCATE, "%s%d more", parts ? ", and " : "", total - n);
+        append(out, out_sz, &used, t);
+    }
+}

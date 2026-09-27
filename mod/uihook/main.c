@@ -7139,6 +7139,16 @@ static void tile_rings(const float* here, char* out, size_t out_sz)
     }
 }
 
+// Up to EXPOSE_NAMES names kept of `total`, as tile_names_counted says them.
+#define EXPOSE_NAMES 6
+static void names_counted(char (*names)[48], int total, char* out, size_t out_sz)
+{
+    const char* p[TILE_NAMES_MAX];
+    int n = total < EXPOSE_NAMES ? total : EXPOSE_NAMES;
+    for (int i = 0; i < n; i++) p[i] = names[i];
+    tile_names_counted(p, n, total, out, out_sz);
+}
+
 static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
                           int has_cover, const float* here, TileReport* r)
 {
@@ -7148,13 +7158,13 @@ static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
     r->flanks[0] = 0;
     r->height_over[0] = r->height_under[0] = 0;
     int nover = 0, nunder = 0;
-    char over_names[3][48], under_names[3][48];
+    char over_names[EXPOSE_NAMES][48], under_names[EXPOSE_NAMES][48];
     // The soldier who would stand here, and where: the cover point when the
     // tile has one, as the game asks it, else the tile itself.
     void* soldier = g_expose_ok ? soldier_unit() : NULL;
     const float* stand = has_cover ? cp->cover_location : here;
     int nflank = 0;
-    char flank_names[3][48];
+    char flank_names[EXPOSE_NAMES][48];
 
     void* world = cursor_world();
     void* squad = squad_player();
@@ -7207,7 +7217,7 @@ static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
                 if (over || under) {
                     int* cnt = over ? &nover : &nunder;
                     char (*names)[48] = over ? over_names : under_names;
-                    if (*cnt < 3) {
+                    if (*cnt < EXPOSE_NAMES) {
                         UnitName* un = unit_by_unit(unit);
                         if (un) unit_label(un, names[*cnt], sizeof names[0]);
                         else strcpy_s(names[*cnt], sizeof names[0], "an enemy");
@@ -7223,7 +7233,7 @@ static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
             const void* lv;
             if (field_ptr(pawn, "Location", &g_pawn_loc, 3 * sizeof(float), &lv) &&
                 tile_flanks(soldier, unit, (const float*)lv, stand)) {
-                if (nflank < 3) {
+                if (nflank < EXPOSE_NAMES) {
                     UnitName* un = unit_by_unit(unit);
                     if (un) unit_label(un, flank_names[nflank], sizeof flank_names[0]);
                     else strcpy_s(flank_names[nflank], sizeof flank_names[0], "an enemy");
@@ -7282,31 +7292,11 @@ static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
         if (past) r->flanked = 1;
     }
 
-    // The same wording for the heights.
-    for (int side = 0; side < 2; side++) {
-        int cnt = side ? nunder : nover;
-        char (*names)[48] = side ? under_names : over_names;
-        char* out = side ? r->height_under : r->height_over;
-        size_t out_sz = side ? sizeof r->height_under : sizeof r->height_over;
-        if (cnt == 1) {
-            strncpy_s(out, out_sz, names[0], _TRUNCATE);
-        } else if (cnt > 1) {
-            size_t w = (size_t)_snprintf_s(out, out_sz, _TRUNCATE, "%d", cnt);
-            for (int i = 0; i < cnt && i < 3 && w < out_sz; i++)
-                w += (size_t)_snprintf_s(out + w, out_sz - w, _TRUNCATE, "%s%s",
-                                         i ? ", " : ": ", names[i]);
-        }
-    }
-
-    // "Sectoid", "2: Sectoid, Muton", and past three only the count.
-    if (nflank == 1) {
-        strncpy_s(r->flanks, sizeof r->flanks, flank_names[0], _TRUNCATE);
-    } else if (nflank > 1) {
-        size_t w = (size_t)_snprintf_s(r->flanks, sizeof r->flanks, _TRUNCATE, "%d", nflank);
-        for (int i = 0; i < nflank && i < 3 && w < sizeof r->flanks; i++)
-            w += (size_t)_snprintf_s(r->flanks + w, sizeof r->flanks - w, _TRUNCATE, "%s%s",
-                                     i ? ", " : ": ", flank_names[i]);
-    }
+    // "Sectoid", "2 Sectoids, Muton": the game names every alien of a kind
+    // alike, and "Sectoid, Sectoid" read as a stammer (2026-09-27).
+    names_counted(over_names, nover, r->height_over, sizeof r->height_over);
+    names_counted(under_names, nunder, r->height_under, sizeof r->height_under);
+    names_counted(flank_names, nflank, r->flanks, sizeof r->flanks);
 }
 
 // Describes tile (tx, ty) with its floor at `floor`. Returns 0 when the game
@@ -10991,6 +10981,65 @@ static DWORD WINAPI review_pump(LPVOID unused)
 static ULONGLONG g_blast_due;
 static FieldSlot g_marked_slot, g_splash_slot;
 
+// Whether a destructible is cover, and how high: 2 high, 1 low, 0 not cover.
+// Nothing on the actor says so -- ShouldIgnoreForCover is native and only
+// rules things out -- so the game's own cover map is asked, as the tile
+// readout asks it: the tiles just outside the object's bounds (its mesh's
+// world box, PrimitiveComponent.Bounds), and whether the cover point there
+// faces the object. North is +Y and the game's East is -X (see tile.h), so a
+// tile on the object's -X side needs the game's West bit.
+static FieldSlot g_blast_bounds;
+static int destructible_cover(void* a)
+{
+    const void* v;
+    void* world = cursor_world();
+    CursorGrid g;
+    if (!world || !cursor_grid(&g)) return 0;
+    TileCoverFn cover = (TileCoverFn)tile_vfn(world, g_tile_slot_cover);
+    if (!cover) return 0;
+    if (!field_ptr(a, "StaticMeshComponent", &g_blast_smc, sizeof(void*), &v) ||
+        !*(void* const*)v)
+        return 0;
+    void* smc = *(void* const*)v;
+    if (!field_ptr(smc, "Bounds", &g_blast_bounds, 7 * sizeof(float), &v)) return 0;
+    const float* b = (const float*)v;           // Origin, BoxExtent, SphereRadius
+    int x0 = cursor_tile_axis(b[0] - b[3] + 8.0f, g.min_x, CURSOR_TILE);
+    int x1 = cursor_tile_axis(b[0] + b[3] - 8.0f, g.min_x, CURSOR_TILE);
+    int y0 = cursor_tile_axis(b[1] - b[4] + 8.0f, g.min_y, CURSOR_TILE);
+    int y1 = cursor_tile_axis(b[1] + b[4] - 8.0f, g.min_y, CURSOR_TILE);
+    if (x1 < x0) x1 = x0;                       // thinner than a tile
+    if (y1 < y0) y1 = y0;
+    if (x1 - x0 > 12) x1 = x0 + 12;             // a long wall: its first stretch
+    if (y1 - y0 > 12) y1 = y0 + 12;
+    float z = b[2] - b[5] + 4.0f;               // the floor it stands on, as asked of a tile
+
+    int best = 0;
+    for (int side = 0; side < 4; side++) {
+        int along = side < 2 ? x1 - x0 : y1 - y0;
+        for (int i = 0; i <= along; i++) {
+            int x, y, bit;
+            switch (side) {
+            case 0:  x = x0 + i; y = y0 - 1; bit = TILE_COVER_N; break;   // south of it
+            case 1:  x = x0 + i; y = y1 + 1; bit = TILE_COVER_S; break;   // north of it
+            case 2:  x = x0 - 1; y = y0 + i; bit = TILE_COVER_W; break;   // west of it
+            default: x = x1 + 1; y = y0 + i; bit = TILE_COVER_E; break;   // east of it
+            }
+            if (x < 0 || y < 0 || x >= g.num_x || y >= g.num_y) continue;
+            TileCoverPoint cp;
+            memset(&cp, 0, sizeof cp);
+            float wx = g.min_x + ((float)x + 0.5f) * CURSOR_TILE;
+            float wy = g.min_y + ((float)y + 0.5f) * CURSOR_TILE;
+            if (!cover(world, NULL, wx, wy, z, &cp) || cp.x != x || cp.y != y ||
+                (cp.flags & TILE_COVER_DIAGONAL) || !(cp.flags & bit))
+                continue;
+            int level = (cp.flags & (bit << 4)) ? 1 : 2;   // the matching low bit
+            if (level > best) best = level;
+            if (best == 2) return 2;
+        }
+    }
+    return best;
+}
+
 static void blast_say(void)
 {
     void* unit = soldier_unit();
@@ -11011,12 +11060,13 @@ static void blast_say(void)
     if (num < 0 || num > 64 || (num && !readable(data, (size_t)num * sizeof(void*)))) return;
 
     // The marked actors are units or their pawns, matched against the units
-    // the squad can see, which is what the screen can highlight; and
-    // destructibles -- cover, cars, crates, windows -- named after their
-    // mesh as the scanner names explosives (scan_mesh_words).
-    char say[768];
-    size_t used = 0;
-    int named = 0;
+    // the squad can see, which is what the screen can highlight. The squad's
+    // own are said apart -- the first run had the rocket's own heavy in it as
+    // "In the blast: Vargas, Dozer.", which also sounded like two people -- so
+    // a soldier is named by surname alone there.
+    const char* them[TILE_NAMES_MAX];
+    const char* ours[TILE_NAMES_MAX];
+    int nthem = 0, nours = 0, tthem = 0, tours = 0;
     unsigned char matched[64] = { 0 };
     void* squad = squad_player();
     for (int i = 0; i < g_nunits; i++) {
@@ -11026,47 +11076,87 @@ static void blast_say(void)
         for (int k = 0; k < num; k++)
             if (data[k] == s.unit || data[k] == s.pawn) { in = 1; matched[k] = 1; }
         if (!in) continue;
-        char label[96];
-        unit_label(s.who, label, sizeof label);
-        int w = _snprintf_s(say + used, sizeof say - used, _TRUNCATE, "%s%s",
-                            named ? ", " : "In the blast: ", label);
-        if (w < 0) break;
-        used += (size_t)w;
-        named++;
+        if (s.friendly) { if (nours < TILE_NAMES_MAX) ours[nours++] = s.who->name; tours++; }
+        else            { if (nthem < TILE_NAMES_MAX) them[nthem++] = s.who->name; tthem++; }
     }
-    if (named) strncat_s(say, sizeof say, ".", _TRUNCATE);
-    else strcpy_s(say, sizeof say, "No one in the blast.");
 
-    // The objects, each name once with how many share it.
-    char obj[16][SCAN_NAME];
-    int count[16], nobj = 0;
+    // The destructibles. Only what explodes is named -- a car or a gas
+    // canister chains on, which is worth hearing on every step; the rest,
+    // cover chunks, posters, rubble, is a count. Named after their mesh, as
+    // the scanner names them, and told from the rest by the scanner's own
+    // list of blast owners (scan_describe_explosive). Already destroyed ones
+    // (Health 0, as BeginDestroyed leaves them) are left out. The blast
+    // owners are brought up to date first: the scanner and the door sounds
+    // are what refresh them otherwise, and either may not have run here.
+    {
+        CursorGrid bg;
+        if (cursor_grid(&bg)) { g_scan_grid = bg; world_refresh(); }
+    }
+    // Three lists: what explodes, and what is high or low cover
+    // (destructible_cover). Anything else is a count.
+    static char names[3][TILE_NAMES_MAX][SCAN_NAME];
+    const char* namep[3][TILE_NAMES_MAX];
+    int kept[3] = { 0 }, total[3] = { 0 }, others = 0, wrecked = 0;
     for (int k = 0; k < num; k++) {
         void* a = data[k];
         if (matched[k] || !a || !unit_is_live(a) || !object_is_a(a, "XComDestructibleActor"))
             continue;
-        char mesh[SCAN_NAME] = "", word[SCAN_NAME];
+        if (field_ptr(a, "Health", &g_blast_health, sizeof(int32_t), &v) &&
+            *(const int32_t*)v <= 0) { wrecked++; continue; }
+        int explodes = 0;
+        for (int j = 0; j < g_blast_owner_n; j++) if (g_blast_owner[j] == a) explodes = 1;
+        int list;
+        if (explodes) list = 0;
+        else {
+            int c = destructible_cover(a);
+            if (!c) { others++; continue; }
+            list = c == 2 ? 1 : 2;
+        }
+        total[list]++;
+        if (kept[list] >= TILE_NAMES_MAX) continue;
+        char mesh[SCAN_NAME] = "";
         if (field_ptr(a, "StaticMeshComponent", &g_blast_smc, sizeof(void*), &v) &&
             *(void* const*)v &&
             field_ptr(*(void* const*)v, "StaticMesh", &g_blast_mesh, sizeof(void*), &v) &&
             *(void* const*)v)
             object_name(*(void* const*)v, mesh, sizeof mesh);
-        scan_mesh_words(mesh, "Object", word, sizeof word);
-        int j = 0;
-        while (j < nobj && strcmp(obj[j], word) != 0) j++;
-        if (j < nobj) { count[j]++; continue; }
-        if (nobj >= 16) continue;
-        strcpy_s(obj[nobj], sizeof obj[nobj], word);
-        count[nobj++] = 1;
+        char* out = names[list][kept[list]];
+        scan_mesh_words(mesh, list ? "Cover" : "Explosive", out, SCAN_NAME);
+        namep[list][kept[list]++] = out;
     }
-    for (int j = 0; j < nobj; j++) {
-        size_t u = strlen(say);
-        char many[24] = "";
-        if (count[j] > 1) _snprintf_s(many, sizeof many, _TRUNCATE, ", %d of them", count[j]);
-        _snprintf_s(say + u, sizeof say - u, _TRUNCATE, "%s%s%s%s", j ? ", " : " Objects: ",
-                    obj[j], many, j == nobj - 1 ? "." : "");
+
+    // "In the blast: 2 Floaters. Squad in the blast: Vargas. Explodes: Car.
+    // High cover: Wall. Low cover: 2 Crates. 8 other objects."
+    char say[768], text[256];
+    size_t used = 0;
+    say[0] = 0;
+    if (tthem) {
+        tile_names_counted(them, nthem, tthem, text, sizeof text);
+        used += (size_t)_snprintf_s(say + used, sizeof say - used, _TRUNCATE,
+                                    "In the blast: %s.", text);
     }
-    logf_("blast: radius %.0f, %d marked, %d named, %d kinds of object -> \"%s\"\n", radius, num,
-          named, nobj, say);
+    if (tours && used < sizeof say) {
+        tile_names_counted(ours, nours, tours, text, sizeof text);
+        used += (size_t)_snprintf_s(say + used, sizeof say - used, _TRUNCATE,
+                                    "%sSquad in the blast: %s.", used ? " " : "", text);
+    }
+    if (!tthem && !tours) {
+        strcpy_s(say, sizeof say, "No one in the blast.");
+        used = strlen(say);
+    }
+    static const char* heads[3] = { "Explodes", "High cover", "Low cover" };
+    for (int l = 0; l < 3; l++) {
+        if (!total[l] || used >= sizeof say) continue;
+        tile_names_counted(namep[l], kept[l], total[l], text, sizeof text);
+        used += (size_t)_snprintf_s(say + used, sizeof say - used, _TRUNCATE,
+                                    " %s: %s.", heads[l], text);
+    }
+    if (others && used < sizeof say)
+        _snprintf_s(say + used, sizeof say - used, _TRUNCATE, " %d other object%s.", others,
+                    others == 1 ? "" : "s");
+    logf_("blast: radius %.0f, %d marked, %d of them, %d of ours, %d explode, %d high cover, "
+          "%d low cover, %d other objects, %d wrecked -> \"%s\"\n", radius, num, tthem, tours,
+          total[0], total[1], total[2], others, wrecked, say);
     if (g_speak) speech_say(say);
 }
 

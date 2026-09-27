@@ -107,7 +107,12 @@ void navh_floor_result(float asked, float got)
     if (g_phase == NAVH_SETTLED || g_phase == NAVH_NONE) return;
     if (!near_z(asked, got)) {          // it found a floor
         if (got >= g_ground - NAVH_FAR_BELOW) {
-            settle(got);
+            // Unless the one kept from below is nearer. The scanner put the
+            // cursor on an Outsider with the ground at 74 (2026-09-27, 30,
+            // 54): the first start found its floor, 6.9, just past
+            // NAVH_FAR_BELOW, and a start 224 up then found the roof at 234 --
+            // which was taken, a storey over the alien it was sent to.
+            settle(g_have_far && got - g_ground > g_ground - g_far ? g_far : got);
             return;
         }
         // Far below: kept, and the search goes on for a nearer one.

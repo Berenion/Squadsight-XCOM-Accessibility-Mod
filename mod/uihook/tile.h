@@ -98,9 +98,9 @@ typedef struct {
     int enemies_known;  // enemies in sight the exposure was measured against
     int seen_by;        // how many of them can see this tile
     int flanked;        // and at least one of those gets past its cover
-    // The seen enemies a soldier here would flank, named: "Sectoid", "2:
-    // Sectoid, Muton". Empty for none. The game's own mark -- see
-    // tile_exposure in main.c.
+    // The seen enemies a soldier here would flank, named, repeats counted
+    // (tile_names_counted): "Sectoid", "2 Sectoids, Muton". Empty for none.
+    // The game's own mark -- see tile_exposure in main.c.
     char flanks[96];
     // The rings the game draws round units while a move is hovered
     // (XGUnit.DrawRanges) that this tile lies inside, as sentences:
@@ -109,7 +109,7 @@ typedef struct {
     char reach[192];
     // Seen enemies a soldier here would stand a storey or more above (height
     // advantage, +20 aim), and ones that would stand as far above the soldier:
-    // "Sectoid", "2: Sectoid, Muton". See tile_exposure in main.c.
+    // "Sectoid", "2 Sectoids, Muton". See tile_exposure in main.c.
     char height_over[96];
     char height_under[96];
 } TileReport;
@@ -184,3 +184,10 @@ void tile_contacts(const TileContact* c, int n, const char* none,
 // for less than a quarter. The camera's floor number says nothing about cover
 // or advantage, so it is not used.
 void tile_height_step(float delta, char* out, size_t out_sz);
+
+// Names as a list is spoken, in first-seen order with repeats counted:
+// "2 Floaters, Sectoid". "Floater, Floater" read as two names, or as one said
+// twice. `total` is how many there were, when only the first `n` were kept:
+// the rest are ", and 3 more".
+#define TILE_NAMES_MAX 16
+void tile_names_counted(const char* const* names, int n, int total, char* out, size_t out_sz);

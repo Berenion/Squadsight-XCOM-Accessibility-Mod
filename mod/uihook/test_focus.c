@@ -1608,6 +1608,18 @@ int main(void)
         check(navh_phase() == NAVH_SETTLED && navh_ground() == 212.6f,
               "a step off a roof still lands on the floor below");
 
+        // The scanner's ground a little above a unit's floor: the floor is
+        // found just past NAVH_FAR_BELOW, then a roof well above. The nearer
+        // one is taken (2026-09-27, an Outsider at 30, 54).
+        navh_set_ground(74.0f);
+        navh_begin_tile();
+        for (int i = 0; i < 64 && navh_phase() == NAVH_SEARCH; i++) {
+            z = navh_query_z();
+            navh_floor_result(z, z >= 298.0f ? 234.0f : z > 6.9f ? 6.9f : z);
+        }
+        check(navh_phase() == NAVH_SETTLED && navh_ground() == 6.9f,
+              "a floor just below beats a roof far above");
+
         // A small step down is near, and settles on the first find as before.
         navh_set_ground(0.0f);
         navh_begin_tile();
@@ -1769,10 +1781,10 @@ int main(void)
         tile_describe(&r, say, sizeof say);
         check(strcmp(say, "No cover. Seen by 1. Flanks Sectoid.") == 0,
               "flanking an enemy follows the exposure");
-        strcpy_s(r.flanks, sizeof r.flanks, "2: Sectoid, Muton");
+        strcpy_s(r.flanks, sizeof r.flanks, "2 Sectoids, Muton");
         r.poison = 1;
         tile_describe(&r, say, sizeof say);
-        check(strcmp(say, "No cover. Seen by 1. Flanks 2: Sectoid, Muton. Poison.") == 0,
+        check(strcmp(say, "No cover. Seen by 1. Flanks 2 Sectoids, Muton. Poison.") == 0,
               "several are counted and named, hazards still last");
         r.flanks[0] = 0;
         r.poison = 0;
@@ -1784,12 +1796,26 @@ int main(void)
         r.reach[0] = 0;
 
         strcpy_s(r.height_over, sizeof r.height_over, "Sectoid");
-        strcpy_s(r.height_under, sizeof r.height_under, "2: Muton, Thin Man");
+        strcpy_s(r.height_under, sizeof r.height_under, "Muton, Thin Man");
         tile_describe(&r, say, sizeof say);
-        check(strcmp(say, "No cover. Seen by 1. Height advantage on Sectoid. 2: Muton, Thin Man "
+        check(strcmp(say, "No cover. Seen by 1. Height advantage on Sectoid. Muton, Thin Man "
                           "above you.") == 0,
               "height advantage either way follows the exposure");
         r.height_over[0] = r.height_under[0] = 0;
+
+        // Lists of names: repeats counted, in first-seen order.
+        {
+            const char* a[] = { "Floater", "Sectoid", "Floater" };
+            tile_names_counted(a, 3, 3, say, sizeof say);
+            check(strcmp(say, "2 Floaters, Sectoid") == 0, "repeated names are counted");
+            const char* b[] = { "Thin Man", "Thin Man", "Chryssalis", "Chryssalis" };
+            tile_names_counted(b, 4, 4, say, sizeof say);
+            check(strcmp(say, "2 Thin Men, 2 Chryssalises") == 0, "plurals of Man and -s");
+            tile_names_counted(a, 1, 1, say, sizeof say);
+            check(strcmp(say, "Floater") == 0, "one name alone");
+            tile_names_counted(a, 2, 5, say, sizeof say);
+            check(strcmp(say, "Floater, Sectoid, and 3 more") == 0, "the ones not kept are counted");
+        }
 
         tile_height_step(97.8f, say, sizeof say);
         check(strcmp(say, "Half a storey up.") == 0, "F from a raised floor to a roof");
