@@ -65,6 +65,11 @@ void objects_classes(const char* const* names, const void** out, int n);
 // One class, through the same cache.
 const void* objects_class(const char* name);
 
+// The first live object called `name`, matched by name alone: no class is
+// asked, so this works before UObject::Class is known (props_init needs a
+// function to learn it from). NULL when there is none, or no table.
+const void* objects_named(const char* name);
+
 // Called once per matching object; `which` is its index in the class list the
 // walk was given, and `idx` its slot in the object table -- which is what
 // objects_still needs to check on it later. Returning 0 stops the walk.

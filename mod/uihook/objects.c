@@ -284,6 +284,30 @@ static void class_remember(const char* name, const void* cls)
 
 static void classes_locked(const char* const* names, const void** out, int n);
 
+const void* objects_named(const char* name)
+{
+    if (!g_objs || !name) return NULL;
+    int32_t idx;
+    names_find(&name, &idx, 1);
+    if (idx < 0) return NULL;
+    const void* found = NULL;
+    AcquireSRWLockExclusive(&g_walk_lock);
+    if (readable(g_objs, sizeof *g_objs)) {
+        void** data = (void**)g_objs->Data;
+        int total = g_objs->Num;
+        region_forget();
+        for (int i = 0; i < total && !found; i++) {
+            if (!region_ok(&data[i], sizeof(void*))) break;
+            void* obj = data[i];
+            if (!obj || !region_ok(obj, 0x60)) continue;
+            const FName* fn = (const FName*)((const uint8_t*)obj + UOBJECT_NAME);
+            if (fn->Index == idx) found = obj;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_walk_lock);
+    return found;
+}
+
 void objects_classes(const char* const* names, const void** out, int n)
 {
     AcquireSRWLockExclusive(&g_walk_lock);

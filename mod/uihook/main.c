@@ -281,6 +281,21 @@ static void strip_markup(char* s)
     *out = 0;
 }
 
+// A sum as the game draws it, "§50", as said: "50 credits". The section sign
+// (U+00A7) reads "section". "-" and "" are left as they are.
+static void money_text(const char* in, char* out, size_t out_sz)
+{
+    size_t w = 0;
+    for (const char* r = in ? in : ""; *r && w + 1 < out_sz; r++) {
+        if ((unsigned char)r[0] == 0xC2 && (unsigned char)r[1] == 0xA7) { r++; continue; }
+        out[w++] = *r;
+    }
+    out[w] = 0;
+    const char* d = (out[0] == '+' || out[0] == '-') ? out + 1 : out;
+    if (*d >= '0' && *d <= '9')
+        strncat_s(out, out_sz, strcmp(d, "1") == 0 ? " credit" : " credits", _TRUNCATE);
+}
+
 // Plenty of these "strings" are asset references rather than prose --
 // "Icon_B_CIRCLE", "img:///UILibrary_MapImages.Command1".  They belong in the
 // log, because they identify the call, but reading them aloud is noise.
@@ -2007,6 +2022,138 @@ static void capture_body(const char* tag, LONG n, void* stack)
             logf_("[%ld] %s %s.%s  OTS %d \"%s\"\n", n, tag, obj_name, fn_name, s_sel, say);
             speech_cancel_pending();
             if (g_speak && !muted()) speech_say_now(say);
+            return;
+        }
+    }
+
+    // The Gray Market (UIGreyMarket). Every change redraws all of it
+    // (UpdateData):
+    //     AS_SetTitle; AS_SetHeader(i, text) x4 -- "In Storage", "", "Sell",
+    //         and the sale's total ("§0")
+    //     AS_AddItem(int i, storage, name, price, sell, total, int, bool canSell)
+    //         per item; storage is what stays after the sale, "-" for none;
+    //         sell "-" until one is marked, total "" until then
+    //     AS_SetListSelection(int i)
+    //     AS_UpdateInfo(Desc, image): "NAME\nNOT RESEARCHED\nCannot sell this
+    //         item\nsummary", the middle two only when they apply
+    // Up/Down move (OnHighlightUp/Down), Right marks one more to sell
+    // (OnSellItem), Left takes one back (OnReturnItem), Enter completes the
+    // sale at once -- no dialogue -- and Escape leaves, handing everything
+    // back. A refused change plays the bad sound and draws nothing. On the
+    // general path the rows were slots and every move said "ITEM n
+    // unresolved". So each draw is said by what changed: the item on a move;
+    // the count and the total on Right or Left, which change the item's stock
+    // with its count; the sale on Enter, which empties the total and leaves
+    // the stock as it was.
+    if (strncmp(obj_name, "UIGreyMarket", 12) == 0) {
+        #define GREY_ROWS 48
+        typedef struct { char name[96], store[16], price[32], sell[16], total[32]; int can; } GreyRow;
+        static GreyRow s_row[GREY_ROWS];
+        static GreyRow s_prev;                  // the selected row as last said
+        static char s_title[96], s_head_total[32], s_prev_total[32];
+        static int  s_n, s_sel = -1;
+        static void* s_obj;                     // a new screen is a new visit
+        if (object != s_obj) {
+            s_obj = object;
+            s_n = 0;
+            s_sel = -1;
+            memset(&s_prev, 0, sizeof s_prev);
+            s_prev_total[0] = 0;
+        }
+        if (strcmp(fn_name, "AS_SetTitle") == 0) {
+            frame_string(node, locals, 0, s_title, sizeof s_title);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetHeader") == 0 && p->nnumbers) {
+            if ((int)p->numbers[0] == 3) {
+                char t[64];
+                frame_string(node, locals, 0, t, sizeof t);
+                money_text(t, s_head_total, sizeof s_head_total);
+            }
+            return;
+        }
+        if (strcmp(fn_name, "AS_AddItem") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (i < 0 || i >= GREY_ROWS) return;
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            GreyRow* r = &s_row[i];
+            strncpy_s(r->store, sizeof r->store, a.ns > 0 ? a.s[0] : "", _TRUNCATE);
+            strncpy_s(r->name, sizeof r->name, a.ns > 1 ? a.s[1] : "", _TRUNCATE);
+            money_text(a.ns > 2 ? a.s[2] : "", r->price, sizeof r->price);
+            strncpy_s(r->sell, sizeof r->sell, a.ns > 3 ? a.s[3] : "", _TRUNCATE);
+            money_text(a.ns > 4 ? a.s[4] : "", r->total, sizeof r->total);
+            r->can = a.nb > 0 ? a.b[a.nb - 1] : 1;
+            if (i >= s_n) s_n = i + 1;
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetListSelection") == 0 && p->nnumbers) {
+            s_sel = (int)p->numbers[0];
+            return;
+        }
+        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
+            // The description a line at a time; its first line is the name,
+            // which the item already says.
+            static char raw[FRAME_ARG_TEXT];
+            char info[1024] = "";
+            if (!frame_local_raw(node, locals, "Desc", raw, sizeof raw))
+                frame_string(node, locals, 0, raw, sizeof raw);
+            const GreyRow* r = s_sel >= 0 && s_sel < s_n ? &s_row[s_sel] : NULL;
+            int line = 0;
+            for (char* part = raw; part && *part; line++) {
+                char* nl = strchr(part, '\n');
+                if (nl) *nl = 0;
+                strip_markup(part);
+                size_t pl = strlen(part);
+                if ((line > 0 || !r) && pl) {
+                    size_t u = strlen(info);
+                    _snprintf_s(info + u, sizeof info - u, _TRUNCATE, "%s%s%s", u ? " " : "",
+                                part, strchr(".!?", part[pl - 1]) ? "" : ".");
+                }
+                part = nl ? nl + 1 : NULL;
+            }
+
+            int marked = r && r->sell[0] && strcmp(r->sell, "-") != 0;
+            char item[512] = "";
+            if (r)
+                _snprintf_s(item, sizeof item, _TRUNCATE, "%s, %s in storage%s%s%s%s%s%s%s.",
+                            r->name, strcmp(r->store, "-") == 0 ? "none" : r->store,
+                            r->can && r->price[0] ? ", " : "", r->can ? r->price : "",
+                            r->can && r->price[0] ? " each" : "",
+                            marked ? ", selling " : "", marked ? r->sell : "",
+                            marked ? " for " : "", marked ? r->total : "");
+
+            int fresh = !s_prev.name[0];
+            int same = r && strcmp(r->name, s_prev.name) == 0;
+            int counted = same && strcmp(r->sell, s_prev.sell) != 0 &&
+                          strcmp(r->store, s_prev.store) != 0;
+            int sold = !counted && s_prev_total[0] && strcmp(s_prev_total, s_head_total) != 0 &&
+                       (!s_head_total[0] || strncmp(s_head_total, "0 ", 2) == 0);
+            char say[2048] = "";
+            if (fresh)
+                _snprintf_s(say, sizeof say, _TRUNCATE,
+                            "%s%s%s %s Right sells one more, Left takes one back, "
+                            "Enter completes the sale.",
+                            s_title, s_title[0] ? ". " : "", item, info);
+            else if (sold)
+                _snprintf_s(say, sizeof say, _TRUNCATE, "Sold for %s. %s", s_prev_total, item);
+            else if (counted && marked)
+                _snprintf_s(say, sizeof say, _TRUNCATE, "Selling %s, %s. Total %s.",
+                            r->sell, r->total, s_head_total);
+            else if (counted)
+                _snprintf_s(say, sizeof say, _TRUNCATE, "None selling. Total %s.",
+                            s_head_total[0] ? s_head_total : "0 credits");
+            else if (!same)
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s %s", item, info);
+            if (r) s_prev = *r;
+            else memset(&s_prev, 0, sizeof s_prev);
+            if (!s_prev.name[0]) strcpy_s(s_prev.name, sizeof s_prev.name, "-");
+            strncpy_s(s_prev_total, sizeof s_prev_total, s_head_total, _TRUNCATE);
+            logf_("[%ld] %s %s.%s  GREY %d \"%s\"\n", n, tag, obj_name, fn_name, s_sel, say);
+            if (say[0]) {
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_now(say);
+            }
             return;
         }
     }
@@ -11439,19 +11586,50 @@ static int hooks_visit_function(void* obj, int which, int idx, void* ctx)
 
 // Returns 1 once the pass has run. Needs the object table; until it is found
 // the swapped tables still cover whatever links from then on.
-static int hooks_sweep_functions(void)
+// One pass at a time: init and review_pump both ask, and on 2026-09-27 both
+// ran it at once -- two passes, and the second's props line printed garbage.
+static SRWLOCK g_sweep_lock = SRWLOCK_INIT;
+
+static int hooks_sweep_locked(const char* when);
+
+static int hooks_sweep_functions(const char* when)
+{
+    AcquireSRWLockExclusive(&g_sweep_lock);
+    int done = hooks_sweep_locked(when);
+    ReleaseSRWLockExclusive(&g_sweep_lock);
+    return done;
+}
+
+static int hooks_sweep_locked(const char* when)
 {
     if (g_hooks_swept) return 1;
-    // UObject::Class is learnt from the first UI call (props_init), so at
-    // attach this waits, and review_pump runs it moments later. The swapped
-    // tables carry the hooks meanwhile.
-    if (!g_hooks_ready || !objects_ready() || !props_class_offset()) return 0;
+    // UObject::Class, which the walk below needs, used to be learnt only from
+    // the first UI call (props_init) -- and a UI call reaches this DLL only
+    // through a hook. Attached late, with every function linked before the
+    // tables were swapped, no call ever came: the log of 2026-09-27 stopped
+    // at "waits for the first UI call" and the mod never spoke. So it is
+    // learnt here from a native's own UFunction, found by name alone: one
+    // whose parameters give props_init the fields it validates against.
+    if (!g_hooks_ready || !objects_ready()) return 0;
+    if (!props_ready()) {
+        static const char* const probe[] = {
+            "CheckInputIsReleaseOrDirectionRepeat", "GetClosestValidCursorPosition",
+            "ComputePath2",
+        };
+        for (int i = 0; i < 3 && !props_ready(); i++) {
+            const void* fn = objects_named(probe[i]);
+            char why[160] = "";
+            if (fn && props_init(fn, why, sizeof why))
+                logf_("props: %s, learnt from %s\n", why, probe[i]);
+        }
+    }
+    if (!props_class_offset()) return 0;
     const void* fn_class = objects_class("Function");
     if (!fn_class) return 0;
     if (objects_each(&fn_class, 1, hooks_visit_function, NULL) < 0) return 0;
     InterlockedExchange(&g_hooks_swept, 1);
 
-    logf_("hooks: UFunction::Func at +0x%X\n", (unsigned)g_func_off);
+    logf_("hooks: UFunction::Func at +0x%X, the pass run %s\n", (unsigned)g_func_off, when);
     for (int k = 0; k < g_nhooks; k++) {
         Hook* h = &g_hooks[k];
         logf_("  %-38s %d in data%s, %d function%s%s\n", h->name, h->data_sites,
@@ -11469,8 +11647,7 @@ static void hooks_sweep_retry(void)
     char why[256];
     if (!objects_retry(why, sizeof why)) return;
     if (why[0]) logf_("objects: %s\n", why);
-    if (hooks_sweep_functions())
-        logf_("hooks: the UFunction pass ran after startup\n");
+    hooks_sweep_functions("after startup");
 }
 
 static void hooks_install(HMODULE mod)
@@ -11667,7 +11844,7 @@ static DWORD WINAPI init(LPVOID param)
     else
         logf_("objects: UNAVAILABLE (%s) -- the scanner will have no doors, "
               "and the hooks wait for it\n", why);
-    int swept = hooks_sweep_functions();
+    int swept = hooks_sweep_functions("at startup");
 
     int armed = hook_live(h_text[0]) + hook_live(h_text[1]) + hook_live(h_text[2]);
     int input_armed = hook_live(h_input);
@@ -11683,7 +11860,7 @@ static DWORD WINAPI init(LPVOID param)
           grid_armed ? "on" : "OFF", nav_armed ? "on" : "OFF",
           nav_armed ? "on" : "OFF");
     if (!swept)
-        logf_("hooks: the UFunction pass waits for the first UI call (UObject::Class)\n");
+        logf_("hooks: the UFunction pass waits for UObject::Class -- no native function to learn it from yet\n");
 
     // Said aloud, because the log is the one part of this mod its user cannot
     // read.  Now that the launcher attaches during startup rather than on
