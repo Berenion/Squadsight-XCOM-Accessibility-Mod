@@ -457,6 +457,15 @@ static void*     g_msum_screen;
 static char      g_ship_btn[2][FOCUS_MAX_LABEL];
 static int       g_ship_btn_off[2];
 
+// The labs with soldier slots, as last drawn. See slots_select.
+#define SLOT_ROWS 8
+static void*     g_slots_obj;
+static char      g_slots_title[96];
+static char      g_slots_row[SLOT_ROWS][FOCUS_MAX_LABEL];
+static int       g_slots_button[SLOT_ROWS];
+static int       g_slots_n, g_slots_sel = -1;
+static void      slots_select(LONG n, int i, const char* lead);
+
 // The end-of-month report (UIWorldReport, then UIEndOfMonthReport). See the
 // handler in capture_body. The summary page is kept a line at a time for the
 // arrows, which the report itself ignores: UIEndOfMonthReport hands every key
@@ -2545,6 +2554,155 @@ static void capture_body(const char* tag, LONG n, void* stack)
             }
             return;
         }
+    }
+
+    // The labs with soldier slots. See slots_select.
+    if (strncmp(obj_name, "UIGeneLab", 9) == 0 || strncmp(obj_name, "UIPsiLabs", 9) == 0 ||
+        strncmp(obj_name, "UICyberneticsLab", 16) == 0) {
+        if (strcmp(fn_name, "AS_SetTitleLabels") == 0) {
+            frame_string(node, locals, 0, g_slots_title, sizeof g_slots_title);
+            return;
+        }
+        if (strcmp(fn_name, "AS_ClearSoldiers") == 0) {
+            g_slots_obj = object;
+            g_slots_n = 0;
+            return;
+        }
+        if (strcmp(fn_name, "AS_AddSlot") == 0) {
+            if (g_slots_n >= SLOT_ROWS) return;
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            for (int i = 0; i < a.ns; i++) strip_markup(a.s[i]);
+            const char* name = a.ns > 0 ? a.s[0] : "";
+            const char* status = a.ns > 1 ? a.s[1] : "";
+            const char* button = a.ns > 2 ? a.s[2] : "";
+            int off = a.nb > 0 && a.b[0];
+            _snprintf_s(g_slots_row[g_slots_n], FOCUS_MAX_LABEL, _TRUNCATE, "%s%s%s.%s%s%s",
+                        strcmp(name, "(EMPTY)") == 0 ? "Empty" : name, status[0] ? ", " : "",
+                        status, button[0] ? " Enter: " : "", button,
+                        button[0] ? (off ? ", unavailable." : ".") : "");
+            g_slots_button[g_slots_n] = button[0] != 0;
+            g_slots_n++;
+            return;
+        }
+        // The end of every draw. The game's own choice when it made one;
+        // otherwise the first slot with a button, as the game does without a
+        // mouse. The arrival names the lab.
+        if (strcmp(fn_name, "AS_SetSelected") == 0) {
+            int i;
+            if (!string_index(p, &i) || i < 0 || i >= g_slots_n) {
+                i = 0;
+                for (int k = 0; k < g_slots_n; k++) if (g_slots_button[k]) { i = k; break; }
+            }
+            char lead[160];
+            _snprintf_s(lead, sizeof lead, _TRUNCATE, "%s%s", g_slots_title,
+                        g_slots_title[0] ? ". Up and Down choose a slot. " : "");
+            slots_select(n, i, lead);
+            return;
+        }
+    }
+
+    // A soldier's gene mods (UISoldierGeneMods), from the Genetics Lab or, to
+    // look only, from the soldier's own screen. Five rows, the body parts
+    // (AS_SetRowData(i, "BRAIN", locked)), two mods each; the arrows move the
+    // selection natively, and each move (RealizeSelected) sends
+    //     AS_SetSelectedIcon(row, col), AS_SetDescription(name, text),
+    //     AS_SetImplantButtonHelp("SELECT" / "REMOVE" / "INSUFFICIENT
+    //         RESOURCES", icon) -- empty for a locked or installed mod --
+    //     AS_SetRequirements(meld, cash) -- empty the same way, and last.
+    // Enter ticks or unticks the mod; Y opens the confirm dialogue, and Y
+    // cannot be pressed in the headquarters, so 1 stands in for it (input.c).
+    if (strncmp(obj_name, "UISoldierGeneMods", 17) == 0) {
+        static char s_title[64], s_rowname[5][48], s_name[96], s_desc[1024], s_button[96];
+        static int  s_row = -1, s_col = -1, s_said_row = -1, s_said_col = -1, s_fresh;
+        static char s_said_button[96];
+        if (strcmp(fn_name, "AS_InitializeTree") == 0) {
+            frame_string(node, locals, 0, s_title, sizeof s_title);
+            s_fresh = 1;
+            s_said_row = s_said_col = -1;
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetRowData") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (i >= 0 && i < 5) frame_string(node, locals, 0, s_rowname[i], sizeof s_rowname[i]);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetSelectedIcon") == 0 && p->nnumbers >= 2) {
+            s_row = (int)p->numbers[0];
+            s_col = (int)p->numbers[1];
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetDescription") == 0) {
+            frame_string(node, locals, 0, s_name, sizeof s_name);
+            frame_string(node, locals, 1, s_desc, sizeof s_desc);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetImplantButtonHelp") == 0) {
+            frame_string(node, locals, 0, s_button, sizeof s_button);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetRequirements") == 0) {
+            char meld[64], cash[64], cost[160] = "";
+            frame_string(node, locals, 0, meld, sizeof meld);
+            frame_string(node, locals, 1, cash, sizeof cash);
+            // The Meld is an injected icon and then the number, and the
+            // stripped text came back empty ("Costs  Meld", 2026-09-27): the
+            // number is taken from the raw text, its last run of digits.
+            if (!meld[0]) {
+                static char raw[FRAME_ARG_TEXT];
+                static int raw_logged;
+                if (frame_local_raw(node, locals, "meldLabel", raw, sizeof raw)) {
+                    if (!raw_logged) {
+                        raw_logged = 1;
+                        logf_("[%ld] GENEMODS meld raw \"%.200s\"\n", n, raw);
+                    }
+                    const char* end = NULL;
+                    for (const char* c = raw; *c; c++)
+                        if (*c >= '0' && *c <= '9' && !(c[1] >= '0' && c[1] <= '9')) end = c;
+                    if (end) {
+                        const char* start = end;
+                        while (start > raw && start[-1] >= '0' && start[-1] <= '9') start--;
+                        size_t len = (size_t)(end - start + 1);
+                        if (len < sizeof meld) { memcpy(meld, start, len); meld[len] = 0; }
+                    }
+                }
+            }
+            if (meld[0] || cash[0]) {
+                char c[64];
+                hire_text(cash, c, sizeof c);
+                _snprintf_s(cost, sizeof cost, _TRUNCATE, " Costs %s Meld, %s.", meld, c);
+            }
+            const char* state = strstr(s_button, "REMOVE") ? "Chosen."
+                              : strstr(s_button, "INSUFFICIENT") ? "Not enough resources."
+                              : s_button[0] ? "Not chosen." : "";
+            char say[2048];
+            if (s_row == s_said_row && s_col == s_said_col && !s_fresh) {
+                // Enter on the same mod: only whether it is now chosen.
+                if (strcmp(s_button, s_said_button) == 0) return;
+                strcpy_s(say, sizeof say, state);
+            } else {
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s, mod %d of 2. %s%s%s%s%s",
+                            s_fresh ? s_title : "", s_fresh && s_title[0] ? ". " : "",
+                            s_row != s_said_row && s_row >= 0 && s_row < 5 ? s_rowname[s_row] : "",
+                            s_row != s_said_row ? ". " : "", s_name, s_col + 1,
+                            state, state[0] ? " " : "", s_desc, cost,
+                            s_fresh ? " Up and Down choose the body part, Left and Right the "
+                                      "mod, Enter chooses it, 1 confirms." : "");
+            }
+            s_fresh = 0;
+            s_said_row = s_row;
+            s_said_col = s_col;
+            strcpy_s(s_said_button, sizeof s_said_button, s_button);
+            logf_("[%ld] %s %s.%s  GENEMODS %d, %d \"%s\"\n", n, tag, obj_name, fn_name, s_row,
+                  s_col, say);
+            if (say[0]) {
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_now(say);
+            }
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetCalloutImage") == 0 || strcmp(fn_name, "AS_SetIcon") == 0)
+            return;
     }
 
     // Build Items. UpdateLayout sends the heading and column labels
@@ -5151,6 +5309,9 @@ static int sitroom_up(void)
            g_seen_strategy_at && g_seen_tactical_at <= g_seen_strategy_at;
 }
 
+// Up and Down in a lab with soldier slots. See slots_select.
+static void slots_walk(LONG n, int down);
+
 static int rewrite_cmd(LONG n, void* stack)
 {
     g_ui_key_at = GetTickCount64();
@@ -5341,6 +5502,13 @@ static int rewrite_cmd(LONG n, void* stack)
     if (press && (cmd == FXS_ARROW_UP || cmd == FXS_ARROW_DOWN) &&
         strncmp(screen, "UIEndOfMonthReport", 18) == 0)
         eom_walk(n, screen, cmd == FXS_ARROW_DOWN);
+
+    // Up or Down in a lab with soldier slots moves the selection the screen
+    // itself never moves from the keyboard. See slots_select.
+    if (press && (cmd == FXS_ARROW_UP || cmd == FXS_ARROW_DOWN) &&
+        (strncmp(screen, "UIGeneLab", 9) == 0 || strncmp(screen, "UIPsiLabs", 9) == 0 ||
+         strncmp(screen, "UICyberneticsLab", 16) == 0))
+        slots_walk(n, cmd == FXS_ARROW_DOWN);
 
     // Up or Down on the finance statement walks it. See fin_walk.
     if (press && (cmd == FXS_ARROW_UP || cmd == FXS_ARROW_DOWN) &&
@@ -5651,6 +5819,9 @@ static char      g_step_note[48];              // said first: "Floor 2." after F
 // first runs of F went 212.6 -> 466.2 and settled straight back on 212.6.
 static int       g_floor_hold;
 static float     g_floor_hold_z;
+// How far a path's end, or a pick's floor, may sit from the held floor and
+// still be on it: half a storey, well clear of the floors either side.
+#define FLOOR_HOLD_SLACK 96.0f
 
 // How long after a tile's first path it is described. None: the next frame.
 // It was 200 ms while "Dash" came from DestinationReachability, which the
@@ -5746,6 +5917,46 @@ static int field_ptr(void* obj, const char* name, FieldSlot* slot,
     *out = v;
     return 1;
 }
+
+// The labs with soldier slots: the Genetics Lab (UIGeneLab), the Psi Labs
+// (UIPsiLabs) and the Cybernetics Lab (UICyberneticsLab), all UISoldierSlots.
+// Its OnUnrealCommand has cases for Enter and Escape and none for an arrow:
+// the selection follows the mouse, or is set to the first slot with a button
+// only when there is no mouse. With one, m_iCurrentSelection stayed -1 -- the
+// log of 2026-09-27 has "SetSelected FOCUS none" and a dozen arrow presses
+// that did nothing -- and XGGeneLabUI.OnChooseSlot(-1) plays the bad sound,
+// so a soldier could not be put into the lab from the keyboard at all. So the
+// mod keeps the slots as drawn (AS_ClearSoldiers, AS_AddSlot(name, status,
+// buttonLabel, disabled)), walks them on Up and Down, and writes its choice
+// into the screen's m_iCurrentSelection, which Enter then acts on.
+static FieldSlot g_slots_cur;
+
+// Puts the choice into the game and says it; `lead` goes in front.
+static void slots_select(LONG n, int i, const char* lead)
+{
+    if (!g_slots_obj || i < 0 || i >= g_slots_n) return;
+    g_slots_sel = i;
+    const void* v;
+    if (field_ptr(g_slots_obj, "m_iCurrentSelection", &g_slots_cur, sizeof(int32_t), &v) &&
+        writable(v, sizeof(int32_t)))
+        *(int32_t*)v = i;
+    char say[FOCUS_MAX_LABEL + 256];
+    _snprintf_s(say, sizeof say, _TRUNCATE, "%sSlot %d of %d: %s", lead ? lead : "", i + 1,
+                g_slots_n, g_slots_row[i]);
+    logf_("[%ld] SLOTS %d \"%s\"\n", n, i, say);
+    speech_cancel_pending();
+    if (g_speak) speech_say_now(say);
+}
+
+static void slots_walk(LONG n, int down)
+{
+    if (!g_slots_n) return;
+    int i = g_slots_sel + (down ? 1 : -1);
+    if (i >= g_slots_n) i = 0;
+    if (i < 0) i = g_slots_n - 1;
+    slots_select(n, i, "");
+}
+
 
 // Up and down on a facility submenu while the tutorial has locked them. The
 // submenu's OnUnrealCommand plays MenuSelectCue and returns when the
@@ -6856,9 +7067,9 @@ static int tile_flanks(void* soldier, void* enemy, const float* eloc, const floa
     FlankedByFn flanked_by = (FlankedByFn)tile_vfn(enemy, g_unit_slot_flankedby);
     if (!in_range || !flanked_by) return 0;
     float height_bonus = 0.0f, dist_sq = SENTINEL_FLOAT;
-    if (!in_range(soldier, NULL, &height_bonus, &dist_sq, enemy,
-                  eloc[0], eloc[1], eloc[2], here[0], here[1], here[2], NULL, 0.0f))
-        return 0;
+    int in = in_range(soldier, NULL, &height_bonus, &dist_sq, enemy,
+                      eloc[0], eloc[1], eloc[2], here[0], here[1], here[2], NULL, 0.0f);
+    if (!in) return 0;
     float flat[3] = { here[0], here[1], 0.0f };
     return flanked_by(enemy, NULL, soldier, flat, 0) != 0;
 }
@@ -6935,6 +7146,9 @@ static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
     r->seen_by = 0;
     r->flanked = 0;
     r->flanks[0] = 0;
+    r->height_over[0] = r->height_under[0] = 0;
+    int nover = 0, nunder = 0;
+    char over_names[3][48], under_names[3][48];
     // The soldier who would stand here, and where: the cover point when the
     // tile has one, as the game asks it, else the tile itself.
     void* soldier = g_expose_ok ? soldier_unit() : NULL;
@@ -6976,6 +7190,32 @@ static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
 
         void* pawn = unit_pawn(unit);
         if (!pawn || !unit_is_live(pawn)) continue;
+
+        // Height advantage, by the game's rule: a storey (192,
+        // XGTacticalGameCoreNativeBase.RELATIVE_HEIGHT_BONUS_ZDIFF) between the
+        // shooter's floor and the target's, +20 aim ("Height" in the shot
+        // breakdown). The game's own test, HasHeightAdvantageOver, takes two
+        // units where they stand, not a tile, so the rule is applied here: the
+        // tile's floor against the enemy's feet (its pawn sits NAV_CURSOR_LIFT
+        // above them). IsPointWithinFiringRange's height output was logged for
+        // this and gave 1.000 every time, from above an enemy as well.
+        {
+            const void* hv;
+            if (field_ptr(pawn, "Location", &g_pawn_loc, 3 * sizeof(float), &hv)) {
+                float diff = here[2] - (((const float*)hv)[2] - NAV_CURSOR_LIFT);
+                int over = diff >= 192.0f, under = diff <= -192.0f;
+                if (over || under) {
+                    int* cnt = over ? &nover : &nunder;
+                    char (*names)[48] = over ? over_names : under_names;
+                    if (*cnt < 3) {
+                        UnitName* un = unit_by_unit(unit);
+                        if (un) unit_label(un, names[*cnt], sizeof names[0]);
+                        else strcpy_s(names[*cnt], sizeof names[0], "an enemy");
+                    }
+                    (*cnt)++;
+                }
+            }
+        }
 
         // Flanking them does not wait on their seeing the tile: the game
         // asks it of every visible enemy in range.
@@ -7042,6 +7282,22 @@ static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
         if (past) r->flanked = 1;
     }
 
+    // The same wording for the heights.
+    for (int side = 0; side < 2; side++) {
+        int cnt = side ? nunder : nover;
+        char (*names)[48] = side ? under_names : over_names;
+        char* out = side ? r->height_under : r->height_over;
+        size_t out_sz = side ? sizeof r->height_under : sizeof r->height_over;
+        if (cnt == 1) {
+            strncpy_s(out, out_sz, names[0], _TRUNCATE);
+        } else if (cnt > 1) {
+            size_t w = (size_t)_snprintf_s(out, out_sz, _TRUNCATE, "%d", cnt);
+            for (int i = 0; i < cnt && i < 3 && w < out_sz; i++)
+                w += (size_t)_snprintf_s(out + w, out_sz - w, _TRUNCATE, "%s%s",
+                                         i ? ", " : ": ", names[i]);
+        }
+    }
+
     // "Sectoid", "2: Sectoid, Muton", and past three only the count.
     if (nflank == 1) {
         strncpy_s(r->flanks, sizeof r->flanks, flank_names[0], _TRUNCATE);
@@ -7103,12 +7359,14 @@ static int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     // asked about -- and on the layer this file worked out for smoke.
     logf_("tile: %d, %d floor %.1f (layer %d): cover %s flags 0x%05X at %d, %d, %d; "
           "path cost %d, standard move %d, max %d, moves made %d, turns %d, smoke %d, "
-          "poison %d, seen by %d of %d known%s%s%s%s%s -> \"%s\"\n",
+          "poison %d, seen by %d of %d known%s%s%s%s%s%s%s%s%s -> \"%s\"\n",
           tx, ty, floor, tz, has_cover ? "yes" : "no", (unsigned)cp.flags,
           cp.x, cp.y, cp.z, cost, std, maxc, moves, turns, r.smoke, r.poison,
           r.seen_by, r.enemies_known, r.flanked ? ", flanked" : "",
           r.flanks[0] ? ", flanks " : "", r.flanks,
-          r.reach[0] ? ", rings " : "", r.reach, say);
+          r.reach[0] ? ", rings " : "", r.reach,
+          r.height_over[0] ? ", height on " : "", r.height_over,
+          r.height_under[0] ? ", below " : "", r.height_under, say);
     return 1;
 }
 
@@ -9982,25 +10240,33 @@ static void scan_focus(int tx, int ty, float ground, const char* what)
 // camera's cut-away and nothing else. They still reach the game, which keeps
 // that cut-away in step.
 //
-// The next storey is the first grid layer, going the way asked, that has a
-// floor on this tile (IsPositionOnFloor) and lies in a different storey from
-// where the target stands. A crate top on the same storey is passed over, as
-// the game passes over it. The target is then put there exactly as Home puts
-// it on a scanner item, so a move gets its path verdict and an aim its odds,
-// with "Floor N." in front.
+// The next floor is the first surface, going the way asked through the grid's
+// layers, at least FLOOR_STEP_MIN from where the target stands. A layer's
+// surface is asked of GetFloorZForPosition from the layer's top -- the floor at
+// or below that point -- with IsPositionOnFloor at its middle as the fallback.
+// It used to be the midpoint test alone, and the first surface in a different
+// *game storey* (WorldZToCursorFloor): on 2026-09-27 a raised floor at 32 and
+// a floor at 129.8 were one storey to the game, so F refused, and on the tile
+// beside it the midpoint test found nothing below 129.8, so C refused too --
+// "no floors below" from a floor the player had just stepped up to. A step
+// or a crate top, closer than FLOOR_STEP_MIN, is still passed over. The
+// target is then put there exactly as Home puts it on a scanner item, so a
+// move gets its path verdict and an aim its odds, with "Floor N." in front.
 #define FLOOR_KEYS 2
+#define FLOOR_STEP_MIN 96.0f
 static int g_floor_down[FLOOR_KEYS];      // F, C
 
 // `seen` gets what each layer tried answered, for the log: "6:- 5:F0@212.6"
 // is no floor on layer 6, a floor at 212.6 in storey 0 on layer 5.
-static int floor_next(const CursorGrid* g, int tx, int ty, float from, int dir,
-                      float* out, int* storey, char* seen, size_t seen_sz)
+static int floor_probe(const CursorGrid* g, int tx, int ty, float from, int dir,
+                       float* out, int* storey, char* seen, size_t seen_sz)
 {
     size_t used = 0;
     seen[0] = 0;
     void* world = cursor_world();
     if (!world) return 0;
     PositionTestFn on_floor = (PositionTestFn)tile_vfn(world, g_tile_slot_onfloor);
+    FloorZFn floorz = (FloorZFn)tile_vfn(world, g_tile_slot_floorz);
     if (!on_floor) return 0;
     float x = g->min_x + ((float)tx + 0.5f) * CURSOR_TILE;
     float y = g->min_y + ((float)ty + 0.5f) * CURSOR_TILE;
@@ -10009,24 +10275,135 @@ static int floor_next(const CursorGrid* g, int tx, int ty, float from, int dir,
     int layer = cursor_tile_axis(from + 4.0f, g->min_z, 64.0f);
     int w = _snprintf_s(seen, seen_sz, _TRUNCATE, "from layer %d storey %d:", layer, cur);
     if (w > 0) used = (size_t)w;
-    for (int tz = layer + dir; tz >= 0 && (g->num_z <= 0 || tz < g->num_z); tz += dir) {
-        float pos[3] = { x, y, g->min_z + ((float)tz + 0.5f) * 64.0f };
-        if (!on_floor(world, NULL, pos)) {
+    (void)cur;
+    // Down asks the game first for the floor at or below a step under the
+    // target, which needs no grid layer: a sunken floor can lie under the
+    // grid's bottom. The log of 2026-09-27 had one at -59, layer -1; F went up
+    // from it to 69, and C, walking layers 1 and 0 and no further, could not
+    // find it again.
+    if (dir < 0 && floorz) {
+        float probe[3] = { x, y, from - FLOOR_STEP_MIN };
+        float z = floorz(world, NULL, probe, 1);           // bUnlimitedSearch
+        w = _snprintf_s(seen + used, seen_sz - used, _TRUNCATE, " below(raw %.1f)", z);
+        if (w > 0) used += (size_t)w;
+        if (z != probe[2] && z <= probe[2] + 1.0f && z > probe[2] - 4096.0f) {
+            float at[3] = { x, y, z + 4.0f };
+            int f = floor_of(at);
+            w = _snprintf_s(seen + used, seen_sz - used, _TRUNCATE, " below:F%d@%.1f", f, z);
+            if (w > 0) used += (size_t)w;
+            *out = z;
+            *storey = f;
+            return 1;
+        }
+        w = _snprintf_s(seen + used, seen_sz - used, _TRUNCATE, " below:-");
+        if (w > 0) used += (size_t)w;
+    }
+    // Down starts in the target's own layer: a surface below it there is
+    // still further than the step, or not.
+    for (int tz = dir < 0 ? layer : layer + dir; tz >= 0 && (g->num_z <= 0 || tz < g->num_z);
+         tz += dir) {
+        float bottom = g->min_z + (float)tz * 64.0f;
+        float top[3] = { x, y, bottom + 63.0f };
+        float z = 0.0f;
+        int has = 0;
+        if (floorz) {
+            z = floorz(world, NULL, top, 0);
+            has = z != top[2] && z >= bottom - 1.0f && z <= bottom + 63.0f;
+        }
+        if (!has) {
+            float mid[3] = { x, y, bottom + 32.0f };
+            if (on_floor(world, NULL, mid)) {
+                z = aim_floor_exact(world, mid, bottom);
+                has = 1;
+            }
+        }
+        if (!has) {
             w = _snprintf_s(seen + used, seen_sz - used, _TRUNCATE, " %d:-", tz);
             if (w > 0) used += (size_t)w;
             continue;
         }
-        float z = aim_floor_exact(world, pos, g->min_z + (float)tz * 64.0f);
         float at[3] = { x, y, z + 4.0f };
         int f = floor_of(at);
         w = _snprintf_s(seen + used, seen_sz - used, _TRUNCATE, " %d:F%d@%.1f", tz, f, z);
         if (w > 0) used += (size_t)w;
-        if (f == cur) continue;
+        if ((dir > 0 && z < from + FLOOR_STEP_MIN) || (dir < 0 && z > from - FLOOR_STEP_MIN))
+            continue;
         *out = z;
         *storey = f;
         return 1;
     }
     return 0;
+}
+
+// The surfaces the cursor has stood on, per tile. GetFloorZForPosition does
+// not report every surface the game lets a soldier stand on: on 2026-09-27 the
+// cursor settled on 102.2 at 31, 47 (the top of something, found by the game's
+// own cursor validation), F went up to 219.3, and neither the direct query nor
+// any layer found 102.2 again -- "No floor below" from where the player had
+// just been. So every height the search settles on, and every floor F / C
+// reaches, is kept, and F / C take the nearest kept one in the way asked when
+// it is closer than what the probe found.
+#define KNOWN_SURFACES 512
+static struct { short tx, ty; float z; } g_known[KNOWN_SURFACES];
+static int g_known_n, g_known_next;
+static void* g_known_world;           // another map is another set
+
+static void surface_forget_if_new_map(void)
+{
+    void* w = cursor_world();
+    if (w == g_known_world) return;
+    g_known_world = w;
+    g_known_n = g_known_next = 0;
+}
+
+static void surface_note(int tx, int ty, float z)
+{
+    surface_forget_if_new_map();
+    for (int i = 0; i < g_known_n; i++)
+        if (g_known[i].tx == tx && g_known[i].ty == ty &&
+            g_known[i].z > z - 16.0f && g_known[i].z < z + 16.0f)
+            return;
+    int slot = g_known_n < KNOWN_SURFACES ? g_known_n++ : g_known_next++ % KNOWN_SURFACES;
+    g_known[slot].tx = (short)tx;
+    g_known[slot].ty = (short)ty;
+    g_known[slot].z = z;
+}
+
+static int surface_known(int tx, int ty, float from, int dir, float* out)
+{
+    surface_forget_if_new_map();
+    int found = 0;
+    for (int i = 0; i < g_known_n; i++) {
+        if (g_known[i].tx != tx || g_known[i].ty != ty) continue;
+        float d = (g_known[i].z - from) * (float)dir;
+        if (d < FLOOR_STEP_MIN) continue;
+        if (!found || d < (*out - from) * (float)dir) { *out = g_known[i].z; found = 1; }
+    }
+    return found;
+}
+
+// The next floor: the probe's answer or a kept surface, whichever is nearer.
+static int floor_next(const CursorGrid* g, int tx, int ty, float from, int dir,
+                      float* out, int* storey, char* seen, size_t seen_sz)
+{
+    float zp = 0.0f, zk = 0.0f;
+    int sp = 0;
+    int probe = floor_probe(g, tx, ty, from, dir, &zp, &sp, seen, seen_sz);
+    int known = surface_known(tx, ty, from, dir, &zk);
+    size_t used = strlen(seen);
+    if (known)
+        _snprintf_s(seen + used, seen_sz - used, _TRUNCATE, " known:%.1f", zk);
+    if (!probe && !known) return 0;
+    if (known && (!probe || (zk - from) * (float)dir < (zp - from) * (float)dir)) {
+        float at[3] = { g->min_x + ((float)tx + 0.5f) * CURSOR_TILE,
+                        g->min_y + ((float)ty + 0.5f) * CURSOR_TILE, zk + 4.0f };
+        *out = zk;
+        *storey = floor_of(at);
+        return 1;
+    }
+    *out = zp;
+    *storey = sp;
+    return 1;
 }
 
 // What the game's own F / C made of the key: it still runs AscendFloor /
@@ -10088,9 +10465,13 @@ static void nav_floor(int dir)
     logf_("nav: %s at %d, %d: %.1f -> %.1f, storey %d (%s)\n", dir > 0 ? "F" : "C",
           tx, ty, from, to, storey, seen);
     scan_focus(tx, ty, to, dir > 0 ? "the floor above" : "the floor below");
-    _snprintf_s(g_step_note, sizeof g_step_note, _TRUNCATE, "Floor %d.", storey + 1);
+    // How far, in storeys -- what height advantage is counted in -- not the
+    // camera's floor number (tile_height_step).
+    tile_height_step(to - from, g_step_note, sizeof g_step_note);
     g_floor_hold = 1;
     g_floor_hold_z = to;
+    surface_note(tx, ty, from);
+    surface_note(tx, ty, to);
     // Arrival counted the soldier as on this tile whatever their floor. Their
     // own tile is described on a timer, since no path is built to it -- but
     // on another floor of the column it gets a path like any other.
@@ -10596,6 +10977,111 @@ static DWORD WINAPI review_pump(LPVOID unused)
     return 0;
 }
 
+// Who an area attack would hit, as the game marks them while it is aimed.
+// XGAction_Targeting.DrawSplashRadius, on every update of an aim at a spot
+// (a rocket, a grenade, and the other blasts it lists), works out the centre
+// and the radius and hands them to the native UpdateShotTargetLocation, which
+// marks the actors inside (MarkTargetedActors) and keeps them in the action's
+// m_arrMarkedTargets -- the highlight the sighted player sees -- beside the
+// radius it used, m_fSplashRadiusCache. So the list is read as marked, not
+// worked out again. Said a moment after each numpad aim step, once the game
+// has drawn the blast at the new spot, queued behind the step and its odds:
+// "In the blast: Sectoid, White." A blast with nobody in it says so.
+#define BLAST_DELAY_MS 200
+static ULONGLONG g_blast_due;
+static FieldSlot g_marked_slot, g_splash_slot;
+
+static void blast_say(void)
+{
+    void* unit = soldier_unit();
+    const void* v;
+    if (!unit || !field_ptr(unit, "m_kCurrAction", &g_curr_action, sizeof(void*), &v)) return;
+    void* action = *(void* const*)v;
+    char name[64];
+    if (!action || !unit_is_live(action) || !object_name(action, name, sizeof name) ||
+        strncmp(name, "XGAction_Targeting", 18) != 0)
+        return;
+    if (!field_ptr(action, "m_fSplashRadiusCache", &g_splash_slot, sizeof(float), &v)) return;
+    float radius = *(const float*)v;
+    if (!(radius > 0.0f)) return;                 // not an area attack
+    if (!field_ptr(action, "m_arrMarkedTargets", &g_marked_slot, sizeof(FArray), &v)) return;
+    const FArray* arr = (const FArray*)v;
+    int num = arr->Num;
+    void* const* data = (void* const*)arr->Data;
+    if (num < 0 || num > 64 || (num && !readable(data, (size_t)num * sizeof(void*)))) return;
+
+    // The marked actors are units or their pawns, matched against the units
+    // the squad can see, which is what the screen can highlight; and
+    // destructibles -- cover, cars, crates, windows -- named after their
+    // mesh as the scanner names explosives (scan_mesh_words).
+    char say[768];
+    size_t used = 0;
+    int named = 0;
+    unsigned char matched[64] = { 0 };
+    void* squad = squad_player();
+    for (int i = 0; i < g_nunits; i++) {
+        UnitSeen s;
+        if (!unit_seen(&g_units[i], squad, &s)) continue;
+        int in = 0;
+        for (int k = 0; k < num; k++)
+            if (data[k] == s.unit || data[k] == s.pawn) { in = 1; matched[k] = 1; }
+        if (!in) continue;
+        char label[96];
+        unit_label(s.who, label, sizeof label);
+        int w = _snprintf_s(say + used, sizeof say - used, _TRUNCATE, "%s%s",
+                            named ? ", " : "In the blast: ", label);
+        if (w < 0) break;
+        used += (size_t)w;
+        named++;
+    }
+    if (named) strncat_s(say, sizeof say, ".", _TRUNCATE);
+    else strcpy_s(say, sizeof say, "No one in the blast.");
+
+    // The objects, each name once with how many share it.
+    char obj[16][SCAN_NAME];
+    int count[16], nobj = 0;
+    for (int k = 0; k < num; k++) {
+        void* a = data[k];
+        if (matched[k] || !a || !unit_is_live(a) || !object_is_a(a, "XComDestructibleActor"))
+            continue;
+        char mesh[SCAN_NAME] = "", word[SCAN_NAME];
+        if (field_ptr(a, "StaticMeshComponent", &g_blast_smc, sizeof(void*), &v) &&
+            *(void* const*)v &&
+            field_ptr(*(void* const*)v, "StaticMesh", &g_blast_mesh, sizeof(void*), &v) &&
+            *(void* const*)v)
+            object_name(*(void* const*)v, mesh, sizeof mesh);
+        scan_mesh_words(mesh, "Object", word, sizeof word);
+        int j = 0;
+        while (j < nobj && strcmp(obj[j], word) != 0) j++;
+        if (j < nobj) { count[j]++; continue; }
+        if (nobj >= 16) continue;
+        strcpy_s(obj[nobj], sizeof obj[nobj], word);
+        count[nobj++] = 1;
+    }
+    for (int j = 0; j < nobj; j++) {
+        size_t u = strlen(say);
+        char many[24] = "";
+        if (count[j] > 1) _snprintf_s(many, sizeof many, _TRUNCATE, ", %d of them", count[j]);
+        _snprintf_s(say + u, sizeof say - u, _TRUNCATE, "%s%s%s%s", j ? ", " : " Objects: ",
+                    obj[j], many, j == nobj - 1 ? "." : "");
+    }
+    logf_("blast: radius %.0f, %d marked, %d named, %d kinds of object -> \"%s\"\n", radius, num,
+          named, nobj, say);
+    if (g_speak) speech_say(say);
+}
+
+static void blast_poll(void)
+{
+    if (!g_blast_due || GetTickCount64() < g_blast_due) return;
+    g_blast_due = 0;
+    if (!g_nav_aim) return;
+    Fault f;
+    __try { blast_say(); }
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        fault_log("blast: read", &f, NULL);
+    }
+}
+
 static void nav_poll(void)
 {
     // Practice owns the numpad while it is on (learn.h). Navigation stands
@@ -10613,6 +11099,8 @@ static void nav_poll(void)
         g_walls_have = 0;
         return;
     }
+
+    blast_poll();
 
     if (nav_active()) {
         void* pawn = NULL;
@@ -11088,6 +11576,8 @@ static void nav_aim_landed(const CursorGrid* g, int px, int py)
 {
     int tx, ty;
     if (!nav_target(&tx, &ty)) return;
+    // Who the blast takes in, once the game has drawn it here (blast_poll).
+    g_blast_due = GetTickCount64() + BLAST_DELAY_MS;
     // What the aim hits from here is heard after the coordinates, even when
     // it is what the last tile had: the odds (brief, see shot_set_brief) and
     // whether the shot is blocked. The game resends the blocked message only
@@ -11368,6 +11858,7 @@ static void nav_log_phase(void)
     NavHeightPhase p = navh_phase();
     if (p == g_nav_phase_logged) return;
     g_nav_phase_logged = p;
+    if (p == 2) surface_note(g_nav_path_tile[0], g_nav_path_tile[1], navh_ground());
     static const char* names[] = { "searching", "probing heights", "settled", "no height works" };
     logf_("nav: %d, %d height %s, ground %.1f\n", g_nav_path_tile[0], g_nav_path_tile[1],
           names[p], navh_ground());
@@ -11414,6 +11905,23 @@ static void __fastcall hook_floorz(void* self, void* edx, void* stack, void* res
 
     __try {
         float z = *(float*)result;
+        // A floor F / C chose is held against the game's own answer for the
+        // pick. The game does not report every surface it lets a soldier
+        // stand on: on 2026-09-27 C chose 96.0 at 31, 48, this pick answered
+        // 220.3, the height search settled on that, and the target went back
+        // up without a word -- C was silent and the next C started from 220.3
+        // again. Only the pick made for the target (aimed), only while held.
+        if (aimed && g_floor_hold && fabsf(z - g_floor_hold_z) > FLOOR_HOLD_SLACK &&
+            writable(result, sizeof(float))) {
+            static int logged;
+            if (!logged) {
+                logged = 1;
+                logf_("nav: the pick's floor %.1f replaced by the held floor %.1f\n", z,
+                      g_floor_hold_z);
+            }
+            z = g_floor_hold_z;
+            *(float*)result = z;
+        }
         if (aimed && !g_nav_aim) {
             navh_floor_result(g_nav_world[2], z);
             nav_log_phase();
@@ -11440,9 +11948,6 @@ static void __fastcall hook_floorz(void* self, void* edx, void* stack, void* res
 // moves only along what that produced -- an empty path makes a confirm do
 // nothing, silently. The destination is the caller's first parameter, as for
 // the placement. Logged when the answer or the tile changes, while navigating.
-// How far a path's end may sit from the floor F / C chose and still be on it:
-// half a storey, well clear of the floors either side.
-#define FLOOR_HOLD_SLACK 96.0f
 static int   g_path_logged_ok = -1;
 static int   g_path_logged_tile[2] = { -1, -1 };
 static float g_path_logged_z;

@@ -107,6 +107,11 @@ typedef struct {
     // "Medikit reaches White. Arc Thrower reaches Sectoid." Empty for none.
     // See tile_rings in main.c.
     char reach[192];
+    // Seen enemies a soldier here would stand a storey or more above (height
+    // advantage, +20 aim), and ones that would stand as far above the soldier:
+    // "Sectoid", "2: Sectoid, Muton". See tile_exposure in main.c.
+    char height_over[96];
+    char height_under[96];
 } TileReport;
 
 // "Dash. High cover north. Low cover east and west. Smoke." -- or "No cover."
@@ -172,3 +177,10 @@ typedef struct {
 // is said when the list is empty.
 void tile_contacts(const TileContact* c, int n, const char* none,
                    char* out, size_t out_sz);
+
+// How far F / C moved the target, in the unit that decides height advantage:
+// a storey, 192 (XGTacticalGameCoreNativeBase.RELATIVE_HEIGHT_BONUS_ZDIFF),
+// to the nearest half. "Half a storey up.", "One storey down.", "A step up."
+// for less than a quarter. The camera's floor number says nothing about cover
+// or advantage, so it is not used.
+void tile_height_step(float delta, char* out, size_t out_sz);

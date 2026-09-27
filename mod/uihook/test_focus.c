@@ -1783,6 +1783,23 @@ int main(void)
               "the rings a tile is inside follow the exposure");
         r.reach[0] = 0;
 
+        strcpy_s(r.height_over, sizeof r.height_over, "Sectoid");
+        strcpy_s(r.height_under, sizeof r.height_under, "2: Muton, Thin Man");
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "No cover. Seen by 1. Height advantage on Sectoid. 2: Muton, Thin Man "
+                          "above you.") == 0,
+              "height advantage either way follows the exposure");
+        r.height_over[0] = r.height_under[0] = 0;
+
+        tile_height_step(97.8f, say, sizeof say);
+        check(strcmp(say, "Half a storey up.") == 0, "F from a raised floor to a roof");
+        tile_height_step(-192.0f, say, sizeof say);
+        check(strcmp(say, "One storey down.") == 0, "C a whole storey");
+        tile_height_step(290.0f, say, sizeof say);
+        check(strcmp(say, "1 and a half storeys up.") == 0, "a storey and a half");
+        tile_height_step(-20.0f, say, sizeof say);
+        check(strcmp(say, "A step down.") == 0, "less than a quarter");
+
         // The checks below carry `r` on from here, so the exposure is put
         // back before they read it.
         r.enemies_known = r.seen_by = r.flanked = 0;

@@ -88,6 +88,11 @@ static const Remap g_remaps[] = {
     // log of 2026-09-27. The screen has no case for any digit.
     { "UIShipList",        FXS_KEY_1,   FXS_BUTTON_X,       "Transfer ship" },
 
+    // A soldier's gene mods confirm the chosen mods on Y (303) or the letter
+    // Y (539), ShowConfirmNotification; neither reaches the headquarters.
+    // The screen has no case for any digit.
+    { "UISoldierGeneMods", FXS_KEY_1,   FXS_BUTTON_Y,       "Confirm gene mods" },
+
     // The squad for a mission. Launch is Y (303) on UISquadSelect, clearing a
     // slot X (302) on its squad list, stripping the squad's gear RB (331);
     // none of them has a keyboard key in the headquarters, and neither panel

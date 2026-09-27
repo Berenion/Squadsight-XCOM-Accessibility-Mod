@@ -162,6 +162,19 @@ void tile_describe(const TileReport* r, char* out, size_t out_sz)
         append(out, out_sz, &used, t);
     }
 
+    // Height advantage either way: the game's rule is a storey (192) of
+    // difference between the shooter's floor and the target's.
+    if (r->height_over[0]) {
+        char t[160];
+        _snprintf_s(t, sizeof t, _TRUNCATE, "Height advantage on %s. ", r->height_over);
+        append(out, out_sz, &used, t);
+    }
+    if (r->height_under[0]) {
+        char t[160];
+        _snprintf_s(t, sizeof t, _TRUNCATE, "%s above you. ", r->height_under);
+        append(out, out_sz, &used, t);
+    }
+
     // Who an ability reaches from here: the game rings them while the move
     // is hovered. Already sentences.
     if (r->reach[0]) {
@@ -261,3 +274,21 @@ void tile_contacts(const TileContact* c, int n, const char* none,
         append(out, out_sz, &used, ".");
     }
 }
+
+void tile_height_step(float delta, char* out, size_t out_sz)
+{
+    const char* way = delta >= 0.0f ? "up" : "down";
+    float d = delta >= 0.0f ? delta : -delta;
+    int halves = (int)(d / 96.0f + 0.5f);          // half storeys
+    if (halves == 0)
+        _snprintf_s(out, out_sz, _TRUNCATE, "A step %s.", way);
+    else if (halves == 1)
+        _snprintf_s(out, out_sz, _TRUNCATE, "Half a storey %s.", way);
+    else if (halves == 2)
+        _snprintf_s(out, out_sz, _TRUNCATE, "One storey %s.", way);
+    else if (halves % 2)
+        _snprintf_s(out, out_sz, _TRUNCATE, "%d and a half storeys %s.", halves / 2, way);
+    else
+        _snprintf_s(out, out_sz, _TRUNCATE, "%d storeys %s.", halves / 2, way);
+}
+
