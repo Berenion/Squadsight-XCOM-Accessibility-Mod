@@ -1776,6 +1776,12 @@ int main(void)
               "several are counted and named, hazards still last");
         r.flanks[0] = 0;
         r.poison = 0;
+        strcpy_s(r.reach, sizeof r.reach, "Medikit reaches White. Arc Thrower reaches Sectoid.");
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "No cover. Seen by 1. Medikit reaches White. Arc Thrower reaches "
+                          "Sectoid.") == 0,
+              "the rings a tile is inside follow the exposure");
+        r.reach[0] = 0;
 
         // The checks below carry `r` on from here, so the exposure is put
         // back before they read it.

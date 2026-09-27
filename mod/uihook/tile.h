@@ -102,6 +102,11 @@ typedef struct {
     // Sectoid, Muton". Empty for none. The game's own mark -- see
     // tile_exposure in main.c.
     char flanks[96];
+    // The rings the game draws round units while a move is hovered
+    // (XGUnit.DrawRanges) that this tile lies inside, as sentences:
+    // "Medikit reaches White. Arc Thrower reaches Sectoid." Empty for none.
+    // See tile_rings in main.c.
+    char reach[192];
 } TileReport;
 
 // "Dash. High cover north. Low cover east and west. Smoke." -- or "No cover."

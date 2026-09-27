@@ -162,6 +162,13 @@ void tile_describe(const TileReport* r, char* out, size_t out_sz)
         append(out, out_sz, &used, t);
     }
 
+    // Who an ability reaches from here: the game rings them while the move
+    // is hovered. Already sentences.
+    if (r->reach[0]) {
+        append(out, out_sz, &used, r->reach);
+        append(out, out_sz, &used, " ");
+    }
+
     if (r->smoke)  append(out, out_sz, &used, "Smoke. ");
     if (r->poison) append(out, out_sz, &used, "Poison. ");
 

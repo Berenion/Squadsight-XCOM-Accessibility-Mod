@@ -6863,6 +6863,71 @@ static int tile_flanks(void* soldier, void* enemy, const float* eloc, const floa
     return flanked_by(enemy, NULL, soldier, flat, 0) != 0;
 }
 
+// The rings the game draws while a move is hovered. XGAction_Path calls
+// XGUnit.DrawRanges(cursor) on every update, which puts a ring round each unit
+// the selected soldier could reach with an ability -- the medikit (heal,
+// revive) and the Arc Thrower (stun, a drone hack, a SHIV repair) round squad
+// members and seen enemies, Close and Personal round seen enemies, the
+// civilian rescue ring on a terror mission -- sized to the ability's range:
+//     XComUnitPawn.AttachRangeIndicator(fDiameter, kMesh):
+//         RangeIndicator.SetStaticMesh(kMesh)       -- which ring
+//         RangeIndicator.SetScale(fDiameter / 512)  -- how wide
+//         RangeIndicator.SetHidden(false)
+// and DetachRangeIndicator only hides it. The sighted player sees whether the
+// hovered tile falls inside a ring. So the rings are read as drawn, not worked
+// out again: a unit whose indicator is showing, with one of the pawn's four
+// ring meshes, and the tile within scale * 256 of the unit on the ground.
+// The medikit ring is one mesh for heal, revive and repair, and the Arc
+// Thrower ring one for stun and hack, so the ring is named, not the ability.
+static FieldSlot g_pawn_ring, g_ring_mesh, g_ring_scale;
+static FieldSlot g_ring_kind[4];
+static const char* const RING_FIELD[4] = { "MedikitRing", "ArcThrowerRing",
+                                           "CloseAndPersonalRing", "CivilianRescueRing" };
+static const char* const RING_SAY[4] = { "Medikit reaches %s.", "Arc Thrower reaches %s.",
+                                         "Close and Personal on %s.", "Rescues %s." };
+
+static void tile_rings(const float* here, char* out, size_t out_sz)
+{
+    out[0] = 0;
+    size_t used = 0;
+    void* squad = squad_player();
+    void* soldier = NULL;
+    cursor_chained_pawn(&soldier);
+    for (int i = 0; i < g_nunits; i++) {
+        UnitSeen s;
+        if (!unit_seen(&g_units[i], squad, &s)) continue;
+        if (s.pawn == soldier) continue;            // the kinetic strike and flamer cards
+        const void* v;
+        if (!field_ptr(s.pawn, "RangeIndicator", &g_pawn_ring, sizeof(void*), &v)) continue;
+        void* comp = *(void* const*)v;
+        if (!comp || !unit_is_live(comp)) continue;
+        const void* hidden_prop = object_field_prop(comp, "HiddenGame");
+        int hidden = 1;
+        if (!hidden_prop || !props_read_object_bool(hidden_prop, (const uint8_t*)comp, &hidden) ||
+            hidden)
+            continue;
+        if (!field_ptr(comp, "StaticMesh", &g_ring_mesh, sizeof(void*), &v)) continue;
+        void* mesh = *(void* const*)v;
+        if (!mesh) continue;
+        int kind = -1;
+        for (int k = 0; k < 4 && kind < 0; k++)
+            if (field_ptr(s.pawn, RING_FIELD[k], &g_ring_kind[k], sizeof(void*), &v) &&
+                *(void* const*)v == mesh)
+                kind = k;
+        if (kind < 0) continue;
+        if (!field_ptr(comp, "Scale", &g_ring_scale, sizeof(float), &v)) continue;
+        float radius = *(const float*)v * 256.0f;
+        float dx = here[0] - s.loc[0], dy = here[1] - s.loc[1];
+        if (!(radius > 0.0f) || dx * dx + dy * dy > radius * radius) continue;
+        char name[96], one[160];
+        unit_label(s.who, name, sizeof name);
+        _snprintf_s(one, sizeof one, _TRUNCATE, RING_SAY[kind], name);
+        int w = _snprintf_s(out + used, out_sz - used, _TRUNCATE, "%s%s", used ? " " : "", one);
+        if (w < 0) break;
+        used += (size_t)w;
+    }
+}
+
 static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
                           int has_cover, const float* here, TileReport* r)
 {
@@ -7022,6 +7087,7 @@ static int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     r.poison = poison ? poison(world, NULL, tx, ty, tz) != 0 : 0;
     float here[3] = { x, y, floor };
     tile_exposure(tx, ty, tz, &cp, has_cover, here, &r);
+    tile_rings(here, r.reach, sizeof r.reach);
     int cost = -1, std = -1, maxc = -1, moves = -1, turns = 0;
     int reach = with_dash ? tile_dash(&cost, &std, &maxc, &moves, &turns) : -1;
     r.dash = reach == 1;
@@ -7037,11 +7103,12 @@ static int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     // asked about -- and on the layer this file worked out for smoke.
     logf_("tile: %d, %d floor %.1f (layer %d): cover %s flags 0x%05X at %d, %d, %d; "
           "path cost %d, standard move %d, max %d, moves made %d, turns %d, smoke %d, "
-          "poison %d, seen by %d of %d known%s%s%s -> \"%s\"\n",
+          "poison %d, seen by %d of %d known%s%s%s%s%s -> \"%s\"\n",
           tx, ty, floor, tz, has_cover ? "yes" : "no", (unsigned)cp.flags,
           cp.x, cp.y, cp.z, cost, std, maxc, moves, turns, r.smoke, r.poison,
           r.seen_by, r.enemies_known, r.flanked ? ", flanked" : "",
-          r.flanks[0] ? ", flanks " : "", r.flanks, say);
+          r.flanks[0] ? ", flanks " : "", r.flanks,
+          r.reach[0] ? ", rings " : "", r.reach, say);
     return 1;
 }
 
