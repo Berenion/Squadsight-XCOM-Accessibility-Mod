@@ -542,6 +542,28 @@ static void hire_text(const char* in, char* out, size_t out_sz)
     out[w] = 0;
 }
 
+// The finance statement (UIBaseFinances), a line at a time for the arrows,
+// which the screen ignores: only Enter (nothing) and Escape (leave) have
+// cases. See the handler in capture_body.
+#define FIN_LINES 16
+static char g_fin[FIN_LINES][512];
+static int  g_fin_n, g_fin_at;
+static char g_fin_said[FIN_LINES * 128];
+
+static void fin_walk(LONG n, const char* screen, int down)
+{
+    if (!g_fin_n) return;
+    const char* edge = "";
+    g_fin_at += down ? 1 : -1;
+    if (g_fin_at >= g_fin_n) { g_fin_at = g_fin_n - 1; edge = "End. "; }
+    if (g_fin_at < 0)        { g_fin_at = 0;           edge = "Top. "; }
+    char say[600];
+    _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s", edge, g_fin[g_fin_at]);
+    logf_("[%ld] Input        %s  FINANCES %d \"%s\"\n", n, screen, g_fin_at, say);
+    speech_cancel_pending();
+    if (g_speak) speech_say_now(say);
+}
+
 // Whether the build queue is taking the arrows (Review an order): only then
 // is its selection a move to say.
 static int       g_queue_editing;
@@ -2442,6 +2464,85 @@ static void capture_body(const char* tag, LONG n, void* stack)
             logf_("[%ld] %s %s.%s  TMM %d \"%.200s\"\n", n, tag, obj_name, fn_name, i, say);
             speech_cancel_pending();
             if (g_speak && !muted()) speech_say_now(say);
+            return;
+        }
+    }
+
+    // The finance statement (UIBaseFinances, Situation Room -> View XCOM
+    // Finances). UpdateData draws it whole, twice on arrival:
+    //     AS_SetTitle("CASH FLOW STATEMENT")
+    //     AS_SetNet("NET MONTHLY INCOME: +§265")
+    //     AS_SetSection(0, "GROSS MONTHLY INCOME", "+§375", "", "")
+    //     AS_SetSection(i, heading, total, labels, values) per section, the
+    //         items as "2x Interceptor\n1x Skyranger\n" beside "-§40\n-§20\n"
+    // and takes no arrows. Nothing was said (log of 2026-09-25). Each line is
+    // kept -- a section with its items paired to their costs -- the whole
+    // statement is said once the calls stop, and the arrows walk it
+    // (fin_walk).
+    if (strncmp(obj_name, "UIBaseFinances", 14) == 0) {
+        static char s_netline[256];
+        static void* s_obj;                 // a new visit is said again
+        if (object != s_obj) { s_obj = object; g_fin_said[0] = 0; }
+        char t[512];
+        if (strcmp(fn_name, "AS_SetTitle") == 0) {
+            frame_string(node, locals, 0, t, sizeof t);
+            g_fin_n = 0;
+            g_fin_at = -1;
+            if (t[0]) _snprintf_s(g_fin[g_fin_n++], sizeof g_fin[0], _TRUNCATE, "%s.", t);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetNet") == 0) {
+            frame_string(node, locals, 0, t, sizeof t);
+            hire_text(t, s_netline, sizeof s_netline);
+            if (s_netline[0] && g_fin_n < FIN_LINES)
+                _snprintf_s(g_fin[g_fin_n++], sizeof g_fin[0], _TRUNCATE, "%s.", s_netline);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetSection") == 0) {
+            char head[128], total[128], sum[128];
+            frame_string(node, locals, 0, head, sizeof head);
+            frame_string(node, locals, 1, t, sizeof t);
+            hire_text(t, total, sizeof total);
+            if (!head[0] || g_fin_n >= FIN_LINES) return;      // an empty section
+            static char labels[FRAME_ARG_TEXT], values[FRAME_ARG_TEXT];
+            if (!frame_local_raw(node, locals, "Label", labels, sizeof labels)) labels[0] = 0;
+            if (!frame_local_raw(node, locals, "Value", values, sizeof values)) values[0] = 0;
+            char* line = g_fin[g_fin_n++];
+            size_t used = (size_t)_snprintf_s(line, sizeof g_fin[0], _TRUNCATE, "%s: %s.", head,
+                                              total);
+            char* lctx = NULL;
+            char* vctx = NULL;
+            char* l = strtok_s(labels, "\n", &lctx);
+            char* v = strtok_s(values, "\n", &vctx);
+            for (; l && used < sizeof g_fin[0]; l = strtok_s(NULL, "\n", &lctx),
+                                                v = v ? strtok_s(NULL, "\n", &vctx) : NULL) {
+                strip_markup(l);
+                sum[0] = 0;
+                if (v) { strip_markup(v); hire_text(v, sum, sizeof sum); }
+                int w = _snprintf_s(line + used, sizeof g_fin[0] - used, _TRUNCATE, " %s%s%s.",
+                                    l, sum[0] ? ": " : "", sum);
+                if (w < 0) break;
+                used += (size_t)w;
+            }
+            // Said once the draw stops: each section puts it back.
+            static char say[FIN_LINES * 128];
+            say[0] = 0;
+            size_t u = 0;
+            for (int i = 0; i < g_fin_n; i++) {
+                int w = _snprintf_s(say + u, sizeof say - u, _TRUNCATE, "%s%s", u ? " " : "",
+                                    g_fin[i]);
+                if (w < 0) break;
+                u += (size_t)w;
+            }
+            if (strcmp(say, g_fin_said) != 0) {
+                strncpy_s(g_fin_said, sizeof g_fin_said, say, _TRUNCATE);
+                if (u < sizeof say)
+                    _snprintf_s(say + u, sizeof say - u, _TRUNCATE,
+                                " Up and Down read it a line at a time. Escape: back.");
+                logf_("[%ld] %s %s.%s  FINANCES \"%s\"\n", n, tag, obj_name, fn_name, say);
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_after(say, SETTLE_MS);
+            }
             return;
         }
     }
@@ -5240,6 +5341,11 @@ static int rewrite_cmd(LONG n, void* stack)
     if (press && (cmd == FXS_ARROW_UP || cmd == FXS_ARROW_DOWN) &&
         strncmp(screen, "UIEndOfMonthReport", 18) == 0)
         eom_walk(n, screen, cmd == FXS_ARROW_DOWN);
+
+    // Up or Down on the finance statement walks it. See fin_walk.
+    if (press && (cmd == FXS_ARROW_UP || cmd == FXS_ARROW_DOWN) &&
+        strncmp(screen, "UIBaseFinances", 14) == 0)
+        fin_walk(n, screen, cmd == FXS_ARROW_DOWN);
 
     // Left in the loadout's locker. See loadout_leave_locker.
     if (cmd == FXS_ARROW_LEFT && strncmp(screen, "UISoldierLoadout", 16) == 0)
