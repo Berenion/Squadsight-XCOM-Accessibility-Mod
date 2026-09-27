@@ -78,7 +78,6 @@
 #define MAX_FIELDS  64
 #define MAX_ELEMS   64      // array elements inspected per property
 
-static FILE*            g_log;
 static CRITICAL_SECTION g_lock;
 static volatile LONG    g_calls;
 static int              g_speak = 1;
@@ -91,23 +90,210 @@ static long g_repeat;
 static ULONGLONG g_repeat_since;
 static char g_last_spoken[MAX_STR];
 
-// The log is flushed per line on purpose: it is the one part of this mod its
-// user cannot read, so it has to survive a crash and stay readable while the
-// game runs. What was not on purpose was OutputDebugStringA beside it --
-// every call takes the machine-wide DBWinMutex, and the battle hooks emit a
-// line per flag per frame, so the game's UI thread was queueing on a global
-// lock thousands of times a mission to write to a debugger nobody had
-// attached. The log file says everything the debug channel did.
+// The log. It is the one part of this mod its user cannot read, so it has to
+// survive a crash and stay readable while the game runs -- and it is written
+// from the game's own UI thread, a line per call.
+//
+// It used to be flushed per line, which met both needs and cost a WriteFile
+// on the game thread for every line: the 2026-09-25 mission log had 37,275
+// call lines, 16,243 of them UIUnitFlag.SetPosition. (OutputDebugStringA
+// beside it was worse still -- every call took the machine-wide DBWinMutex --
+// and went long ago.)
+//
+// So a line is only copied into memory here, and log_writer puts it in the
+// file every LOG_FLUSH_MS from a thread of its own. The two needs are kept
+// another way:
+//   - Readable while running: the file is shared for reading, and at most
+//     LOG_FLUSH_MS behind.
+//   - A crash: what WriteFile has handed the system survives the process, so
+//     only the buffer is at risk, and log_on_crash writes it out on the first
+//     sign of a fatal exception, before any handler runs. A clean exit writes
+//     it from DllMain.
+#define LOG_BUF      (256 * 1024)
+#define LOG_FLUSH_MS 200
+
+static HANDLE           g_log = INVALID_HANDLE_VALUE;
+static char             g_log_buf[2][LOG_BUF];
+static size_t           g_log_n;            // bytes waiting in g_log_buf[g_log_cur]
+static int              g_log_cur;
+static long             g_log_dropped;      // lines that found the buffer full
+static CRITICAL_SECTION g_log_write;        // one WriteFile at a time, in order
+static HANDLE           g_log_wake;
+
+// Under g_lock. A line that does not fit is counted rather than written from
+// here: writing needs g_log_write, which log_flush takes before g_lock.
 static void emit(const char* line)
 {
-    if (!g_log) return;
-    fputs(line, g_log);
-    fflush(g_log);
+    if (g_log == INVALID_HANDLE_VALUE) return;
+    size_t len = strlen(line);
+    if (g_log_n + len > LOG_BUF) {
+        g_log_dropped++;
+        SetEvent(g_log_wake);
+        return;
+    }
+    memcpy(g_log_buf[g_log_cur] + g_log_n, line, len);
+    g_log_n += len;
+    if (g_log_n > LOG_BUF / 2) SetEvent(g_log_wake);
+}
+
+static void log_write(const char* data, size_t n)
+{
+    DWORD wrote;
+    if (n) WriteFile(g_log, data, (DWORD)n, &wrote, NULL);
+}
+
+// Hands the filled buffer over and writes it outside g_lock, so the game
+// thread waits only for the swap. Lock order: g_log_write, then g_lock.
+static void log_flush(void)
+{
+    if (g_log == INVALID_HANDLE_VALUE) return;
+    EnterCriticalSection(&g_log_write);
+    EnterCriticalSection(&g_lock);
+    const char* data = g_log_buf[g_log_cur];
+    size_t n = g_log_n;
+    long dropped = g_log_dropped;
+    g_log_cur ^= 1;
+    g_log_n = 0;
+    g_log_dropped = 0;
+    LeaveCriticalSection(&g_lock);
+    log_write(data, n);
+    if (dropped) {
+        char note[96];
+        int w = _snprintf_s(note, sizeof note, _TRUNCATE,
+                            "log: %ld lines lost -- the buffer was full\n", dropped);
+        if (w > 0) log_write(note, (size_t)w);
+    }
+    LeaveCriticalSection(&g_log_write);
+}
+
+static DWORD WINAPI log_writer(LPVOID param)
+{
+    (void)param;
+    for (;;) {
+        WaitForSingleObject(g_log_wake, LOG_FLUSH_MS);
+        log_flush();
+    }
+}
+
+// The exceptions that end a process when nobody handles them. Vectored, so
+// it runs first -- before the game's own crash handler, and before the
+// __try blocks of this DLL, which catch access violations of their own and
+// cost one early write each; they are rare. Locks are only tried: the thread
+// that faulted may hold one, and a crash must not become a hang. Waits up to
+// ~50 ms for a write already under way, so the file stays in order.
+static LONG CALLBACK log_on_crash(EXCEPTION_POINTERS* info)
+{
+    switch (info->ExceptionRecord->ExceptionCode) {
+    case EXCEPTION_ACCESS_VIOLATION:
+    case EXCEPTION_STACK_OVERFLOW:
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+    case EXCEPTION_PRIV_INSTRUCTION:
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+    case EXCEPTION_IN_PAGE_ERROR:
+    case EXCEPTION_NONCONTINUABLE_EXCEPTION:
+    case 0xC0000409:    // STATUS_STACK_BUFFER_OVERRUN, /GS and fast-fail
+        break;
+    default:
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if (g_log == INVALID_HANDLE_VALUE) return EXCEPTION_CONTINUE_SEARCH;
+    int got = 0;
+    for (int i = 0; i < 50 && !(got = TryEnterCriticalSection(&g_log_write)); i++)
+        Sleep(1);
+    if (!got) return EXCEPTION_CONTINUE_SEARCH;
+    if (TryEnterCriticalSection(&g_lock)) {
+        log_write(g_log_buf[g_log_cur], g_log_n);
+        g_log_n = 0;
+        LeaveCriticalSection(&g_lock);
+    }
+    LeaveCriticalSection(&g_log_write);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// At process exit the writer thread is already gone, and whatever lock it
+// held is held for good -- so nothing is taken, and what is waiting is
+// written as it is.
+static void log_on_exit(void)
+{
+    if (g_log == INVALID_HANDLE_VALUE) return;
+    log_write(g_log_buf[g_log_cur], g_log_n);
+    g_log_n = 0;
+}
+
+// Opens the log beside the game exe, shared for reading so it can be tailed.
+static void log_open(const char* path)
+{
+    HANDLE h = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    InitializeCriticalSection(&g_log_write);
+    g_log_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
+    // No writer, no log: every line would sit in the buffer until it filled.
+    if (!g_log_wake) { CloseHandle(h); return; }
+    g_log = h;
+    if (!CreateThread(NULL, 0, log_writer, NULL, 0, NULL)) {
+        g_log = INVALID_HANDLE_VALUE;
+        CloseHandle(h);
+        return;
+    }
+    AddVectoredExceptionHandler(1, log_on_crash);
+}
+
+// Calls that arrive every frame and that nothing here reads: where each
+// flag, message and the reticle sit on screen, and the radar's blips. They
+// were most of the log -- UIUnitFlag.SetPosition alone was 16,243 of 37,275
+// call lines on 2026-09-25 -- and buried the calls around them. Counted,
+// and the counts logged every LOG_FRAME_MS instead. Only the log line is
+// skipped: the call is handled as before.
+#define LOG_FRAME_MS 10000
+static const char* const k_frame_calls[][2] = {
+    { "UIUnitFlag_",          "SetPosition" },
+    { "UITacticalHUD_Radar_", "AS_UpdateBlips" },
+    { "UIWorldMessageMgr_",   "UpdateMessageLocation" },
+    { "UITargetingReticle_",  "SetLoc" },
+};
+#define LOG_FRAME_KINDS ((int)(sizeof k_frame_calls / sizeof k_frame_calls[0]))
+
+static void logf_(const char* fmt, ...);
+
+static int log_frame_call(const char* obj, const char* fn)
+{
+    static long      counts[LOG_FRAME_KINDS];
+    static ULONGLONG since;
+    int hit = -1;
+    for (int i = 0; i < LOG_FRAME_KINDS && hit < 0; i++)
+        if (strcmp(fn, k_frame_calls[i][1]) == 0 &&
+            strncmp(obj, k_frame_calls[i][0], strlen(k_frame_calls[i][0])) == 0)
+            hit = i;
+    if (hit < 0) return 0;
+    counts[hit]++;
+    ULONGLONG now = GetTickCount64();
+    if (!since) since = now;
+    if (now - since >= LOG_FRAME_MS) {
+        char line[256];
+        size_t used = 0;
+        line[0] = 0;
+        for (int i = 0; i < LOG_FRAME_KINDS; i++) {
+            if (!counts[i]) continue;
+            // "UIUnitFlag.SetPosition": the prefix without its underscore.
+            int w = _snprintf_s(line + used, sizeof line - used, _TRUNCATE, "%s%.*s.%s %ld",
+                                used ? ", " : "",
+                                (int)strlen(k_frame_calls[i][0]) - 1, k_frame_calls[i][0],
+                                k_frame_calls[i][1], counts[i]);
+            if (w < 0) break;
+            used += (size_t)w;
+            counts[i] = 0;
+        }
+        logf_("log: per-frame calls, not logged, over %u s: %s\n",
+              (unsigned)((now - since) / 1000), line);
+        since = now;
+    }
+    return 1;
 }
 
 static void logf_(const char* fmt, ...)
 {
-    if (!g_log) return;
+    if (g_log == INVALID_HANDLE_VALUE) return;
     char line[MAX_STR + 256];
     va_list ap;
     va_start(ap, fmt);
@@ -5016,8 +5202,9 @@ static void capture_body(const char* tag, LONG n, void* stack)
     // cancel it: it was said after every move (log of 2026-09-27).
     if (strcmp(fn_name, "AS_SetButtonType") == 0) return;
 
-    for (int i = 0; i < p->nstrings; i++)
-        logf_("[%ld] %s %s.%s  \"%s\"\n", n, tag, obj_name, fn_name, p->strings[i]);
+    if (!log_frame_call(obj_name, fn_name))
+        for (int i = 0; i < p->nstrings; i++)
+            logf_("[%ld] %s %s.%s  \"%s\"\n", n, tag, obj_name, fn_name, p->strings[i]);
 
     ULONGLONG now = GetTickCount64();
     // Compare against the last call that actually carried text, not the last
@@ -5162,7 +5349,8 @@ static void capture_body(const char* tag, LONG n, void* stack)
         for (int i = 0; i < p->nnumbers && used + 12 < sizeof nums; i++)
             used += (size_t)_snprintf_s(nums + used, sizeof nums - used, _TRUNCATE,
                                         i ? ", %d" : "%d", (int)p->numbers[i]);
-        logf_("[%ld] %s %s.%s  NUMS %s\n", n, tag, obj_name, fn_name, nums);
+        if (!log_frame_call(obj_name, fn_name))
+            logf_("[%ld] %s %s.%s  NUMS %s\n", n, tag, obj_name, fn_name, nums);
     }
 
     if (p->nstrings) {
@@ -13603,9 +13791,7 @@ static DWORD WINAPI init(LPVOID param)
     char* slash = strrchr(path, '\\');
     if (slash) *(slash + 1) = 0;
     strcat_s(path, MAX_PATH, "xcom_uihook.log");
-    // NB: fopen_s opens exclusively, which would lock the log for the whole
-    // session; _SH_DENYWR keeps it readable while the game runs.
-    g_log = _fsopen(path, "w", _SH_DENYWR);
+    log_open(path);
 
     HMODULE mod = GetModuleHandleA(NULL);
     logf_("xcom_uihook: module base %p\n", (void*)mod);
@@ -13793,6 +13979,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         g_self = inst;
         DisableThreadLibraryCalls(inst);
         CreateThread(NULL, 0, init, NULL, 0, NULL);   // stay off the loader lock
+    } else if (reason == DLL_PROCESS_DETACH) {
+        log_on_exit();
     }
     return TRUE;
 }
