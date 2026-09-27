@@ -2368,6 +2368,84 @@ static void capture_body(const char* tag, LONG n, void* stack)
         return;
     }
 
+    // The XCOM Database (UITellMeMore, the pause menu's "XCOM Database"). A
+    // list of sections, each followed by its topics while it is open:
+    //     AS_SetTitle("XCOM Database"), AS_SetAudioButtonText, AS_ClearList,
+    //     Invoke("clear") -- logged under UpdateLayout --, then
+    //     AS_AddOption(i, label, 0) per row: a section drawn in
+    //         GetHTMLColoredText's state 2 (green), a topic in 0
+    //     and a selection (RealizeSelected):
+    //     AS_SetAudioButtonText("Play Audio" / "Stop Audio" on a topic,
+    //         "Expand Menu" / "Collapse Menu" on a section)
+    //     AS_UpdateInfo(topic, text, image) -- empty on a section
+    //     Invoke("setFocus", "i") -- the index as a string, logged under
+    //         RealizeSelected
+    // Up/Down wrap, Enter opens or closes a section (the list is drawn again)
+    // or plays a topic's narration, Escape leaves. It opens on the section of
+    // the facility it was called from. On the general path the audio
+    // button's one string was taken for a list and replaced the topics, so
+    // every move said "FOCUS n unresolved" or the button's label.
+    if (strncmp(obj_name, "UITellMeMore", 12) == 0) {
+        #define TMM_ROWS 256
+        static char s_title[96], s_btn[64], s_topic[256], s_text[4096];
+        static char s_row[TMM_ROWS][96];
+        static unsigned char s_head[TMM_ROWS];
+        static int  s_n, s_fresh;
+        static void* s_obj;
+        if (object != s_obj) { s_obj = object; s_fresh = 1; s_n = 0; }
+        if (strcmp(fn_name, "AS_SetTitle") == 0) {
+            frame_string(node, locals, 0, s_title, sizeof s_title);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetAudioButtonText") == 0) {
+            frame_string(node, locals, 0, s_btn, sizeof s_btn);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetBackButtonText") == 0) return;
+        if (strcmp(fn_name, "AS_ClearList") == 0 || strcmp(fn_name, "UpdateLayout") == 0) {
+            s_n = 0;
+            return;
+        }
+        if (strcmp(fn_name, "AS_AddOption") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (i < 0 || i >= TMM_ROWS) return;
+            static char raw[FRAME_ARG_TEXT];
+            frame_string(node, locals, 0, s_row[i], sizeof s_row[i]);
+            s_head[i] = frame_local_raw(node, locals, "sLabel", raw, sizeof raw) &&
+                        font_hue(raw) == 0x5CD16C;
+            if (i >= s_n) s_n = i + 1;
+            return;
+        }
+        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
+            frame_string(node, locals, 0, s_topic, sizeof s_topic);
+            frame_string(node, locals, 1, s_text, sizeof s_text);
+            return;
+        }
+        if (strcmp(fn_name, "RealizeSelected") == 0) {
+            int i;
+            if (!string_index(p, &i) || i < 0 || i >= s_n) return;
+            // "Expand Menu" means the section is shut.
+            int shut = strstr(s_btn, "Expand") != NULL;
+            static char say[4096 + 512];
+            if (s_head[i])
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s, %s.%s", s_fresh ? s_title : "",
+                            s_fresh && s_title[0] ? ". " : "", s_row[i],
+                            shut ? "closed" : "open",
+                            s_fresh ? " Up and Down choose, Enter opens or closes a section, "
+                                      "and on a topic plays its narration." : "");
+            else
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s. %s%s", s_fresh ? s_title : "",
+                            s_fresh && s_title[0] ? ". " : "",
+                            s_topic[0] ? s_topic : s_row[i], s_text,
+                            s_fresh ? " Up and Down choose, Enter plays the narration." : "");
+            s_fresh = 0;
+            logf_("[%ld] %s %s.%s  TMM %d \"%.200s\"\n", n, tag, obj_name, fn_name, i, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return;
+        }
+    }
+
     // Build Items. UpdateLayout sends the heading and column labels
     // (AS_SetLabels(title, "ITEM", "BUILT")), the tabs' states, clears the
     // list (Invoke "clear") and fills it in one Invoke("BatchAddOptions",
