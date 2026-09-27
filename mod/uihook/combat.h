@@ -51,3 +51,9 @@ void combat_turn_reset(void);
 // "No HP left." Returns 0 when the flag shows none (-1: "show enemy health"
 // is off, which is the screen saying nothing).
 int combat_hp(int hp, int hp_max, char* out, size_t out_sz);
+
+// What a hovered unit's name is followed by: its hit points as the flag shows
+// them, and for a seen enemy whether it is on overwatch -- ", 3 of 4 HP, on
+// overwatch". Empty when there is neither (the flag shows no HP with the
+// game's "show enemy health" off, and then nothing is said of it).
+void combat_unit_state(int hp, int hp_max, int overwatch, char* out, size_t out_sz);

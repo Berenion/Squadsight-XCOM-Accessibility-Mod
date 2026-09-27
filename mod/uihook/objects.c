@@ -51,6 +51,12 @@ static Region g_regions[REGION_CACHE];
 static int    g_region_next;
 static int    g_region_hot;         // the one the last call was answered from
 
+// The region cache and the walks' own caches are shared, and the walks are
+// no longer the game thread's alone: the native hooks are installed by
+// finding their UFunctions in this table, and when the table is not there yet
+// at attach that happens later, from the review thread. One walk at a time.
+static SRWLOCK g_walk_lock = SRWLOCK_INIT;
+
 static void region_forget(void)
 {
     memset(g_regions, 0, sizeof g_regions);
@@ -276,11 +282,25 @@ static void class_remember(const char* name, const void* cls)
 
 #define CLASS_BATCH 8
 
+static void classes_locked(const char* const* names, const void** out, int n);
+
 void objects_classes(const char* const* names, const void** out, int n)
+{
+    AcquireSRWLockExclusive(&g_walk_lock);
+    classes_locked(names, out, n);
+    ReleaseSRWLockExclusive(&g_walk_lock);
+}
+
+static void classes_locked(const char* const* names, const void** out, int n)
 {
     if (n > CLASS_BATCH) n = CLASS_BATCH;
     for (int i = 0; i < n; i++) out[i] = NULL;
     if (!g_objs || !names) return;
+    // Until the first UI call has settled UObject::Class (props_init), no
+    // class can be recognised as one, and a pass now would cache "no such
+    // class" for good. The hooks' UFunction pass asks this at attach, before
+    // any UI call has been seen.
+    if (!props_class_offset()) return;
 
     // Anything already known is answered from the cache, and only what is left
     // is worth a pass.
@@ -393,8 +413,20 @@ static int is_default_object(void* obj)
     return strncmp(name, "Default__", 9) == 0;
 }
 
+static int each_from_locked(const void* const* classes, int n, int from, int* next,
+                            ObjectVisitFn fn, void* ctx);
+
 int objects_each_from(const void* const* classes, int n, int from, int* next,
                       ObjectVisitFn fn, void* ctx)
+{
+    AcquireSRWLockExclusive(&g_walk_lock);
+    int seen = each_from_locked(classes, n, from, next, fn, ctx);
+    ReleaseSRWLockExclusive(&g_walk_lock);
+    return seen;
+}
+
+static int each_from_locked(const void* const* classes, int n, int from, int* next,
+                            ObjectVisitFn fn, void* ctx)
 {
     if (next) *next = from;
     if (!g_objs || !fn || !classes || n <= 0) return -1;
@@ -490,9 +522,11 @@ int objects_still(void* obj, int idx, const void* const* classes, int n)
 
     void** data = (void**)g_objs->Data;
     if (!data || idx >= g_objs->Num) return 0;
-    if (!region_ok(&data[idx], sizeof(void*)) || data[idx] != obj) return 0;
-    if (!region_ok(obj, 0x60)) return 0;
-
-    return decide(obj, classes, n, class_off, super_off, NULL,
-                  class_off + sizeof(void*) <= 0x60) >= 0;
+    AcquireSRWLockExclusive(&g_walk_lock);
+    int still = region_ok(&data[idx], sizeof(void*)) && data[idx] == obj &&
+                region_ok(obj, 0x60) &&
+                decide(obj, classes, n, class_off, super_off, NULL,
+                       class_off + sizeof(void*) <= 0x60) >= 0;
+    ReleaseSRWLockExclusive(&g_walk_lock);
+    return still;
 }

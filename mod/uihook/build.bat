@@ -8,16 +8,13 @@ call "%VS%\VC\Auxiliary\Build\vcvars32.bat" >nul 2>&1
 if errorlevel 1 (echo Could not initialise the 32-bit MSVC environment & exit /b 1)
 
 set HERE=%~dp0
-set MH=%HERE%..\..\tools\vendor\MinHook
 set OUT=%HERE%build
 if not exist "%OUT%" mkdir "%OUT%"
 pushd "%OUT%"
 
 cl /nologo /W3 /O2 /MT /LD ^
-   /I"%MH%\include" /I"%MH%\src" ^
    "%HERE%main.c" "%HERE%natives.c" "%HERE%names.c" "%HERE%speech.c" "%HERE%focus.c" "%HERE%dialog.c" "%HERE%help.c" "%HERE%shot.c" "%HERE%combat.c" "%HERE%history.c" "%HERE%soldier.c" "%HERE%info.c" "%HERE%sight.c" "%HERE%mission.c" "%HERE%abar.c" "%HERE%hq.c" "%HERE%cursor.c" "%HERE%nav.c" "%HERE%tile.c" "%HERE%sonar.c" "%HERE%audio.c" "%HERE%learn.c" ^
    "%HERE%props.c" "%HERE%input.c" "%HERE%scan.c" "%HERE%objects.c" "%HERE%settings.c" "%HERE%heart.c" "%HERE%mouse.c" ^
-   "%MH%\src\hook.c" "%MH%\src\buffer.c" "%MH%\src\trampoline.c" "%MH%\src\hde\hde32.c" ^
    /Fe:xcom_uihook.dll ^
    /link /OUT:xcom_uihook.dll /MAP:xcom_uihook.map ole32.lib oleaut32.lib sapi.lib user32.lib winmm.lib
 if errorlevel 1 (popd & echo DLL BUILD FAILED & exit /b 1)

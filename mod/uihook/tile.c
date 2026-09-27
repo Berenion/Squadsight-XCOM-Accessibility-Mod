@@ -153,6 +153,15 @@ void tile_describe(const TileReport* r, char* out, size_t out_sz)
         }
     }
 
+    // The other side of flanking: the game marks a seen enemy the hovered
+    // tile would flank (XComActionIconManager.AddFlankingIcons), so it is
+    // said with the exposure it answers.
+    if (r->flanks[0]) {
+        char t[128];
+        _snprintf_s(t, sizeof t, _TRUNCATE, "Flanks %s. ", r->flanks);
+        append(out, out_sz, &used, t);
+    }
+
     if (r->smoke)  append(out, out_sz, &used, "Smoke. ");
     if (r->poison) append(out, out_sz, &used, "Poison. ");
 

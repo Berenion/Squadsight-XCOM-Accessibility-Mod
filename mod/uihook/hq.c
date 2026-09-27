@@ -340,10 +340,17 @@ static char g_res[HQ_RESOURCES][64];
 static int  g_nres;
 static char g_date[64];
 static char g_human[64];               // "ENGINEERS: 10" (hq_status_human)
+// Two panels draw the events: Mission Control's, which redraws while it is
+// shown whenever the events change, and the base screen's, which redraws only
+// when that screen takes focus. Each is kept as it last drew, and the status
+// reads the one drawn last. It read the longer one, and a list drawn before
+// the council report came in outlived it: "Council Report, 3 days" on the day
+// after the report (log of 2026-09-27).
 typedef struct {
     const void* list;
     char        ev[HQ_EVENTS][96];
     int         n;
+    ULONGLONG   at;         // when it last drew, 0 never
 } EventList;
 static EventList g_evl[2];
 
@@ -404,16 +411,19 @@ static EventList* evl_for(const void* list)
 {
     for (int i = 0; i < 2; i++) if (g_evl[i].list == list) return &g_evl[i];
     EventList* e = !g_evl[0].list ? &g_evl[0] : !g_evl[1].list ? &g_evl[1]
-                 : (g_evl[0].n <= g_evl[1].n ? &g_evl[0] : &g_evl[1]);
+                 : (g_evl[0].at <= g_evl[1].at ? &g_evl[0] : &g_evl[1]);
     e->list = list;
     e->n = 0;
+    e->at = 0;
     return e;
 }
 
 void hq_status_events_clear(const void* list)
 {
     st_lock();
-    evl_for(list)->n = 0;
+    EventList* e = evl_for(list);
+    e->n = 0;
+    e->at = GetTickCount64();
     st_unlock();
 }
 
@@ -423,6 +433,7 @@ void hq_status_event(const void* list, const char* title, const char* unit,
     if (!title || !*title) return;
     st_lock();
     EventList* e = evl_for(list);
+    e->at = GetTickCount64();
     if (e->n < HQ_EVENTS) {
         char u[32];
         // "Days" with a count of 1 reads "1 day".
@@ -454,7 +465,7 @@ int hq_status_line(char* out, size_t out_sz)
     if (!out || !out_sz) return 0;
     out[0] = 0;
     st_lock();
-    const EventList* ev = g_evl[0].n >= g_evl[1].n ? &g_evl[0] : &g_evl[1];
+    const EventList* ev = g_evl[0].at >= g_evl[1].at ? &g_evl[0] : &g_evl[1];
     int any = g_date[0] || g_human[0] || g_nres || ev->n;
     size_t used = 0;
     if (g_date[0]) put_piece(out, out_sz, &used, "", g_date);

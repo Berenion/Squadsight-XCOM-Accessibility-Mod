@@ -98,6 +98,10 @@ typedef struct {
     int enemies_known;  // enemies in sight the exposure was measured against
     int seen_by;        // how many of them can see this tile
     int flanked;        // and at least one of those gets past its cover
+    // The seen enemies a soldier here would flank, named: "Sectoid", "2:
+    // Sectoid, Muton". Empty for none. The game's own mark -- see
+    // tile_exposure in main.c.
+    char flanks[96];
 } TileReport;
 
 // "Dash. High cover north. Low cover east and west. Smoke." -- or "No cover."

@@ -698,6 +698,14 @@ int main(void)
         check(combat_hp(0, 8, say, sizeof say) && strcmp(say, "No HP left.") == 0,
               "none left");
         check(!combat_hp(-1, -1, say, sizeof say), "hidden enemy health says nothing");
+        combat_unit_state(3, 4, 1, say, sizeof say);
+        check(strcmp(say, ", 3 of 4 HP, on overwatch") == 0, "hover: HP and overwatch");
+        combat_unit_state(6, 6, 0, say, sizeof say);
+        check(strcmp(say, ", 6 of 6 HP") == 0, "hover: HP alone");
+        combat_unit_state(-1, -1, 1, say, sizeof say);
+        check(strcmp(say, ", on overwatch") == 0, "hover: hidden health, overwatch still said");
+        combat_unit_state(-1, -1, 0, say, sizeof say);
+        check(say[0] == 0, "hover: nothing to add");
 
         // The turn banner, in the order a mission sends it.
         const char* texts[] = { "ALIEN ACTIVITY", "YOUR TURN", "EXALT TURN",
@@ -1755,6 +1763,20 @@ int main(void)
         check(strcmp(say, "No cover. Seen by 1.") == 0,
               "no cover: flanked is not said");
 
+        // The other side of it: whom a soldier here would flank. Said on
+        // open ground too -- the game marks it wherever the tile is.
+        strcpy_s(r.flanks, sizeof r.flanks, "Sectoid");
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "No cover. Seen by 1. Flanks Sectoid.") == 0,
+              "flanking an enemy follows the exposure");
+        strcpy_s(r.flanks, sizeof r.flanks, "2: Sectoid, Muton");
+        r.poison = 1;
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "No cover. Seen by 1. Flanks 2: Sectoid, Muton. Poison.") == 0,
+              "several are counted and named, hazards still last");
+        r.flanks[0] = 0;
+        r.poison = 0;
+
         // The checks below carry `r` on from here, so the exposure is put
         // back before they read it.
         r.enemies_known = r.seen_by = r.flanked = 0;
@@ -2390,17 +2412,21 @@ int main(void)
         hq_status_resource("CREDITS: \xC2\xA7" "265");
         hq_status_resource("MONTHLY: +\xC2\xA7" "165");
         hq_status_date("1 March", "2015", "1", "5");
-        void* next_list = (void*)0x10;     // "NEXT EVENT": one item
-        void* all_list = (void*)0x20;      // "UPCOMING EVENTS": all of them
-        hq_status_events_clear(all_list);
-        hq_status_event(all_list, "Council Report", "Days", "31");
-        hq_status_event(all_list, "Weapon Fragments", "Days", "1");
-        hq_status_events_clear(next_list);
-        hq_status_event(next_list, "Weapon Fragments", "Days", "1");
+        void* hud_list = (void*)0x10;      // the base screen's "NEXT EVENT"
+        void* mc_list = (void*)0x20;       // Mission Control's "UPCOMING EVENTS"
+        hq_status_events_clear(hud_list);
+        hq_status_event(hud_list, "Council Report", "Days", "31");
+        hq_status_event(hud_list, "Weapon Fragments", "Days", "1");
         check(hq_status_line(pr, sizeof pr) &&
               strcmp(pr, "1 March 2015, 1:05. CREDITS: 265. MONTHLY: +165. "
                          "Council Report, 31 days. Weapon Fragments, 1 day") == 0,
               "the base's status, without the section sign");
+        Sleep(20);                         // GetTickCount64 steps in ~16 ms
+        hq_status_events_clear(mc_list);   // drawn later, the fragments done
+        hq_status_event(mc_list, "Council Report", "Days", "30");
+        check(hq_status_line(pr, sizeof pr) && strstr(pr, "Council Report, 30 days") &&
+              !strstr(pr, "Weapon Fragments"),
+              "the list drawn last is read, not the longer one");
 
         hq_squad_row("SQ. VARGAS", "", "Heavy",
                      "img:///UILibrary_StrategyImages.InventoryIcons.Inv_FragGrenade", "",

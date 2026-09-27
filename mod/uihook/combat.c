@@ -129,3 +129,15 @@ int combat_hp(int hp, int hp_max, char* out, size_t out_sz)
         _snprintf_s(out, out_sz, _TRUNCATE, "%d of %d HP left.", hp, hp_max);
     return 1;
 }
+
+void combat_unit_state(int hp, int hp_max, int overwatch, char* out, size_t out_sz)
+{
+    size_t used = 0;
+    out[0] = 0;
+    if (hp >= 0 && hp_max > 0) {
+        int w = _snprintf_s(out, out_sz, _TRUNCATE, ", %d of %d HP", hp, hp_max);
+        if (w > 0) used = (size_t)w;
+    }
+    if (overwatch && used < out_sz)
+        _snprintf_s(out + used, out_sz - used, _TRUNCATE, ", on overwatch");
+}

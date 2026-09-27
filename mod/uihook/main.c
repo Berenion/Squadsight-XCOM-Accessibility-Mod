@@ -72,7 +72,6 @@
 #include "mouse.h"
 #include "props.h"
 #include "input.h"
-#include "../../tools/vendor/MinHook/include/MinHook.h"
 
 #define MAX_NATIVES 8192
 #define MAX_STR     4096
@@ -399,6 +398,47 @@ static char      g_dialog_said[DIALOG_MAX_TEXT];
 
 // The mission summary on screen, once it has drawn; see msum_screen_up.
 static void*     g_msum_screen;
+
+// The ship summary's two buttons (UIShipSummary.AS_SetWeaponHelp): EDIT
+// LOADOUT and DISMISS SHIP, with whether each is disabled. Filed by the help
+// path, which takes every *Help call before the screen's own handler runs.
+static char      g_ship_btn[2][FOCUS_MAX_LABEL];
+static int       g_ship_btn_off[2];
+
+// The end-of-month report (UIWorldReport, then UIEndOfMonthReport). See the
+// handler in capture_body. The summary page is kept a line at a time for the
+// arrows, which the report itself ignores: UIEndOfMonthReport hands every key
+// to UIWorldReport, whose OnUnrealCommand acts on Enter, Space and A only.
+#define EOM_LINES 48
+#define EOM_TEXT  512
+static char      g_eom[EOM_LINES][EOM_TEXT];
+static int       g_eom_n;               // lines kept; 0 until the summary is drawn
+static int       g_eom_head;            // how many of them the arrival said
+static int       g_eom_at;              // the line the arrows last said
+static int       g_eom_said;            // the summary has been said on arrival
+static char      g_eom_page[EOM_TEXT * 2]; // the decryption or defections page, said again
+static int       g_eom_link;            // this report's decryption page is up
+
+// Up or Down on the report. The summary a line at a time, "Top." and "End."
+// at either end; before it is drawn, the page on screen again -- the
+// decryption or the countries that have withdrawn.
+static void eom_walk(LONG n, const char* screen, int down)
+{
+    const char* say = g_eom_page;
+    char line[EOM_TEXT + 8];
+    if (g_eom_said && g_eom_n) {
+        const char* edge = "";
+        g_eom_at += down ? 1 : -1;
+        if (g_eom_at >= g_eom_n) { g_eom_at = g_eom_n - 1; edge = "End. "; }
+        if (g_eom_at < 0)        { g_eom_at = 0;           edge = "Top. "; }
+        _snprintf_s(line, sizeof line, _TRUNCATE, "%s%s", edge, g_eom[g_eom_at]);
+        say = line;
+    }
+    if (!say[0]) return;
+    logf_("[%ld] Input        %s  REPORT %d \"%s\"\n", n, screen, g_eom_at, say);
+    speech_cancel_pending();
+    if (g_speak) speech_say_now(say);
+}
 
 // When each layer's HUD last drew. See capture_body.
 static volatile ULONGLONG g_seen_strategy_at;
@@ -1632,6 +1672,10 @@ static void capture_body(const char* tag, LONG n, void* stack)
             frame_args(node, locals, &a);
             hq_status_event(object, a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
                             a.ns > 2 ? a.s[2] : "");
+            // Logged, so a run shows which panel drew what and when: the
+            // status reads the list drawn last.
+            logf_("[%ld] %s %s.%s  EVENT \"%s, %s %s\"\n", n, tag, obj_name, fn_name,
+                  a.ns > 0 ? a.s[0] : "", a.ns > 2 ? a.s[2] : "", a.ns > 1 ? a.s[1] : "");
             return;
         }
     }
@@ -2423,6 +2467,11 @@ static void capture_body(const char* tag, LONG n, void* stack)
             int slot = (int)p->numbers[0];
             int disabled = p->nbools ? p->bools[0] : 0;
             help_set(object, slot, label, icon, disabled);
+            if (slot >= 0 && slot < 2 && strcmp(fn_name, "AS_SetWeaponHelp") == 0 &&
+                strncmp(obj_name, "UIShipSummary", 13) == 0) {
+                strncpy_s(g_ship_btn[slot], sizeof g_ship_btn[slot], label, _TRUNCATE);
+                g_ship_btn_off[slot] = disabled;
+            }
             logf_("[%ld] %s %s.%s  HELP %d = \"%s\" on %s%s\n", n, tag, obj_name,
                   fn_name, slot, label, *icon ? icon : "(no icon)",
                   disabled ? " (disabled)" : "");
@@ -3419,6 +3468,337 @@ static void capture_body(const char* tag, LONG n, void* stack)
         }
     }
 
+    // The end-of-month report. XGWorldReportUI has three views, and both
+    // screens are up for all of them:
+    //   0  UIWorldReport: AS_SetDecryptingText("Transmitting encrypted
+    //      data...", "Transmission Decoded!") at OnInit;
+    //   1  UIWorldReport: AS_SetText(the countries that have withdrawn),
+    //      only when some have;
+    //   2  UIEndOfMonthReport.UpdateData, all in one pass, then Show():
+    //        AS_UpdateHeader(Title, Desc, rewards, gradeLabel, grade)
+    //        AS_UpdateBar(int cont, continentName, rewards, bonus, int, bool withdrawn)
+    //        AS_UpdateCountry(int cont, int country, countryName, int panicLevel,
+    //                         satelliteinfo)
+    // Enter, Space or A advances each (UIWorldReport.OnUnrealCommand ->
+    // OnAdvance); nothing else does anything. On the general path every
+    // string was filed as a slot and nothing was said (log of 2026-09-26).
+    // panicLevel is GetPanicBlocks, 1 to 5, the bars the screen draws; -1 for
+    // a country that has withdrawn, whose satelliteinfo says so.
+    if (strncmp(obj_name, "UIWorldReport", 13) == 0) {
+        if (strcmp(fn_name, "AS_SetDecryptingText") == 0) {
+            char status[EOM_TEXT], ready[EOM_TEXT];
+            frame_string(node, locals, 0, status, sizeof status);
+            frame_string(node, locals, 1, ready, sizeof ready);
+            g_eom_n = g_eom_head = g_eom_said = 0;      // a new report
+            g_eom_link = 1;
+            g_eom_at = -1;
+            _snprintf_s(g_eom_page, sizeof g_eom_page, _TRUNCATE, "%s%s%s Enter: Next.",
+                        status, status[0] && ready[0] ? " " : "", ready);
+            logf_("[%ld] %s %s.%s  REPORT \"%s\"\n", n, tag, obj_name, fn_name, g_eom_page);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(g_eom_page);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetText") == 0) {
+            char t[EOM_TEXT];
+            frame_string(node, locals, 0, t, sizeof t);
+            // GoToView(0) sends the link status here too, before OnInit
+            // sends it again with "decoded"; only the defections are news.
+            if (!t[0] || !g_eom_link || strncmp(g_eom_page, t, strlen(t)) == 0) return;
+            _snprintf_s(g_eom_page, sizeof g_eom_page, _TRUNCATE, "%s Enter: Next.", t);
+            logf_("[%ld] %s %s.%s  REPORT \"%s\"\n", n, tag, obj_name, fn_name, g_eom_page);
+            history_add(t);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(g_eom_page);
+            return;
+        }
+        if (strcmp(fn_name, "AS_HideDecrypting") == 0) return;
+    }
+    if (strncmp(obj_name, "UIEndOfMonthReport", 18) == 0) {
+        if (strcmp(fn_name, "AS_UpdateHeader") == 0) {
+            char title[EOM_TEXT], act[EOM_TEXT], label[64], grade[64], raw[EOM_TEXT];
+            frame_string(node, locals, 0, title, sizeof title);
+            frame_string(node, locals, 1, act, sizeof act);
+            frame_string(node, locals, 3, label, sizeof label);
+            frame_string(node, locals, 4, grade, sizeof grade);
+            g_eom_n = 0;
+            g_eom_said = 0;
+            _snprintf_s(g_eom[g_eom_n++], EOM_TEXT, _TRUNCATE, "%s%s%s%s%s.", title,
+                        grade[0] ? ". " : "", label, label[0] && grade[0] ? ": " : "", grade);
+            if (act[0]) _snprintf_s(g_eom[g_eom_n++], EOM_TEXT, _TRUNCATE, "%s.", act);
+            // Funding and specialists, one line each: "\n" between them.
+            if (!frame_local_raw(node, locals, "rewards", raw, sizeof raw))
+                frame_string(node, locals, 2, raw, sizeof raw);
+            for (char* part = raw; part && *part && g_eom_n < EOM_LINES; ) {
+                char* nl = strchr(part, '\n');
+                if (nl) *nl = 0;
+                strip_markup(part);
+                if (part[0]) _snprintf_s(g_eom[g_eom_n++], EOM_TEXT, _TRUNCATE, "%s.", part);
+                part = nl ? nl + 1 : NULL;
+            }
+            g_eom_head = g_eom_n;
+            return;
+        }
+        if (strcmp(fn_name, "AS_UpdateBar") == 0) {
+            if (g_eom_n >= EOM_LINES) return;
+            char name[128], rewards[256], bonus[256];
+            frame_string(node, locals, 0, name, sizeof name);
+            frame_string(node, locals, 1, rewards, sizeof rewards);
+            frame_string(node, locals, 2, bonus, sizeof bonus);
+            // The bonus comes in quotes: "Expert Knowledge".
+            char* b = bonus;
+            size_t bl = strlen(b);
+            if (bl >= 2 && b[0] == '"' && b[bl - 1] == '"') { b[bl - 1] = 0; b++; }
+            int withdrawn = p->nbools && p->bools[0];
+            _snprintf_s(g_eom[g_eom_n++], EOM_TEXT, _TRUNCATE, "%s%s%s%s%s%s.", name,
+                        rewards[0] ? ", " : "", rewards, b[0] ? ", " : "", b,
+                        withdrawn ? ", withdrawn" : "");
+            return;
+        }
+        if (strcmp(fn_name, "AS_UpdateCountry") == 0) {
+            if (g_eom_n >= EOM_LINES) return;
+            char name[128], info[128], panic[32] = "";
+            frame_string(node, locals, 0, name, sizeof name);
+            frame_string(node, locals, 1, info, sizeof info);
+            int blocks = p->nnumbers >= 3 ? (int)p->numbers[2] : -1;
+            if (blocks > 0) _snprintf_s(panic, sizeof panic, _TRUNCATE, ", panic %d of 5", blocks);
+            _snprintf_s(g_eom[g_eom_n++], EOM_TEXT, _TRUNCATE, "%s%s%s%s.", name,
+                        info[0] ? ", " : "", info, panic);
+            return;
+        }
+        // UpdateData's last step is Show(); the earlier Show, at OnInit,
+        // comes with nothing kept yet.
+        if (strcmp(fn_name, "Show") == 0 && g_eom_n && !g_eom_said) {
+            g_eom_said = 1;
+            g_eom_link = 0;
+            g_eom_at = g_eom_head - 1;      // Down starts at the first continent
+            static char say[EOM_LINES * EOM_TEXT / 4];
+            say[0] = 0;
+            size_t used = 0;
+            for (int i = 0; i < g_eom_head; i++) {
+                int w = _snprintf_s(say + used, sizeof say - used, _TRUNCATE, "%s%s",
+                                    used ? " " : "", g_eom[i]);
+                if (w < 0) break;
+                used += (size_t)w;
+            }
+            history_add(say);
+            if (used < sizeof say)
+                _snprintf_s(say + used, sizeof say - used, _TRUNCATE,
+                            " Up and Down read the continents and countries. Enter: Carry On.");
+            for (int i = 0; i < g_eom_n; i++)
+                logf_("[%ld] %s %s.%s  REPORT line %d \"%s\"\n", n, tag, obj_name, fn_name,
+                      i, g_eom[i]);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return;
+        }
+    }
+
+    // The hangar's ship list (UIShipList). UpdateData sends Invoke("ClearAll")
+    // -- logged under UpdateData, the caller -- then per continent its ships,
+    //     AS_AddShip(int cont, shipName, WeaponType, Status, Help, int State)
+    // (State -1 is the empty slot), its orders,
+    //     AS_AddPendingShip(int cont, infoTxt, statusTxt, Help, int ShipType)
+    // and last its title, AS_SetContinentTitle(int cont, "Europe (2/4)"). A
+    // move is AS_SetSelection(int cont, int row), which nothing resolved: the
+    // rows were filed as slots of one list, each continent over the last.
+    // Keys (OnUnrealCommand): Up/Down move, and past a continent's last row
+    // into the next; Enter opens a ship, orders on the empty slot, cancels on
+    // an order; X transfers a ready ship (AS_InitializeShipTransfer, then the
+    // arrows pick a hangar and Enter confirms); F1 is the item card; Escape.
+    if (strncmp(obj_name, "UIShipList", 10) == 0) {
+        #define SHIP_CONTS 8
+        #define SHIP_ROWS  8
+        static char s_row[SHIP_CONTS][SHIP_ROWS][FOCUS_MAX_LABEL];
+        static int  s_nrow[SHIP_CONTS];
+        static char s_cont[SHIP_CONTS][96];
+        static int  s_said_cont = -1, s_fresh;
+        static FrameArgs a;
+        if (strcmp(fn_name, "UpdateData") == 0) {          // Invoke("ClearAll")
+            memset(s_nrow, 0, sizeof s_nrow);
+            s_fresh = 1;
+            s_said_cont = -1;
+            return;
+        }
+        int add = strcmp(fn_name, "AS_AddShip") == 0;
+        if (add || strcmp(fn_name, "AS_AddPendingShip") == 0) {
+            int c = p->nnumbers ? (int)p->numbers[0] : -1;
+            if (c < 0 || c >= SHIP_CONTS || s_nrow[c] >= SHIP_ROWS) return;
+            frame_args(node, locals, &a);
+            for (int i = 0; i < a.ns; i++) strip_markup(a.s[i]);
+            char* row = s_row[c][s_nrow[c]++];
+            int empty = add && p->nnumbers >= 2 && (int)p->numbers[1] == -1;
+            if (empty)
+                _snprintf_s(row, FOCUS_MAX_LABEL, _TRUNCATE, "Empty slot");
+            else if (add)       // name, weapon, status
+                _snprintf_s(row, FOCUS_MAX_LABEL, _TRUNCATE, "%s%s%s%s%s", a.s[0],
+                            a.ns > 1 && a.s[1][0] ? ", " : "", a.ns > 1 ? a.s[1] : "",
+                            a.ns > 2 && a.s[2][0] ? ", " : "", a.ns > 2 ? a.s[2] : "");
+            else                // "Interceptor Purchase", "Ready in 3 day(s)"
+                _snprintf_s(row, FOCUS_MAX_LABEL, _TRUNCATE, "%s%s%s", a.s[0],
+                            a.ns > 1 && a.s[1][0] ? ", " : "", a.ns > 1 ? a.s[1] : "");
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetContinentTitle") == 0) {
+            int c = p->nnumbers ? (int)p->numbers[0] : -1;
+            if (c < 0 || c >= SHIP_CONTS) return;
+            frame_string(node, locals, 0, s_cont[c], sizeof s_cont[c]);
+            return;
+        }
+        if (strcmp(fn_name, "AS_InitializeShipTransfer") == 0) {
+            const char* say = "Transfer. Up and Down choose a hangar, Enter transfers there, "
+                              "Escape cancels.";
+            logf_("[%ld] %s %s.%s  SHIPS \"%s\"\n", n, tag, obj_name, fn_name, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            s_said_cont = -1;                   // the hangar's name goes with the first move
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetSelection") == 0 && p->nnumbers >= 2) {
+            int c = (int)p->numbers[0], r = (int)p->numbers[1];
+            if (c < 0 || c >= SHIP_CONTS || r < 0 || r >= s_nrow[c]) return;
+            char say[FOCUS_MAX_LABEL * 3];
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s.%s",
+                        s_fresh ? "Ship list. " : "",
+                        c != s_said_cont ? s_cont[c] : "", c != s_said_cont ? ". " : "",
+                        s_row[c][r],
+                        s_fresh ? " Enter opens a ship, 1 transfers it, F1 for more "
+                                  "information." : "");
+            s_said_cont = c;
+            s_fresh = 0;
+            logf_("[%ld] %s %s.%s  SHIP %d, %d \"%s\"\n", n, tag, obj_name, fn_name, c, r, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return;
+        }
+    }
+
+    // One ship (UIShipSummary). UpdateData sends AS_SetShipName,
+    // AS_SetWeaponLabel, AS_SetWeaponName, AS_SetShipStatus, AS_SetKills,
+    // AS_SetWeaponImage; UpdateButtonHelp the two buttons,
+    //     AS_SetWeaponHelp(int i, label, icon, bool IsDisabled)
+    // -- EDIT LOADOUT (not while the ship is busy), DISMISS SHIP -- and a move
+    // is AS_SetWeaponButtonFocus(int i, bool focused): off the old, on the
+    // new. Up and Down wrap between the two, Enter presses one, F1 is the
+    // weapon's card. The selection starts at -1 with a mouse about, and Enter
+    // there presses Dismiss (behind a dialogue), so the arrival says to pick.
+    if (strncmp(obj_name, "UIShipSummary", 13) == 0) {
+        static char s_name[96], s_wlabel[64], s_weapon[128], s_status[96], s_kills[96];
+        char (*s_btn)[FOCUS_MAX_LABEL] = g_ship_btn;
+        int* s_off = g_ship_btn_off;
+        char* slot = strcmp(fn_name, "AS_SetShipName") == 0 ? s_name
+                   : strcmp(fn_name, "AS_SetWeaponLabel") == 0 ? s_wlabel
+                   : strcmp(fn_name, "AS_SetWeaponName") == 0 ? s_weapon
+                   : strcmp(fn_name, "AS_SetShipStatus") == 0 ? s_status
+                   : strcmp(fn_name, "AS_SetKills") == 0 ? s_kills : NULL;
+        if (slot) {
+            size_t sz = slot == s_name ? sizeof s_name : slot == s_wlabel ? sizeof s_wlabel
+                      : slot == s_weapon ? sizeof s_weapon : slot == s_status ? sizeof s_status
+                      : sizeof s_kills;
+            frame_string(node, locals, 0, slot, sz);
+            if (slot != s_kills) return;
+            // The kills are the last line UpdateData writes that says anything.
+            char btns[2 * FOCUS_MAX_LABEL + 64] = "";
+            for (int i = 0; i < 2; i++) {
+                if (!s_btn[i][0]) continue;
+                size_t u = strlen(btns);
+                _snprintf_s(btns + u, sizeof btns - u, _TRUNCATE, "%s%s%s",
+                            u ? ", " : " Buttons: ", s_btn[i], s_off[i] ? ", unavailable" : "");
+            }
+            char say[1024];
+            _snprintf_s(say, sizeof say, _TRUNCATE,
+                        "%s. %s %s. %s. %s.%s%s Up and Down choose, Enter presses.",
+                        s_name, s_wlabel, s_weapon, s_status, s_kills, btns,
+                        btns[0] ? "." : "");
+            logf_("[%ld] %s %s.%s  SHIP \"%s\"\n", n, tag, obj_name, fn_name, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetWeaponButtonFocus") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (!p->nbools || !p->bools[0] || i < 0 || i >= 2 || !s_btn[i][0]) return;
+            char say[FOCUS_MAX_LABEL + 16];
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s.", s_btn[i],
+                        s_off[i] ? ", unavailable" : "");
+            logf_("[%ld] %s %s.%s  SHIP button %d \"%s\"\n", n, tag, obj_name, fn_name, i, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetWeaponImage") == 0) return;
+    }
+
+    // A ship's weapons (UIShipLoadout, EDIT LOADOUT). OnInit: AS_SetTitle,
+    // AS_SetListLabels(weaponLabel, quantityLabel); UpdateData: Invoke("clear")
+    // and AS_AddWeapon(name, count, bool Disabled) per weapon; each selection
+    // (RealizeSelected): AS_SetStatData(i, label, value) x5 -- hit chance,
+    // range, fire rate, damage, armour penetration -- AS_SetSelected(i),
+    // AS_SetWeaponName, AS_SetWeaponImage, AS_SetWeaponDescription last.
+    // Up/Down move, Enter equips (a dialogue confirms; a disabled one only
+    // plays the bad sound), F1 the card, Escape.
+    if (strncmp(obj_name, "UIShipLoadout", 13) == 0) {
+        #define LOADOUT_ROWS 12
+        static char s_title[96], s_qty[48];
+        static char s_row[LOADOUT_ROWS][FOCUS_MAX_LABEL];
+        static int  s_n, s_sel = -1, s_fresh;
+        static char s_stat[5][96];
+        static FrameArgs a;
+        if (strcmp(fn_name, "AS_SetTitle") == 0) {
+            frame_string(node, locals, 0, s_title, sizeof s_title);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetListLabels") == 0) {
+            frame_string(node, locals, 1, s_qty, sizeof s_qty);
+            return;
+        }
+        if (strcmp(fn_name, "UpdateData") == 0) {          // Invoke("clear")
+            s_n = 0;
+            s_fresh = 1;
+            return;
+        }
+        if (strcmp(fn_name, "AS_AddWeapon") == 0) {
+            if (s_n >= LOADOUT_ROWS) return;
+            frame_args(node, locals, &a);
+            int off = p->nbools && p->bools[0];
+            _snprintf_s(s_row[s_n++], FOCUS_MAX_LABEL, _TRUNCATE, "%s%s%s%s%s%s", a.s[0],
+                        a.ns > 1 && a.s[1][0] ? ", " : "", s_qty[0] && a.ns > 1 && a.s[1][0] ? s_qty : "",
+                        s_qty[0] && a.ns > 1 && a.s[1][0] ? " " : "", a.ns > 1 ? a.s[1] : "",
+                        off ? ", unavailable" : "");
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetStatData") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (i < 0 || i >= 5) return;
+            frame_args(node, locals, &a);
+            _snprintf_s(s_stat[i], sizeof s_stat[i], _TRUNCATE, "%s %s", a.s[0],
+                        a.ns > 1 ? a.s[1] : "");
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetSelected") == 0 && p->nnumbers) {
+            s_sel = (int)p->numbers[0];
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetWeaponName") == 0 || strcmp(fn_name, "AS_SetWeaponImage") == 0)
+            return;
+        if (strcmp(fn_name, "AS_SetWeaponDescription") == 0) {
+            char desc[1024];
+            frame_string(node, locals, 0, desc, sizeof desc);
+            char say[2048];
+            _snprintf_s(say, sizeof say, _TRUNCATE,
+                        "%s%s%s. %s. %s. %s. %s. %s. %s%s", s_fresh ? s_title : "",
+                        s_fresh && s_title[0] ? ". " : "",
+                        s_sel >= 0 && s_sel < s_n ? s_row[s_sel] : "?",
+                        s_stat[0], s_stat[1], s_stat[2], s_stat[3], s_stat[4], desc,
+                        s_fresh ? " Enter equips." : "");
+            s_fresh = 0;
+            logf_("[%ld] %s %s.%s  LOADOUT \"%s\"\n", n, tag, obj_name, fn_name, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return;
+        }
+    }
+
     // The squad for a mission. See hq_squad_row. Each slot is either a
     // soldier (AS_SetUnitInfo with a status) or empty (status -1, then
     // AS_SetAddUnitText with "ADD UNIT" and a "+", or the Officer Training
@@ -3452,12 +3832,30 @@ static void capture_body(const char* tag, LONG n, void* stack)
             return;
         }
         // (icon0, EDIT UNIT, icon1, CLEAR UNIT), into 0's list.
-        if (strcmp(fn_name, "AS_SetUnitHelp") == 0) {
+        //
+        // Sent once, at OnInit. Back from a soldier, OnReceiveFocus redraws
+        // the slots (UpdateDisplay) and the screen's bar (UpdateButtonHelp)
+        // but not this, so 0 -- which lists only bars published within
+        // HELP_WINDOW_MS of the newest -- had dropped Edit and Clear unit
+        // (log of 2026-09-25, 23:22: "BACK TO BRIEFING. MAKE ITEMS
+        // AVAILABLE. LAUNCH MISSION", and no way to hear that 2 clears a
+        // slot). The pair is kept and published again with each redraw.
+        static void* help_obj;
+        static char help_s[4][FOCUS_MAX_LABEL];
+        int sent = strcmp(fn_name, "AS_SetUnitHelp") == 0;
+        if (sent) {
             frame_args(node, locals, &a);
-            if (a.ns > 1 && a.s[1][0]) help_set(object, 0, a.s[1], a.s[0], 0);
-            if (a.ns > 3 && a.s[3][0]) help_set(object, 1, a.s[3], a.s[2], 0);
-            return;
+            help_obj = object;
+            for (int i = 0; i < 4; i++)
+                strncpy_s(help_s[i], sizeof help_s[i], i < a.ns ? a.s[i] : "", _TRUNCATE);
+            logf_("[%ld] %s %s.%s  SQUAD help \"%s\" on %s, \"%s\" on %s\n", n, tag, obj_name,
+                  fn_name, help_s[1], help_s[0], help_s[3], help_s[2]);
         }
+        if (sent || (strcmp(fn_name, "UpdateDisplay") == 0 && object == help_obj)) {
+            if (help_s[1][0]) help_set(object, 0, help_s[1], help_s[0], 0);
+            if (help_s[3][0]) help_set(object, 1, help_s[3], help_s[2], 0);
+        }
+        if (sent) return;
     }
 
     // The promotion tree. See hq.h: the grid is kept from its per-rank
@@ -3743,6 +4141,12 @@ static void capture_body(const char* tag, LONG n, void* stack)
         return;
     }
 
+    // The help bar's button style, "XComButtonIconPC", sent around every
+    // redraw of it. A lone string, so the general path below held it as a
+    // possible announcement, and on the ship list nothing came after to
+    // cancel it: it was said after every move (log of 2026-09-27).
+    if (strcmp(fn_name, "AS_SetButtonType") == 0) return;
+
     for (int i = 0; i < p->nstrings; i++)
         logf_("[%ld] %s %s.%s  \"%s\"\n", n, tag, obj_name, fn_name, p->strings[i]);
 
@@ -3961,8 +4365,8 @@ static void fault_log(const char* prefix, const Fault* f, const char* where)
           (unsigned)rva, access, where && *where ? ", in " : "", where ? where : "");
 }
 
-// MinHook needs a distinct trampoline per target, so each native gets its own
-// thunk; they all funnel into capture().
+// Each native gets its own thunk, since each has its own original to call;
+// they all funnel into capture().
 // Relabels a keypress as the gamepad button a screen is waiting for.
 //
 // Runs on CheckInputIsReleaseOrDirectionRepeat, which every shell screen calls
@@ -4227,6 +4631,12 @@ static int rewrite_cmd(LONG n, void* stack)
         if (g_speak) speech_say_now(g_debrief_page);
     }
 
+    // Up or Down on the end-of-month report walks it. See eom_walk. Both
+    // screens take every key; the outer one is answered, the inner is not.
+    if (press && (cmd == FXS_ARROW_UP || cmd == FXS_ARROW_DOWN) &&
+        strncmp(screen, "UIEndOfMonthReport", 18) == 0)
+        eom_walk(n, screen, cmd == FXS_ARROW_DOWN);
+
     // Left in the loadout's locker. See loadout_leave_locker.
     if (cmd == FXS_ARROW_LEFT && strncmp(screen, "UISoldierLoadout", 16) == 0)
         loadout_leave_locker(n, object, screen);
@@ -4467,13 +4877,20 @@ static int       g_tile_slot_floorz = -1;   // XComWorldData.GetFloorZForPositio
 typedef float (__fastcall* FloorZFn)(void* self, void* edx, const float* pos, int unlimited);
 static int       g_unit_slot_visible = -1;  // XGUnitNativeBase.IsAliveAndVisible
 static int       g_unit_slot_alive = -1;    // XGUnitNativeBase.IsAlive
+static int       g_unit_slot_overwatch = -1; // XGUnitNativeBase.IsInOverwatch
 static int       g_panel_slot_visible = -1; // UI_FxsPanel.IsVisible
 static int       g_cursor_slot_floor = -1;  // XCom3DCursor.WorldZToCursorFloor
 static int       g_world_slot_seetile = -1; // XComWorldData.CanSeeActorToTile
 static int       g_unit_slot_flanking = -1; // XGUnitNativeBase.IsFlankingCoverPoint
 static void*     g_unit_fn_flanking;        // ...which is final, so not virtual
 static int       g_unit_slot_range = -1;    // XGUnitNativeBase.IsPointWithinFiringRange
-static uint8_t*  g_image_lo;            // the game's image, to check a vtable entry
+// XGUnitNativeBase.IsFlankedBy_EnemyAtLocation(XGUnitNativeBase kEnemy,
+//     const out Vector vEnemyLocation, optional bool bDebugLog) -- `self` is
+// the unit that would BE flanked; a `const out` Vector goes by pointer.
+typedef int (__fastcall* FlankedByFn)(void* self, void* edx, void* enemy,
+                                      const float* enemy_loc, int debug_log);
+static int       g_unit_slot_flankedby = -1;
+static uint8_t*  g_image_lo;           // the game's image, to check a vtable entry
 static uint8_t*  g_image_hi;            // points into it before calling it
 static void*     g_path_pawn;           // the pathing pawn that built the last path
 static void*     g_reach_pawn;          // the pawn the path offsets were resolved on
@@ -5116,6 +5533,31 @@ static void unit_label(const UnitName* u, char* out, size_t out_sz)
     _snprintf_s(out, out_sz, _TRUNCATE, u->nick[0] ? "%s, %s" : "%s", u->name, u->nick);
 }
 
+// Whether a unit is on overwatch, asked of the game's own native. Only for
+// units unit_seen has just vouched for: a dead unit's natives are not safe to
+// call.
+static int unit_overwatch(void* unit)
+{
+    UnitTestFn on = unit ? (UnitTestFn)tile_vfn(unit, g_unit_slot_overwatch) : NULL;
+    return on && on(unit, NULL) != 0;
+}
+
+// The name with what the screen shows about the unit: "Sectoid, 3 of 4 HP, on
+// overwatch". HP is the flag's; overwatch is said of enemies the squad sees,
+// which is when the game floats "Overwatch" over one (XGAbilityTree's target
+// message) and shows its stance -- never of a hidden one, which unit_seen and
+// the squad's sight have already kept out.
+static void unit_label_state(const UnitName* u, void* unit, int enemy,
+                             char* out, size_t out_sz)
+{
+    unit_label(u, out, out_sz);
+    char state[64];
+    combat_unit_state(u->hp, u->hp_max, enemy && unit_overwatch(unit), state, sizeof state);
+    size_t used = strlen(out);
+    if (state[0] && used < out_sz)
+        _snprintf_s(out + used, out_sz - used, _TRUNCATE, "%s", state);
+}
+
 // Everyone in sight whose pawn stands in the column of (tx, ty), on any
 // storey, with where their feet are: a pawn's origin is its middle,
 // NAV_CURSOR_LIFT above its feet. `mine` marks the soldier being moved.
@@ -5138,7 +5580,7 @@ static int units_in_column(int tx, int ty, ColumnUnit* out, int max)
         if (cursor_tile_axis(s.loc[0], g.min_x, CURSOR_TILE) != tx ||
             cursor_tile_axis(s.loc[1], g.min_y, CURSOR_TILE) != ty)
             continue;
-        unit_label(&g_units[i], out[n].label, sizeof out[n].label);
+        unit_label_state(&g_units[i], s.unit, !s.friendly, out[n].label, sizeof out[n].label);
         out[n].feet = s.loc[2] - NAV_CURSOR_LIFT;
         out[n].mine = s.pawn == soldier;
         n++;
@@ -5684,12 +6126,46 @@ static float dist_sq_between(const float* a, const float* b)
     return dx * dx + dy * dy + dz * dz;
 }
 
+static void* soldier_unit(void);
+
+// Whether a soldier standing at `here` would flank `enemy`: the game's own
+// XComActionIconManager.IsLocationFlanking, which AddFlankingIcons asks for
+// every enemy in GetAllVisibleTargets while the cursor moves, and which puts
+// the flanking mark over the ones it answers yes for --
+//
+//     skip unless PlayerUnit.IsPointWithinFiringRange(.., Enemy,
+//                     Enemy.GetLocation(), CoverPoint.CoverLocation)
+//     CoverPointLocation.Z = 0
+//     Enemy.IsFlankedBy_EnemyAtLocation(PlayerUnit, CoverPointLocation)
+//
+// The same range gate as the other way round, and for the same reason: out
+// of the soldier's reach, a flank is nothing the screen marks.
+static int tile_flanks(void* soldier, void* enemy, const float* eloc, const float* here)
+{
+    FiringRangeFn in_range = (FiringRangeFn)tile_vfn(soldier, g_unit_slot_range);
+    FlankedByFn flanked_by = (FlankedByFn)tile_vfn(enemy, g_unit_slot_flankedby);
+    if (!in_range || !flanked_by) return 0;
+    float height_bonus = 0.0f, dist_sq = SENTINEL_FLOAT;
+    if (!in_range(soldier, NULL, &height_bonus, &dist_sq, enemy,
+                  eloc[0], eloc[1], eloc[2], here[0], here[1], here[2], NULL, 0.0f))
+        return 0;
+    float flat[3] = { here[0], here[1], 0.0f };
+    return flanked_by(enemy, NULL, soldier, flat, 0) != 0;
+}
+
 static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
-                          int has_cover, TileReport* r)
+                          int has_cover, const float* here, TileReport* r)
 {
     r->enemies_known = 0;
     r->seen_by = 0;
     r->flanked = 0;
+    r->flanks[0] = 0;
+    // The soldier who would stand here, and where: the cover point when the
+    // tile has one, as the game asks it, else the tile itself.
+    void* soldier = g_expose_ok ? soldier_unit() : NULL;
+    const float* stand = has_cover ? cp->cover_location : here;
+    int nflank = 0;
+    char flank_names[3][48];
 
     void* world = cursor_world();
     void* squad = squad_player();
@@ -5725,6 +6201,22 @@ static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
 
         void* pawn = unit_pawn(unit);
         if (!pawn || !unit_is_live(pawn)) continue;
+
+        // Flanking them does not wait on their seeing the tile: the game
+        // asks it of every visible enemy in range.
+        if (soldier && soldier != unit) {
+            const void* lv;
+            if (field_ptr(pawn, "Location", &g_pawn_loc, 3 * sizeof(float), &lv) &&
+                tile_flanks(soldier, unit, (const float*)lv, stand)) {
+                if (nflank < 3) {
+                    UnitName* un = unit_by_unit(unit);
+                    if (un) unit_label(un, flank_names[nflank], sizeof flank_names[0]);
+                    else strcpy_s(flank_names[nflank], sizeof flank_names[0], "an enemy");
+                }
+                nflank++;
+            }
+        }
+
         if (!see(world, NULL, pawn, tx, ty, tz, 0)) continue;
         r->seen_by++;
 
@@ -5774,6 +6266,16 @@ static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
 
         if (past) r->flanked = 1;
     }
+
+    // "Sectoid", "2: Sectoid, Muton", and past three only the count.
+    if (nflank == 1) {
+        strncpy_s(r->flanks, sizeof r->flanks, flank_names[0], _TRUNCATE);
+    } else if (nflank > 1) {
+        size_t w = (size_t)_snprintf_s(r->flanks, sizeof r->flanks, _TRUNCATE, "%d", nflank);
+        for (int i = 0; i < nflank && i < 3 && w < sizeof r->flanks; i++)
+            w += (size_t)_snprintf_s(r->flanks + w, sizeof r->flanks - w, _TRUNCATE, "%s%s",
+                                     i ? ", " : ": ", flank_names[i]);
+    }
 }
 
 // Describes tile (tx, ty) with its floor at `floor`. Returns 0 when the game
@@ -5808,7 +6310,8 @@ static int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     r.cover_flags = has_cover ? cp.flags : 0;
     r.smoke = smoke ? smoke(world, NULL, tx, ty, tz) != 0 : 0;
     r.poison = poison ? poison(world, NULL, tx, ty, tz) != 0 : 0;
-    tile_exposure(tx, ty, tz, &cp, has_cover, &r);
+    float here[3] = { x, y, floor };
+    tile_exposure(tx, ty, tz, &cp, has_cover, here, &r);
     int cost = -1, std = -1, maxc = -1, moves = -1, turns = 0;
     int reach = with_dash ? tile_dash(&cost, &std, &maxc, &moves, &turns) : -1;
     r.dash = reach == 1;
@@ -5824,10 +6327,11 @@ static int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     // asked about -- and on the layer this file worked out for smoke.
     logf_("tile: %d, %d floor %.1f (layer %d): cover %s flags 0x%05X at %d, %d, %d; "
           "path cost %d, standard move %d, max %d, moves made %d, turns %d, smoke %d, "
-          "poison %d, seen by %d of %d known%s -> \"%s\"\n",
+          "poison %d, seen by %d of %d known%s%s%s -> \"%s\"\n",
           tx, ty, floor, tz, has_cover ? "yes" : "no", (unsigned)cp.flags,
           cp.x, cp.y, cp.z, cost, std, maxc, moves, turns, r.smoke, r.poison,
-          r.seen_by, r.enemies_known, r.flanked ? ", flanked" : "", say);
+          r.seen_by, r.enemies_known, r.flanked ? ", flanked" : "",
+          r.flanks[0] ? ", flanks " : "", r.flanks, say);
     return 1;
 }
 
@@ -6540,8 +7044,10 @@ static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
         { "XGUnitNativeBaseexecIsFlankingCoverPoint", &g_unit_slot_flanking,
                                               &g_unit_fn_flanking },
         { "XGUnitNativeBaseexecIsPointWithinFiringRange", &g_unit_slot_range, NULL },
+        { "XGUnitNativeBaseexecIsFlankedBy_EnemyAtLocation", &g_unit_slot_flankedby, NULL },
         { "XGUnitNativeBaseexecIsAliveAndVisible",   &g_unit_slot_visible,  NULL },
         { "XGUnitNativeBaseexecIsAlive",             &g_unit_slot_alive,    NULL },
+        { "XGUnitNativeBaseexecIsInOverwatch",       &g_unit_slot_overwatch, NULL },
         { "UI_FxsPanelexecIsVisible",                &g_panel_slot_visible, NULL },
         { "XCom3DCursorexecWorldZToCursorFloor",     &g_cursor_slot_floor,  NULL },
     };
@@ -7165,6 +7671,8 @@ static void scan_add_units(void)
             // IsAliveAndVisible alone let unrevealed pods through.
             if (!seen_has(&sight, s.unit)) continue;
             it.kind = SCAN_ENEMIES;
+            if (unit_overwatch(s.unit))
+                strcpy_s(it.detail, sizeof it.detail, "on overwatch");
         }
         unit_label(&g_units[i], it.name, sizeof it.name);
         if (scan_item_at(&it, s.loc, NAV_CURSOR_LIFT)) scan_add(&it);
@@ -9273,6 +9781,8 @@ static void status_poll(void)
     if (g_speak) speech_say_now(say);
 }
 
+static void hooks_sweep_retry(void);
+
 static DWORD WINAPI review_pump(LPVOID unused)
 {
     (void)unused;
@@ -9284,6 +9794,13 @@ static DWORD WINAPI review_pump(LPVOID unused)
             __try { status_poll(); }
             __except (fault_note(GetExceptionInformation(), &f)) {
                 fault_log("status: poll", &f, NULL);
+            }
+        }
+        {
+            Fault f;
+            __try { hooks_sweep_retry(); }
+            __except (fault_note(GetExceptionInformation(), &f)) {
+                fault_log("hooks: late UFunction pass", &f, NULL);
             }
         }
         {
@@ -10692,22 +11209,196 @@ THUNK(movie_asvoid, "ASVoid/Movie ")
 THUNK(object_asvoid, "ASVoid/Object")
 THUNK(panel_invoke, "Invoke/Panel ")
 
+// ---- the hooks, by pointer ---------------------------------------------
+//
+// The game's code is never written to. EW's exe carries Steam's CEG
+// anti-tamper, which hashes stretches of its own code and uses the hash to
+// compute where it calls next: modified code sends it into a decoy that
+// returns to address 0. MinHook's jumps over the start of each native were
+// exactly that, and launching a mission from squad select crashed there every
+// time from 2026-09-25 23:27 on (eight dumps, one site: EIP 0, ECX on a decoy
+// that returns 0x45, EAX 0x45; the mod's call counter stopped on the launch
+// key, no mod code on the stack). The same launch with the mod off went on.
+//
+// Every native hooked here is only ever reached through a pointer the engine
+// keeps in data, and those are what change instead:
+//
+//   - the registration tables in .data ({ "UClassexecName", func }), which a
+//     UFunction binds from when its class is linked -- for anything linked
+//     after we attach;
+//   - GNatives[], for a native with a bytecode index of its own;
+//   - UFunction::Func, for every function already linked when we attach.
+//
+// The first two are found by scanning the exe's writable sections for the
+// native's address, the third by walking the object table for UFunctions of
+// the native's name holding it. The script VM calls Function->Func (or
+// GNatives[i]) on every call, so a swapped pointer sees every call the
+// patched code did. The original is the untouched function itself.
+#define MAX_HOOKS 24
+
+typedef struct {
+    const char* name;       // "UGFxMoviePlayerexecActionScriptVoid"
+    const char* fn;         // "ActionScriptVoid", the UFunction's name
+    void*       target;     // the native, unmodified
+    void*       thunk;      // ours
+    int         data_sites; // pointers swapped in writable data
+    int         ro_sites;   // seen in read-only data, left alone
+    int         func_sites; // UFunctions swapped, or found already ours
+} Hook;
+
+static Hook             g_hooks[MAX_HOOKS];
+static int              g_nhooks;
+static uint32_t         g_func_off;          // UFunction::Func, once seen
+static volatile LONG    g_hooks_swept;       // the UFunction pass has run
+static volatile LONG    g_hooks_ready;       // registered and data swapped
+
+// Registers a native to be hooked. Returns its handle, or -1 when the game
+// does not have it. `*orig` is the native itself, called as before.
 static int arm(const NativeEntry* tbl, int n, HMODULE mod,
                const char* name, void* thunk, void** orig)
 {
     void* target = natives_find(tbl, n, name);
     if (!target) {
         logf_("  %-38s NOT FOUND\n", name);
-        return 0;
+        return -1;
     }
+    if (g_nhooks >= MAX_HOOKS) {
+        logf_("  %-38s no room (MAX_HOOKS)\n", name);
+        return -1;
+    }
+    const char* ex = strstr(name, "exec");
+    Hook* h = &g_hooks[g_nhooks];
+    h->name = name;
+    h->fn = ex ? ex + 4 : name;
+    h->target = target;
+    h->thunk = thunk;
+    *orig = target;
     logf_("  %-38s %p (rva %p)\n", name, target,
           (void*)((uint8_t*)target - (uint8_t*)mod));
+    return g_nhooks++;
+}
 
-    MH_STATUS st = MH_CreateHook(target, thunk, orig);
-    if (st != MH_OK) { logf_("    MH_CreateHook failed: %d\n", st); return 0; }
-    st = MH_EnableHook(target);
-    if (st != MH_OK) { logf_("    MH_EnableHook failed: %d\n", st); return 0; }
+// The exe's data, section by section: writable sections have the pointers
+// swapped; read-only ones are only counted, for the log -- a native's address
+// there would be a route to it this cannot reach.
+static void hooks_swap_data(HMODULE mod)
+{
+    uint8_t* m = (uint8_t*)mod;
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)m;
+    IMAGE_NT_HEADERS32* nt = (IMAGE_NT_HEADERS32*)(m + dos->e_lfanew);
+    IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+        DWORD ch = sec[i].Characteristics;
+        if (ch & (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_CNT_CODE)) continue;
+        if (!(ch & IMAGE_SCN_MEM_READ)) continue;
+        int writable_sec = (ch & IMAGE_SCN_MEM_WRITE) != 0;
+        uint8_t* base = m + sec[i].VirtualAddress;
+        size_t size = sec[i].Misc.VirtualSize ? sec[i].Misc.VirtualSize
+                                              : sec[i].SizeOfRawData;
+        if (!readable(base, size)) continue;
+        for (size_t off = 0; off + 4 <= size; off += 4) {
+            void** slot = (void**)(base + off);
+            void* v = *slot;
+            for (int k = 0; k < g_nhooks; k++) {
+                if (v != g_hooks[k].target) continue;
+                if (writable_sec && writable(slot, sizeof *slot)) {
+                    InterlockedExchangePointer(slot, g_hooks[k].thunk);
+                    g_hooks[k].data_sites++;
+                } else {
+                    g_hooks[k].ro_sites++;
+                }
+                break;
+            }
+        }
+    }
+}
+
+// One UFunction. The Func offset is not assumed: the first function of a
+// hooked name that holds its native somewhere in its body settles it, and
+// every later one is read there.
+#define UFUNCTION_SCAN_FROM 0x28
+#define UFUNCTION_SCAN_TO   0x100
+
+static int hooks_visit_function(void* obj, int which, int idx, void* ctx)
+{
+    (void)which; (void)idx; (void)ctx;
+    char name[128];
+    if (!object_name(obj, name, sizeof name)) return 1;
+    for (int k = 0; k < g_nhooks; k++) {
+        Hook* h = &g_hooks[k];
+        if (strcmp(name, h->fn) != 0) continue;
+        if (!g_func_off) {
+            if (!readable((uint8_t*)obj + UFUNCTION_SCAN_FROM,
+                          UFUNCTION_SCAN_TO - UFUNCTION_SCAN_FROM))
+                continue;
+            for (uint32_t off = UFUNCTION_SCAN_FROM; off < UFUNCTION_SCAN_TO; off += 4) {
+                void* v = *(void**)((uint8_t*)obj + off);
+                if (v == h->target || v == h->thunk) { g_func_off = off; break; }
+            }
+            if (!g_func_off) continue;
+        }
+        void** slot = (void**)((uint8_t*)obj + g_func_off);
+        if (!writable(slot, sizeof *slot)) continue;
+        if (*slot == h->target) {
+            InterlockedExchangePointer(slot, h->thunk);
+            h->func_sites++;
+        } else if (*slot == h->thunk) {
+            h->func_sites++;           // linked after the tables were swapped
+        }
+        // Two classes can declare natives of one name (ActionScriptVoid on
+        // GFxMoviePlayer and GFxObject); the address tells them apart, so the
+        // other hooks of this name still get their look.
+    }
     return 1;
+}
+
+// Returns 1 once the pass has run. Needs the object table; until it is found
+// the swapped tables still cover whatever links from then on.
+static int hooks_sweep_functions(void)
+{
+    if (g_hooks_swept) return 1;
+    // UObject::Class is learnt from the first UI call (props_init), so at
+    // attach this waits, and review_pump runs it moments later. The swapped
+    // tables carry the hooks meanwhile.
+    if (!g_hooks_ready || !objects_ready() || !props_class_offset()) return 0;
+    const void* fn_class = objects_class("Function");
+    if (!fn_class) return 0;
+    if (objects_each(&fn_class, 1, hooks_visit_function, NULL) < 0) return 0;
+    InterlockedExchange(&g_hooks_swept, 1);
+
+    logf_("hooks: UFunction::Func at +0x%X\n", (unsigned)g_func_off);
+    for (int k = 0; k < g_nhooks; k++) {
+        Hook* h = &g_hooks[k];
+        logf_("  %-38s %d in data%s, %d function%s%s\n", h->name, h->data_sites,
+              h->ro_sites ? " (+ read-only, left)" : "", h->func_sites,
+              h->func_sites == 1 ? "" : "s",
+              !h->data_sites && !h->func_sites ? " -- NOT HOOKED" : "");
+    }
+    return 1;
+}
+
+// From review_pump, when the object table was not there at attach.
+static void hooks_sweep_retry(void)
+{
+    if (g_hooks_swept || !g_hooks_ready) return;
+    char why[256];
+    if (!objects_retry(why, sizeof why)) return;
+    if (why[0]) logf_("objects: %s\n", why);
+    if (hooks_sweep_functions())
+        logf_("hooks: the UFunction pass ran after startup\n");
+}
+
+static void hooks_install(HMODULE mod)
+{
+    hooks_swap_data(mod);
+    InterlockedExchange(&g_hooks_ready, 1);
+}
+
+// Whether a hook will see its calls: some pointer to it was swapped.
+static int hook_live(int h)
+{
+    if (h < 0) return 0;
+    return g_hooks[h].data_sites > 0 || g_hooks[h].func_sites > 0;
 }
 
 static HINSTANCE g_self;
@@ -10821,25 +11512,19 @@ static DWORD WINAPI init(LPVOID param)
         return 1;
     }
 
-    if (MH_Initialize() != MH_OK) {
-        logf_("FATAL: MH_Initialize\n");
-        free(tbl);
-        return 1;
-    }
-
-    int armed = 0;
-    armed += arm(tbl, n, mod, "UGFxMoviePlayerexecActionScriptVoid",
-                 (LPVOID)hook_movie_asvoid, (LPVOID*)&g_orig_movie_asvoid);
-    armed += arm(tbl, n, mod, "UGFxObjectexecActionScriptVoid",
-                 (LPVOID)hook_object_asvoid, (LPVOID*)&g_orig_object_asvoid);
-    armed += arm(tbl, n, mod, "AUI_FxsPanelexecInvoke",
-                 (LPVOID)hook_panel_invoke, (LPVOID*)&g_orig_panel_invoke);
+    int h_text[3];
+    h_text[0] = arm(tbl, n, mod, "UGFxMoviePlayerexecActionScriptVoid",
+                    (LPVOID)hook_movie_asvoid, (LPVOID*)&g_orig_movie_asvoid);
+    h_text[1] = arm(tbl, n, mod, "UGFxObjectexecActionScriptVoid",
+                    (LPVOID)hook_object_asvoid, (LPVOID*)&g_orig_object_asvoid);
+    h_text[2] = arm(tbl, n, mod, "AUI_FxsPanelexecInvoke",
+                    (LPVOID)hook_panel_invoke, (LPVOID*)&g_orig_panel_invoke);
 
     // Not a text source: this one gives the keyboard the actions the game
     // bound only to a gamepad. Counted separately so that its failure cannot
     // be mistaken for a text hook failing, and so that losing it leaves the
     // rest of the mod working.
-    int input_armed = arm(tbl, n, mod,
+    int h_input = arm(tbl, n, mod,
                           "AUI_FxsPanelexecCheckInputIsReleaseOrDirectionRepeat",
                           (LPVOID)hook_checkinput, (LPVOID*)&g_orig_checkinput);
 
@@ -10847,26 +11532,26 @@ static DWORD WINAPI init(LPVOID param)
     // native's `self` gives for free. Counted separately again -- it only
     // matters inside a mission, and its absence must not look like the text
     // hooks failing.
-    int cursor_armed = arm(tbl, n, mod, "AXCom3DCursorexecGetCursorMode",
+    int h_cursor = arm(tbl, n, mod, "AXCom3DCursorexecGetCursorMode",
                            (LPVOID)hook_cursormode, (LPVOID*)&g_orig_cursormode);
 
     // The grid's origin. Without it the cursor still reads, but not as a tile.
-    int grid_armed = arm(tbl, n, mod, "UXComWorldDataexecGetWorldData",
+    int h_grid = arm(tbl, n, mod, "UXComWorldDataexecGetWorldData",
                          (LPVOID)hook_worlddata, (LPVOID*)&g_orig_worlddata);
 
     // Not hooks: the implementations behind the world-data natives, called to
-    // say what is on a tile. Read before the hooks below go in, because one of
-    // them, GetFloorZForPosition, is also hooked, and MinHook's jump over the
-    // start of its thunk would be in the way of reading it afterwards.
+    // say what is on a tile, read out of the natives' own code. Nothing writes
+    // to that code any more, so the order no longer matters.
     tile_arm(tbl, n, mod);
 
     // Where numpad navigation puts its target in front of the game: the
     // position, the ground under it, and a view of what a confirm did.
-    int nav_armed = arm(tbl, n, mod, "UXComWorldDataexecGetClosestValidCursorPosition",
-                        (LPVOID)hook_validpos, (LPVOID*)&g_orig_validpos);
-    nav_armed &= arm(tbl, n, mod, "UXComWorldDataexecGetFloorZForPosition",
+    int h_nav[5];
+    h_nav[0] = arm(tbl, n, mod, "UXComWorldDataexecGetClosestValidCursorPosition",
+                   (LPVOID)hook_validpos, (LPVOID*)&g_orig_validpos);
+    h_nav[1] = arm(tbl, n, mod, "UXComWorldDataexecGetFloorZForPosition",
                      (LPVOID)hook_floorz, (LPVOID*)&g_orig_floorz);
-    nav_armed &= arm(tbl, n, mod, "UXComEngineexecIsAnyMoviePlaying",
+    h_nav[2] = arm(tbl, n, mod, "UXComEngineexecIsAnyMoviePlaying",
                      (LPVOID)hook_moviecheck, (LPVOID*)&g_orig_moviecheck);
     // Enter in the ability menu. Its loss costs only that, so it is not
     // counted against navigation.
@@ -10877,12 +11562,34 @@ static DWORD WINAPI init(LPVOID param)
         (LPVOID)hook_chained, (LPVOID*)&g_orig_chained);
     arm(tbl, n, mod, "UEngineexecGetCurrentWorldInfo",
         (LPVOID)hook_worldinfo, (LPVOID*)&g_orig_worldinfo);
-    nav_armed &= arm(tbl, n, mod, "UXComInputBaseexecTestHitPointToFlash",
+    h_nav[3] = arm(tbl, n, mod, "UXComInputBaseexecTestHitPointToFlash",
                      (LPVOID)hook_flashhit, (LPVOID*)&g_orig_flashhit);
-    nav_armed &= arm(tbl, n, mod, "AXComPathingPawnexecComputePath2",
+    h_nav[4] = arm(tbl, n, mod, "AXComPathingPawnexecComputePath2",
                      (LPVOID)hook_computepath, (LPVOID*)&g_orig_computepath);
 
     free(tbl);
+
+    // The pointers in the exe's data, then every UFunction already linked --
+    // which needs the object table, so that probe now comes before the
+    // banner. It takes milliseconds; the one that took long enough to trip
+    // the launcher's ten-second wait is long gone. The scanner wants the
+    // table too: doors, ladders and the Meld are level actors nothing else in
+    // this DLL would see. Not found here, it is asked again from review_pump,
+    // and the tables swapped now still catch whatever links meanwhile.
+    hooks_install(mod);
+    if (objects_init(mod, why, sizeof why))
+        logf_("objects: %s\n", why);
+    else
+        logf_("objects: UNAVAILABLE (%s) -- the scanner will have no doors, "
+              "and the hooks wait for it\n", why);
+    int swept = hooks_sweep_functions();
+
+    int armed = hook_live(h_text[0]) + hook_live(h_text[1]) + hook_live(h_text[2]);
+    int input_armed = hook_live(h_input);
+    int cursor_armed = hook_live(h_cursor);
+    int grid_armed = hook_live(h_grid);
+    int nav_armed = 1;
+    for (int i = 0; i < 5; i++) nav_armed &= hook_live(h_nav[i]);
     if (!armed) { logf_("FATAL: nothing armed\n"); return 1; }
 
     logf_("%d/3 text hooks armed, key remap %s, cursor watch %s, grid %s, nav %s,"
@@ -10890,6 +11597,8 @@ static DWORD WINAPI init(LPVOID param)
           armed, input_armed ? "on" : "OFF", cursor_armed ? "on" : "OFF",
           grid_armed ? "on" : "OFF", nav_armed ? "on" : "OFF",
           nav_armed ? "on" : "OFF");
+    if (!swept)
+        logf_("hooks: the UFunction pass waits for the first UI call (UObject::Class)\n");
 
     // Said aloud, because the log is the one part of this mod its user cannot
     // read.  Now that the launcher attaches during startup rather than on
@@ -10897,19 +11606,6 @@ static DWORD WINAPI init(LPVOID param)
     speech_say(armed == 3 && input_armed
                ? "Accessibility mod ready."
                : "Accessibility mod loaded with errors. Check the log.");
-
-    // The object table, for the scanner: doors, ladders and the Meld are level
-    // actors that nothing else in this DLL would ever see. Last, and after the
-    // banner, because nothing the arming does not need belongs in front of it:
-    // the launcher waits ten seconds for that line and then tells the player
-    // the mod did not arm. An early version of this probe took longer than
-    // that, and the report was "attached but did not arm" about a mod that had
-    // armed perfectly. Not a failure if it is missing either -- the scanner
-    // still has the units, and scan_add_world asks again in a mission.
-    if (objects_init(mod, why, sizeof why))
-        logf_("objects: %s\n", why);
-    else
-        logf_("objects: UNAVAILABLE (%s) -- the scanner will have no doors\n", why);
     return 0;
 }
 

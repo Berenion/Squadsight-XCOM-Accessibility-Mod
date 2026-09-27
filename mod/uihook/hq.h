@@ -165,9 +165,11 @@ void hq_status_resources_clear(void);
 void hq_status_resource(const char* text);
 void hq_status_date(const char* day_month, const char* year, const char* hour,
                     const char* minute);
-// Events are kept per list: the HUD draws two (UIStrategyComponent_EventList
-// _0, "NEXT EVENT", one item; _1, "UPCOMING EVENTS", all of them), and
-// whichever refreshed last would otherwise win. The fuller one is read.
+// Events are kept per list: two panels draw them (the base screen's "NEXT
+// EVENT" and Mission Control's "UPCOMING EVENTS"). UpdateData sends every
+// event to both -- the first only shows one -- and each redraws only while
+// shown, so the list drawn last is the one read. Reading the fuller one read a
+// list drawn before the council report, after it.
 void hq_status_events_clear(const void* list);
 void hq_status_event(const void* list, const char* title, const char* unit,
                      const char* count);
