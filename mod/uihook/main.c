@@ -1926,6 +1926,91 @@ static void capture_body(const char* tag, LONG n, void* stack)
         }
     }
 
+    // The Officer Training School (UIOTS). DrawTable sends AS_Clear, then per
+    // upgrade
+    //     AS_AddOption(int i, tactic, cost, bool disabled)
+    // and selects one; each selection (RealizeSelected) is
+    //     AS_SetListSelection(string i)   -- the index as a STRING
+    //     AS_SetHelp(why it is locked, or "")
+    //     AS_SetPurchaseButtonText        -- mouse mode only
+    //     AS_UpdateInfo(image label, description)
+    // An upgrade (XGOTSUI.BuildTableItem) is bought -- disabled, cost
+    // "PURCHASED" -- locked by a rank not reached -- disabled, the help says
+    // which -- or dear: not disabled, only its cost drawn red, and Enter
+    // still opens the confirm dialogue before the bad sound. On the general
+    // path the list was slots, the moves said nothing and the panel read the
+    // image label: "_squadSizeI. Squad size increased to 5 soldiers."
+    // Up/Down wrap, Enter buys (a dialogue confirms), Escape leaves; after a
+    // purchase the table is drawn again.
+    if (strncmp(obj_name, "UIOTS", 5) == 0) {
+        #define OTS_ROWS 16
+        static char s_title[96], s_help[512];
+        static char s_row[OTS_ROWS][FOCUS_MAX_LABEL];
+        static int  s_n, s_sel, s_fresh;
+        if (strcmp(fn_name, "AS_SetTitles") == 0) {
+            frame_string(node, locals, 0, s_title, sizeof s_title);
+            return;
+        }
+        if (strcmp(fn_name, "AS_Clear") == 0) {
+            s_n = 0;
+            s_fresh = 1;
+            return;
+        }
+        if (strcmp(fn_name, "AS_AddOption") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (i < 0 || i >= OTS_ROWS) return;
+            static FrameArgs a;
+            static char raw[FRAME_ARG_TEXT];
+            frame_args(node, locals, &a);
+            // The cost as drawn: red is XGOTSUI's state 3, not enough money.
+            int dear = frame_local_raw(node, locals, "sRequirement", raw, sizeof raw) &&
+                       font_hue(raw) == HUE_BAD;
+            int disabled = p->nbools && p->bools[0];
+            char cost[64];
+            size_t w = 0;
+            const char* c = a.ns > 1 ? a.s[1] : "";
+            for (; *c && w + 1 < sizeof cost; c++) {          // the section sign, C2 A7
+                if ((unsigned char)c[0] == 0xC2 && (unsigned char)c[1] == 0xA7) { c++; continue; }
+                cost[w++] = *c;
+            }
+            cost[w] = 0;
+            int bought = disabled && cost[0] && !(cost[0] >= '0' && cost[0] <= '9');
+            _snprintf_s(s_row[i], FOCUS_MAX_LABEL, _TRUNCATE, "%s, %s%s%s", a.s[0],
+                        bought ? "purchased" : cost, !bought && cost[0] ? " credits" : "",
+                        bought ? "" : disabled ? ", locked"
+                                   : dear ? ", not enough credits" : "");
+            if (i >= s_n) s_n = i + 1;
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetListSelection") == 0) {
+            char id[16];
+            frame_string(node, locals, 0, id, sizeof id);
+            s_sel = atoi(id);
+            s_help[0] = 0;
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetHelp") == 0) {
+            frame_string(node, locals, 0, s_help, sizeof s_help);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetPurchaseButtonText") == 0) return;
+        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
+            char desc[1024];
+            frame_string(node, locals, 1, desc, sizeof desc);
+            char say[2048];
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s.%s%s %s%s",
+                        s_fresh && s_title[0] ? s_title : "", s_fresh && s_title[0] ? ". " : "",
+                        s_sel >= 0 && s_sel < s_n ? s_row[s_sel] : "?",
+                        s_help[0] ? " " : "", s_help, desc,
+                        s_fresh ? " Enter purchases." : "");
+            s_fresh = 0;
+            logf_("[%ld] %s %s.%s  OTS %d \"%s\"\n", n, tag, obj_name, fn_name, s_sel, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return;
+        }
+    }
+
     // Build Items. UpdateLayout sends the heading and column labels
     // (AS_SetLabels(title, "ITEM", "BUILT")), the tabs' states, clears the
     // list (Invoke "clear") and fills it in one Invoke("BatchAddOptions",
