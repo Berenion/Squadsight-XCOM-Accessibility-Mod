@@ -27,8 +27,8 @@ if exist "%HERE%alienbeat.wav" copy /y "%HERE%alienbeat.wav" "%OUT%\alienbeat.wa
 if exist "%HERE%doorsound.wav" copy /y "%HERE%doorsound.wav" "%OUT%\doorsound.wav" >nul
 if exist "%HERE%windowsound.wav" copy /y "%HERE%windowsound.wav" "%OUT%\windowsound.wav" >nul
 
-rem The credits go wherever the DLL goes: two of the sounds (CC BY, CC BY-NC)
-rem and MinHook (BSD) require them with every copy of the mod.
+rem The credits go wherever the DLL goes: two of the sounds (CC BY, CC BY-NC) require
+rem them with every copy of the mod.
 copy /y "%HERE%..\..\CREDITS.md" "%OUT%\CREDITS.md" >nul
 if errorlevel 1 (popd & echo CREDITS COPY FAILED & exit /b 1)
 
