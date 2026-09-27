@@ -7651,6 +7651,8 @@ static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
     names_counted(flank_names, nflank, r->flanks, sizeof r->flanks);
 }
 
+static int evac_at(int tx, int ty, float floor);
+
 // Describes tile (tx, ty) with its floor at `floor`. Returns 0 when the game
 // could not be asked, leaving `say` empty. `with_dash` is off where the last
 // path is not this tile's; `with_who` off where the units were said already.
@@ -7695,20 +7697,33 @@ static int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     char who[TILE_MAX_TEXT] = "", what[TILE_MAX_TEXT];
     if (with_who) units_on_tile(tx, ty, 1, floor, who, sizeof who, NULL);
     tile_describe(&r, what, sizeof what);
-    _snprintf_s(say, say_sz, _TRUNCATE, "%s%s%s", who, who[0] ? " " : "", what);
+    // After who stands there and before the cover: where the tile is comes
+    // before what it offers. "Evac zone. Low cover. Seen by 1."
+    int evac = 0;
+    {
+        Fault f;
+        __try { evac = evac_at(tx, ty, floor); }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("tile: evac", &f, NULL);
+            evac = 0;
+        }
+    }
+    _snprintf_s(say, say_sz, _TRUNCATE, "%s%s%s%s", who, who[0] ? " " : "",
+                evac ? "Evac zone. " : "", what);
 
     // The cover point carries its own tile, which is the check on the one
     // asked about -- and on the layer this file worked out for smoke.
     logf_("tile: %d, %d floor %.1f (layer %d): cover %s flags 0x%05X at %d, %d, %d; "
           "path cost %d, standard move %d, max %d, moves made %d, turns %d, smoke %d, "
-          "poison %d, seen by %d of %d known%s%s%s%s%s%s%s%s%s -> \"%s\"\n",
+          "poison %d, seen by %d of %d known%s%s%s%s%s%s%s%s%s%s -> \"%s\"\n",
           tx, ty, floor, tz, has_cover ? "yes" : "no", (unsigned)cp.flags,
           cp.x, cp.y, cp.z, cost, std, maxc, moves, turns, r.smoke, r.poison,
           r.seen_by, r.enemies_known, r.flanked ? ", flanked" : "",
           r.flanks[0] ? ", flanks " : "", r.flanks,
           r.reach[0] ? ", rings " : "", r.reach,
           r.height_over[0] ? ", height on " : "", r.height_over,
-          r.height_under[0] ? ", below " : "", r.height_under, say);
+          r.height_under[0] ? ", below " : "", r.height_under,
+          evac ? ", evac zone" : "", say);
     return 1;
 }
 
@@ -8523,26 +8538,45 @@ static WhereVolume g_where_vol[WHERE_VOLUMES];
 static int         g_where_n, g_where_next, g_where_full;
 static void*       g_where_world;
 static const void* g_where_cls;
+static const void* g_where_walk[2];      // XComFloorVolume, XComBuildingVolume
+
+// The evac zone: the level's XComBuildingVolume with IsDropShip, which is what
+// SeqAct_GetExtractionVolume hands the mission scripts ("Get Extraction
+// Volume"), and what XComUnitPawn.Touch watches to raise "On Unit Touched
+// Dropship Volume" and set m_bInDropShip. It has no floor volumes of its own,
+// so where_at never met it: no log has ever had "dropship 1". Found on the
+// same walk as the floor volumes. Only said while an open objective mentions
+// evac ("Escort the survivor to the EVAC Zone."): every map has one, and a
+// mission that does not ask for it shows the player no zone.
+static WhereVolume g_evac;
+static int         g_evac_have;
+static int where_bool(void* bv, const char* name, int dflt);
 static FieldSlot   g_fv_brush, g_fv_number, g_fv_building, g_brush_bounds, g_bv_floors;
 static TileWhere   g_where_heard;    // what the player last heard, for the crossing
 static void where_storeys_forget(void);
 
 static int where_collect(void* obj, int which, int idx, void* ctx)
 {
-    (void)which; (void)ctx;
-    if (g_where_n >= WHERE_VOLUMES) { g_where_full = 1; return 0; }
+    (void)ctx;
+    if (which == 0 && g_where_n >= WHERE_VOLUMES) { g_where_full = 1; return 0; }
+    if (which == 1 && (g_evac_have || !where_bool(obj, "IsDropShip", 0))) return 1;
     const void* v;
     if (!field_ptr(obj, "BrushComponent", &g_fv_brush, sizeof(void*), &v) || !*(void* const*)v)
         return 1;
     void* brush = *(void* const*)v;
     if (!field_ptr(brush, "Bounds", &g_brush_bounds, 7 * sizeof(float), &v)) return 1;
     const float* b = (const float*)v;           // Origin, BoxExtent, SphereRadius
-    WhereVolume* w = &g_where_vol[g_where_n++];
+    WhereVolume* w = which == 1 ? &g_evac : &g_where_vol[g_where_n++];
     w->v = obj;
     w->idx = idx;
     for (int k = 0; k < 3; k++) {
         w->lo[k] = b[k] - b[3 + k];
         w->hi[k] = b[k] + b[3 + k];
+    }
+    if (which == 1) {
+        g_evac_have = 1;
+        logf_("where: the dropship volume (the evac zone) spans %.0f..%.0f, %.0f..%.0f, "
+              "%.0f..%.0f\n", w->lo[0], w->hi[0], w->lo[1], w->hi[1], w->lo[2], w->hi[2]);
     }
     return 1;
 }
@@ -8552,15 +8586,21 @@ static int where_collect(void* obj, int which, int idx, void* ctx)
 static int where_volumes(void)
 {
     if (!objects_ready()) return 0;
-    if (!g_where_cls) g_where_cls = objects_class("XComFloorVolume");
+    if (!g_where_cls) {
+        static const char* const names[] = { "XComFloorVolume", "XComBuildingVolume" };
+        objects_classes(names, g_where_walk, 2);
+        g_where_cls = g_where_walk[0];
+    }
     if (!g_where_cls) return 0;
+    int nwalk = g_where_walk[1] ? 2 : 1;
     void* world = cursor_world();
     if (world != g_where_world || g_where_next > objects_count()) {
         g_where_world = world;
         g_where_n = g_where_next = g_where_full = 0;
+        g_evac_have = 0;
         where_storeys_forget();
         memset(&g_where_heard, 0, sizeof g_where_heard);
-        objects_each_from(&g_where_cls, 1, 0, &g_where_next, where_collect, NULL);
+        objects_each_from(g_where_walk, nwalk, 0, &g_where_next, where_collect, NULL);
         unsigned ms;
         int entries;
         objects_last_walk(&ms, &entries);
@@ -8568,7 +8608,7 @@ static int where_volumes(void)
               g_where_full ? ", the list is full" : "", entries, ms);
     } else if (!g_where_full) {
         int had = g_where_n;
-        objects_each_from(&g_where_cls, 1, g_where_next, &g_where_next, where_collect, NULL);
+        objects_each_from(g_where_walk, nwalk, g_where_next, &g_where_next, where_collect, NULL);
         if (g_where_n != had) logf_("where: %d more floor volumes\n", g_where_n - had);
     }
     return g_where_n;
@@ -8904,6 +8944,57 @@ static void where_say(int tx, int ty, float floor, int force, char* out, size_t 
     if (!ok) return;
     tile_where_text(&g_where_heard, &now, force, out, out_sz);
     g_where_heard = now;
+}
+
+// Whether the evac zone is one to speak of, and still there.
+static int evac_live(void)
+{
+    if (!where_volumes() || !g_evac_have || !mission_open_mentions("evac")) return 0;
+    if (!g_where_walk[1] || !objects_still(g_evac.v, g_evac.idx, &g_where_walk[1], 1)) {
+        g_evac_have = 0;
+        return 0;
+    }
+    return 1;
+}
+
+// Whether the tile whose floor is at `floor` is in the evac zone: the point
+// where_at asks for a floor volume, asked of the dropship volume's brush.
+static int evac_at(int tx, int ty, float floor)
+{
+    CursorGrid g;
+    EncompassFn inside = (EncompassFn)g_volume_fn_encompass;
+    if (!inside || !cursor_grid(&g) || !evac_live()) return 0;
+    float p[3] = { g.min_x + ((float)tx + 0.5f) * CURSOR_TILE,
+                   g.min_y + ((float)ty + 0.5f) * CURSOR_TILE,
+                   floor + WHERE_LIFT };
+    if (p[0] < g_evac.lo[0] || p[0] > g_evac.hi[0] || p[1] < g_evac.lo[1] ||
+        p[1] > g_evac.hi[1] || p[2] < g_evac.lo[2] || p[2] > g_evac.hi[2])
+        return 0;
+    return inside(g_evac.v, NULL, p[0], p[1], p[2], 0.0f, 0.0f, 0.0f) != 0;
+}
+
+// The tile of the evac zone nearest (ox, oy) that has a floor in it, and that
+// floor's height. Every tile of its box is asked, as where_storey_near does.
+static int evac_nearest(int ox, int oy, int* nx, int* ny, float* nz)
+{
+    WhereProbe p;
+    int x0, x1, y0, y1, z0, z1;
+    if (!evac_live() || !where_probe_init(&p) ||
+        !where_box(&p.g, &g_evac, &x0, &x1, &y0, &y1, &z0, &z1))
+        return 0;
+    int best = -1;
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++) {
+            int d = (x - ox) * (x - ox) + (y - oy) * (y - oy);
+            if (best >= 0 && d >= best) continue;
+            float z;
+            if (!where_tile_floor(&p, &g_evac, x, y, z0, z1, &z)) continue;
+            best = d;
+            *nx = x;
+            *ny = y;
+            *nz = z;
+        }
+    return best >= 0;
 }
 
 // A new navigation starts from nothing heard, as X2Access's plant does: the
@@ -10912,6 +11003,30 @@ static FieldSlot g_soldier_unit, g_path_pawn_field, g_target_point;
 // back off to find the floor the marker stands on.
 #define TUTORIAL_POINT_LIFT 24.0f
 
+// The evac zone, under Objectives, on its tile nearest where the scan was
+// measured from -- so Home takes the cursor to the edge of it that is
+// closest, and the offsets say the shortest way in.
+static void scan_add_evac(void)
+{
+    int nx, ny;
+    float nz;
+    int found = 0;
+    Fault f;
+    __try { found = evac_nearest(g_scan_from[0], g_scan_from[1], &nx, &ny, &nz); }
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        fault_log("scan: evac", &f, NULL);
+        found = 0;
+    }
+    if (!found) return;
+    float at[3] = { g_scan_grid.min_x + ((float)nx + 0.5f) * CURSOR_TILE,
+                    g_scan_grid.min_y + ((float)ny + 0.5f) * CURSOR_TILE, nz };
+    ScanItem it;
+    memset(&it, 0, sizeof it);
+    it.kind = SCAN_OBJECTIVES;
+    strcpy_s(it.name, sizeof it.name, "Evac zone");
+    if (scan_item_at(&it, at, 0.0f)) scan_add(&it);
+}
+
 static void scan_add_tutorial(void)
 {
     void* pawn = NULL;
@@ -11094,6 +11209,7 @@ static int scan_rebuild(void)
     // Three field reads and no walk, so it costs nothing outside a tutorial
     // -- and inside one it is the only objective that matters.
     if (c == SCAN_ALL || c == SCAN_OBJECTIVES) scan_add_tutorial();
+    if (c == SCAN_ALL || c == SCAN_OBJECTIVES) scan_add_evac();
     // The climb scan is a query per tile, so it runs only when its own
     // category is showing: "Everything" would pay for it on every press, and
     // a hundred ledges would bury the doors and the people in it anyway.

@@ -35,6 +35,17 @@ static Objective* find(Objective* list, int n, const char* id)
     return NULL;
 }
 
+int mission_open_mentions(const char* word)
+{
+    size_t wn = strlen(word);
+    for (int i = 0; i < g_nnow; i++) {
+        if (g_now[i].state != OPEN) continue;
+        for (const char* p = g_now[i].text; *p; p++)
+            if (_strnicmp(p, word, wn) == 0) return 1;
+    }
+    return 0;
+}
+
 void mission_clear(void)
 {
     g_nnow = 0;

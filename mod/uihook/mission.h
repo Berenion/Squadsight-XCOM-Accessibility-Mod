@@ -41,6 +41,10 @@ int mission_dirty(void);
 // player would notice changed.
 void mission_changes(char* out, size_t out_sz);
 
+// Whether an objective still open mentions `word`, in any case: "Escort the
+// survivor to the EVAC Zone." for "evac".
+int mission_open_mentions(const char* word);
+
 // The whole list, in the order drawn, each with its state after it:
 // "Objectives: Find the source of the infestation. Investigate the response
 // team's disappearance, complete."
