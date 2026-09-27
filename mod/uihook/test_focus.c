@@ -2409,6 +2409,21 @@ int main(void)
                        row, sizeof row);
         check(strcmp(row, "Squaddie Kelly Hudson 'Disco', Assault, Available, promotion") == 0,
               "a soldier row: rank, name, nickname, class, status, promotion");
+        // The strategy screens send the nickname already quoted, as the
+        // game's GetName(eNameType_Nick) gives it (2026-09-27: "''D.O.A.''").
+        hq_soldier_row("Christophe Leroy", "'D.O.A.'", "Assault", "Active", "rank3", 0, 0,
+                       row, sizeof row);
+        check(strcmp(row, "Sergeant Christophe Leroy 'D.O.A.', Assault, Active") == 0,
+              "a nickname sent quoted is not quoted again");
+        hq_nick_quoted("Dozer", row, sizeof row);
+        check(strcmp(row, "'Dozer'") == 0, "a bare nickname is quoted");
+        hq_nick_quoted("'Dozer'", row, sizeof row);
+        check(strcmp(row, "'Dozer'") == 0, "a quoted one is left alone");
+        hq_nick_quoted("", row, sizeof row);
+        check(row[0] == 0, "no nickname, nothing");
+        hq_squad_row("SGT. LEROY", "'D.O.A.'", "Assault", "", "", "", row, sizeof row);
+        check(strncmp(row, "Sergeant LEROY 'D.O.A.', Assault", 32) == 0,
+              "the squad row too");
         hq_soldier_row("Ana Ruiz", "", "", "Wounded", "rank0", 1, 0, row, sizeof row);
         check(strcmp(row, "Rookie Ana Ruiz, Wounded, unavailable") == 0,
               "a rookie with no nickname or class");

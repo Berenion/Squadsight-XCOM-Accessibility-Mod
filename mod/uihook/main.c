@@ -4186,12 +4186,17 @@ static void capture_body(const char* tag, LONG n, void* stack)
                 strncpy_s(cls_word, sizeof cls_word, cls, _TRUNCATE);
                 cls_word[0] = (char)toupper((unsigned char)cls_word[0]);
             }
+            // The name already carries the nickname ("Cpl. Christophe 'D.O.A.'
+            // Leroy"). The nickname slot is not one: XGDebriefUI fills it only
+            // when a nickname was just earned, with m_strEarnedNickName --
+            // "Earned Nickname: 'D.O.A.'" -- so it is news, said with the
+            // promotions, not quoted after the name as it was.
             _snprintf_s(row, sizeof row, _TRUNCATE,
-                        "%s%s%s%s%s%s, %s%s%d kill%s, %d mission%s%s%s%s%s", name,
-                        *nick ? " '" : "", nick, *nick ? "'" : "",
+                        "%s%s%s, %s%s%d kill%s, %d mission%s%s%s%s%s%s%s", name,
                         *cls_word ? ", " : "", cls_word, status, *status ? ", " : "",
                         kills, kills == 1 ? "" : "s", missions, missions == 1 ? "" : "s",
-                        *promo ? ". " : "", promo, *cpromo ? ". " : "", cpromo);
+                        *promo ? ". " : "", promo, *cpromo ? ". " : "", cpromo,
+                        *nick ? ". " : "", nick);
             if (*promo) s_promoted = 1;
             if (covert) {
                 strncpy_s(s_covert, sizeof s_covert, row, _TRUNCATE);
@@ -4776,9 +4781,10 @@ static void capture_body(const char* tag, LONG n, void* stack)
         static FrameArgs a;
         frame_args(node, locals, &a);
         if (strcmp(fn_name, "AS_SetSoldierInformation") == 0 && a.ns >= 10) {
-            char who[160];
-            if (a.s[1][0])
-                _snprintf_s(who, sizeof who, _TRUNCATE, "%s %s '%s'", a.s[7], a.s[0], a.s[1]);
+            char who[160], quoted[96];
+            hq_nick_quoted(a.s[1], quoted, sizeof quoted);   // sent already quoted
+            if (quoted[0])
+                _snprintf_s(who, sizeof who, _TRUNCATE, "%s %s %s", a.s[7], a.s[0], quoted);
             else
                 _snprintf_s(who, sizeof who, _TRUNCATE, "%s %s", a.s[7], a.s[0]);
             _snprintf_s(g_soldier_info, sizeof g_soldier_info, _TRUNCATE,
@@ -9030,7 +9036,7 @@ static int soldier_state(const UnitName* u, SoldierState* s)
     } else {
         soldier_clear(s);
         strncpy_s(s->name, sizeof s->name, u->name, _TRUNCATE);
-        if (u->nick[0]) _snprintf_s(s->nick, sizeof s->nick, _TRUNCATE, "'%s'", u->nick);
+        hq_nick_quoted(u->nick, s->nick, sizeof s->nick);
     }
     s->hp = u->hp;
     s->hp_max = u->hp_max;

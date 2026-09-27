@@ -69,6 +69,13 @@ const char* hq_pc_icon_label(const char* label);
 // too and are left out, since _className already says the class. `nick` and
 // `cls` may be empty (a rookie has neither). The result:
 //     "Squaddie Kelly Hudson 'Disco', Assault, Available, promotion"
+//
+// A nickname in single quotes, as the game's own XGStrategySoldier.GetName
+// (eNameType_Nick) gives it: quoted unless it already starts or ends with a
+// quote. The strategy screens are sent it that way, and quoting it again read
+// "''D.O.A.''" (2026-09-27). Empty for an empty nickname.
+void hq_nick_quoted(const char* nick, char* out, size_t out_sz);
+
 void hq_soldier_row(const char* name, const char* nick, const char* cls,
                     const char* status, const char* rank_label, int disabled,
                     int promotable, char* out, size_t out_sz);

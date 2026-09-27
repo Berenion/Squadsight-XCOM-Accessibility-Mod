@@ -133,6 +133,18 @@ static const char* rank_word(const char* label)
     return "";
 }
 
+void hq_nick_quoted(const char* nick, char* out, size_t out_sz)
+{
+    if (!out || !out_sz) return;
+    out[0] = 0;
+    if (!nick || !*nick) return;
+    size_t n = strlen(nick);
+    if (nick[0] == '\'' || nick[n - 1] == '\'')
+        _snprintf_s(out, out_sz, _TRUNCATE, "%s", nick);
+    else
+        _snprintf_s(out, out_sz, _TRUNCATE, "'%s'", nick);
+}
+
 void hq_soldier_row(const char* name, const char* nick, const char* cls,
                     const char* status, const char* rank_label, int disabled,
                     int promotable, char* out, size_t out_sz)
@@ -145,10 +157,11 @@ void hq_soldier_row(const char* name, const char* nick, const char* cls,
         const char* sp = strchr(name, ' ');
         if (sp && sp > name && sp[-1] == '.' && sp - name <= 5) name = sp + 1;
     }
-    char who[160];
-    if (nick && *nick)
-        _snprintf_s(who, sizeof who, _TRUNCATE, "%s%s%s '%s'", rank, *rank ? " " : "",
-                    name ? name : "", nick);
+    char who[160], quoted[96];
+    hq_nick_quoted(nick, quoted, sizeof quoted);
+    if (quoted[0])
+        _snprintf_s(who, sizeof who, _TRUNCATE, "%s%s%s %s", rank, *rank ? " " : "",
+                    name ? name : "", quoted);
     else
         _snprintf_s(who, sizeof who, _TRUNCATE, "%s%s%s", rank, *rank ? " " : "",
                     name ? name : "");
@@ -520,10 +533,10 @@ void hq_squad_row(const char* name, const char* nick, const char* class_desc,
     if (!out || !out_sz) return;
     const char* rest;
     const char* rank = rank_from_abbrev(name ? name : "", &rest);
-    char who[128], i1[64], i2[64];
-    _snprintf_s(who, sizeof who, _TRUNCATE, "%s%s%s%s%s%s", rank ? rank : "",
-                rank ? " " : "", rest, nick && *nick ? " '" : "", nick ? nick : "",
-                nick && *nick ? "'" : "");
+    char who[128], i1[64], i2[64], quoted[96];
+    hq_nick_quoted(nick, quoted, sizeof quoted);
+    _snprintf_s(who, sizeof who, _TRUNCATE, "%s%s%s%s%s", rank ? rank : "",
+                rank ? " " : "", rest, quoted[0] ? " " : "", quoted);
     hq_item_from_image(item1, i1, sizeof i1);
     hq_item_from_image(item2, i2, sizeof i2);
     _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s%s%s%s%s%s%s", who,
