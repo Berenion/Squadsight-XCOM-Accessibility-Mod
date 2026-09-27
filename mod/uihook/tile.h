@@ -107,9 +107,10 @@ typedef struct {
     // "Medikit reaches White. Arc Thrower reaches Sectoid." Empty for none.
     // See tile_rings in main.c.
     char reach[192];
-    // Seen enemies a soldier here would stand a storey or more above (height
-    // advantage, +20 aim), and ones that would stand as far above the soldier:
-    // "Sectoid", "2 Sectoids, Muton". See tile_exposure in main.c.
+    // Seen enemies with a line to this tile that a soldier here would stand a
+    // storey or more above (height advantage, +20 aim), and ones that would
+    // stand as far above the soldier: "Sectoid", "2 Sectoids, Muton". See
+    // tile_exposure in main.c.
     char height_over[96];
     char height_under[96];
 } TileReport;

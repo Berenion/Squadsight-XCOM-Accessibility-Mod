@@ -7209,7 +7209,14 @@ static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
         // tile's floor against the enemy's feet (its pawn sits NAV_CURSOR_LIFT
         // above them). IsPointWithinFiringRange's height output was logged for
         // this and gave 1.000 every time, from above an enemy as well.
-        {
+        //
+        // Only against an enemy with a line to the tile: the bonus is on a
+        // shot, and the game's penalty reads "An enemy unit has elevated
+        // position and can see this unit". The 17:37 log of 2026-09-27 said
+        // "Out of sight. Height advantage on Sectoid." 19 times. The same
+        // CanSeeActorToTile as the "Seen by" count below.
+        int sees = see(world, NULL, pawn, tx, ty, tz, 0) != 0;
+        if (sees) {
             const void* hv;
             if (field_ptr(pawn, "Location", &g_pawn_loc, 3 * sizeof(float), &hv)) {
                 float diff = here[2] - (((const float*)hv)[2] - NAV_CURSOR_LIFT);
@@ -7242,7 +7249,7 @@ static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
             }
         }
 
-        if (!see(world, NULL, pawn, tx, ty, tz, 0)) continue;
+        if (!sees) continue;
         r->seen_by++;
 
         if (!has_cover || r->flanked || !g_expose_ok) continue;
