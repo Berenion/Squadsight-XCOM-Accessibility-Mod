@@ -6422,9 +6422,9 @@ typedef struct {
     int   n;
 } SeenSet;
 
-static FieldSlot g_visen;
+static FieldSlot g_visen, g_viciv;
 
-static void squad_sight(void* squad, SeenSet* set)
+static void squad_sight_of(void* squad, SeenSet* set, const char* field, FieldSlot* slot)
 {
     set->n = 0;
     if (!squad) return;
@@ -6432,8 +6432,7 @@ static void squad_sight(void* squad, SeenSet* set)
         UnitSeen s;
         if (!unit_seen(&g_units[i], squad, &s) || !s.friendly) continue;
         const void* v;
-        if (!field_ptr(s.unit, "m_arrVisibleEnemies", &g_visen,
-                       sizeof(FArray), &v))
+        if (!field_ptr(s.unit, field, slot, sizeof(FArray), &v))
             continue;
         const FArray* a = (const FArray*)v;
         if (a->Num <= 0 || a->Num > SEEN_MAX ||
@@ -6446,6 +6445,22 @@ static void squad_sight(void* squad, SeenSet* set)
             if (j == set->n && set->n < SEEN_MAX) set->unit[set->n++] = e[k];
         }
     }
+}
+
+static void squad_sight(void* squad, SeenSet* set)
+{
+    squad_sight_of(squad, set, "m_arrVisibleEnemies", &g_visen);
+}
+
+// The civilians the squad can see, the same way: each squad member's
+// m_arrVisibleCivilians. IsAliveAndVisible is not the player's sight for a
+// civilian either -- the 2026-09-27 run's scanner gave "Survivor, 2 south,
+// 43 west" before anyone had seen them. The sight manager's
+// AddVisibleCivilian / RemoveVisibleCivilian events keep this array per
+// viewer, as AddVisibleEnemy does m_arrVisibleEnemies.
+static void squad_sight_civilians(void* squad, SeenSet* set)
+{
+    squad_sight_of(squad, set, "m_arrVisibleCivilians", &g_viciv);
 }
 
 static int seen_has(const SeenSet* set, const void* unit)
@@ -8688,8 +8703,9 @@ static void* scan_squad_player(void)
 static void scan_add_units(void)
 {
     void* squad = scan_squad_player();
-    static SeenSet sight;
+    static SeenSet sight, civilians;
     squad_sight(squad, &sight);
+    squad_sight_civilians(squad, &civilians);
 
     for (int i = 0; i < g_nunits; i++) {
         UnitSeen s;
@@ -8701,8 +8717,10 @@ static void scan_add_units(void)
             it.kind = SCAN_SQUAD;
         } else if (unit_team(s.unit) == TEAM_NEUTRAL) {
             // A civilian is on nobody's side, so no one holds them in
-            // m_arrVisibleEnemies. IsAliveAndVisible -- which unit_seen has
-            // already asked -- is the whole gate, the same one the squad gets.
+            // m_arrVisibleEnemies; they have m_arrVisibleCivilians instead.
+            // IsAliveAndVisible alone was the gate once, and listed a
+            // civilian 43 tiles off whom no one had seen.
+            if (!seen_has(&civilians, s.unit)) continue;
             it.kind = SCAN_CIVILIANS;
         } else {
             // Aliens go through the squad's own sight, as the radar does:
@@ -11082,6 +11100,13 @@ static void blast_say(void)
     int nthem = 0, nours = 0, tthem = 0, tours = 0;
     unsigned char matched[64] = { 0 };
     void* squad = squad_player();
+    // MarkTargetedActors marks every unit in the radius, hidden or not, and
+    // a hidden one's highlight is never drawn -- so an alien or civilian is
+    // named only while the squad sees them. It still counts as matched: it
+    // is a unit, and must not be offered again as a destructible below.
+    static SeenSet sight, civilians;
+    squad_sight(squad, &sight);
+    squad_sight_civilians(squad, &civilians);
     for (int i = 0; i < g_nunits; i++) {
         UnitSeen s;
         if (!unit_seen(&g_units[i], squad, &s)) continue;
@@ -11089,6 +11114,8 @@ static void blast_say(void)
         for (int k = 0; k < num; k++)
             if (data[k] == s.unit || data[k] == s.pawn) { in = 1; matched[k] = 1; }
         if (!in) continue;
+        if (!s.friendly && !seen_has(&sight, s.unit) && !seen_has(&civilians, s.unit))
+            continue;
         if (s.friendly) { if (nours < TILE_NAMES_MAX) ours[nours++] = s.who->name; tours++; }
         else            { if (nthem < TILE_NAMES_MAX) them[nthem++] = s.who->name; tthem++; }
     }
