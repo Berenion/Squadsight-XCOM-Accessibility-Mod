@@ -5767,6 +5767,13 @@ static int       g_cursor_slot_floor = -1;  // XCom3DCursor.WorldZToCursorFloor
 static int       g_world_slot_seetile = -1; // XComWorldData.CanSeeActorToTile
 static int       g_unit_slot_flanking = -1; // XGUnitNativeBase.IsFlankingCoverPoint
 static void*     g_unit_fn_flanking;        // ...which is final, so not virtual
+// Volume.EncompassesPoint(Vector Loc): its thunk calls AVolume::Encompasses
+// outright, not through the vtable, with the point and a zero extent -- two
+// Vectors by value, six floats (`ret 0x18`, EW 2026-09-27).
+typedef int (__fastcall* EncompassFn)(void* self, void* edx, float px, float py, float pz,
+                                      float ex, float ey, float ez);
+static int       g_volume_slot_encompass = -1;
+static void*     g_volume_fn_encompass;
 static int       g_unit_slot_range = -1;    // XGUnitNativeBase.IsPointWithinFiringRange
 // XGUnitNativeBase.IsFlankedBy_EnemyAtLocation(XGUnitNativeBase kEnemy,
 //     const out Vector vEnemyLocation, optional bool bDebugLog) -- `self` is
@@ -5818,7 +5825,8 @@ typedef struct {
 // floor it settled on: "Godongwana, one floor up." (step_who).
 static ColumnUnit g_step_units[COLUMN_UNITS];
 static int        g_step_nunits;
-static char      g_step_note[48];              // said first: "Floor 2." after F / C
+static char      g_step_note[160];              // said first: "Floor 2." after F / C
+static char      g_step_where[64];             // then "Inside building, floor 2 of 3."
 // The floor F / C put the target on, until the next step. The tile does not
 // change, so a path the game already had for it -- on the floor it was just
 // taken off -- is still reported, and was taken as proof of that floor: the
@@ -7785,16 +7793,24 @@ static float step_floor(void)
     return g_nav_aim ? g_aim_floor : navh_ground();
 }
 
+static int where_levels_between(int tx, int ty, float from, float to, int* dz);
+
 // The units in the target's column, worded against the step's floor:
 // "Godongwana, one floor up." With `same_only`, only those on that floor --
-// the ones that can be standing in the way.
+// the ones that can be standing in the way. Inside a building the floors are
+// its own storeys (where_levels_between); elsewhere, storeys of 192.
 static void step_who(int same_only, char* out, size_t out_sz)
 {
     size_t used = 0;
     out[0] = 0;
     float floor = step_floor();
+    int tx = 0, ty = 0;
+    int have_tile = nav_target(&tx, &ty);
     for (int i = 0; i < g_step_nunits; i++) {
         int dz = scan_storey_diff(g_step_units[i].feet, floor);
+        int levels;
+        if (have_tile && dz && where_levels_between(tx, ty, floor, g_step_units[i].feet, &levels))
+            dz = levels;
         if (same_only && dz) continue;
         char piece[TILE_MAX_TEXT];
         scan_unit_floor_text(g_step_units[i].label, dz, piece, sizeof piece);
@@ -7811,12 +7827,15 @@ static int nav_step_say(const char* body)
     g_step_pending = 0;
     char who[TILE_MAX_TEXT];
     step_who(0, who, sizeof who);
-    char say[TILE_MAX_TEXT + TILE_MAX_TEXT + NAV_MAX_TEXT + sizeof g_step_note];
-    _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s%s%s.", g_step_note,
-                g_step_note[0] ? " " : "", who,
+    char say[TILE_MAX_TEXT + TILE_MAX_TEXT + NAV_MAX_TEXT + sizeof g_step_note +
+             sizeof g_step_where];
+    _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s%s%s%s%s.", g_step_note,
+                g_step_note[0] ? " " : "", g_step_where,
+                g_step_where[0] ? " " : "", who,
                 who[0] && body[0] ? " " : "", body,
                 who[0] || body[0] ? " " : "", g_step_coords);
     g_step_note[0] = 0;
+    g_step_where[0] = 0;
     logf_("nav: said \"%s\"\n", say);
     speech_say_now(say);
     return 1;
@@ -8103,6 +8122,8 @@ static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
         { "XGUnitNativeBaseexecIsInOverwatch",       &g_unit_slot_overwatch, NULL },
         { "UI_FxsPanelexecIsVisible",                &g_panel_slot_visible, NULL },
         { "XCom3DCursorexecWorldZToCursorFloor",     &g_cursor_slot_floor,  NULL },
+        { "VolumeexecEncompassesPoint",              &g_volume_slot_encompass,
+                                              &g_volume_fn_encompass },
     };
     for (int i = 0; i < (int)(sizeof want / sizeof want[0]); i++) {
         const uint8_t* code = (const uint8_t*)natives_find_class(tbl, n, want[i].name);
@@ -8149,6 +8170,501 @@ static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
 
 // Defined with the pick, below: the interface lent to the mouse's own pick.
 static void nav_forget_interface(void);
+
+// ---- inside or outside -----------------------------------------------------
+//
+// "Inside building, floor 2 of 3." as a step crosses a wall, "On the roof.",
+// "Outside." -- said on the crossing, as the game redraws its cut-away only
+// then. Taken from X2Access (xcom2access, alex19EP), whose tile cursor says
+// the same; the rule itself is EU/EW's own.
+//
+// The game keeps the answer for the cursor in XComPawnIndoorOutdoorInfo, fed
+// by the cursor's Touch events on XComFloorVolumes -- a frame behind every
+// placement, and about the mouse's cursor, not the numpad's target. So the
+// same question is asked of the same volumes at the tile: every floor volume
+// whose brush holds a point just above the floor (Volume.EncompassesPoint),
+// then CheckForFloorVolumeEvents' rule over them:
+//   - if any of them belongs to an internal building (a building within a
+//     building), only those count;
+//   - the first building met is the one, and the floor is the highest
+//     FloorNumber among its volumes;
+//   - a floor volume with no building behind it still counts as inside.
+// The roof is the game's IsOnRoof -- floor == Floors.Length with more than one
+// floor -- which the weather uses to rain on a soldier indoors or not. A
+// building whose own IsInside is off is taken as outside, as X2Access found
+// the native to hold in XCOM 2; EU/EW's native IsInside is virtual and was not
+// read, so that part is a guess, and the log line says so when it decides.
+//
+// The floor volumes are placed with the map and never spawned, so they are
+// found by one walk of the object table per map, with each one's box kept to
+// rule it out before the native is asked.
+#define WHERE_VOLUMES 2048
+#define WHERE_HITS    16
+#define WHERE_LIFT    32.0f      // above the floor: inside a storey's volume, below the next
+
+typedef struct { void* v; int idx; float lo[3], hi[3]; } WhereVolume;
+static WhereVolume g_where_vol[WHERE_VOLUMES];
+static int         g_where_n, g_where_next, g_where_full;
+static void*       g_where_world;
+static const void* g_where_cls;
+static FieldSlot   g_fv_brush, g_fv_number, g_fv_building, g_brush_bounds, g_bv_floors;
+static TileWhere   g_where_heard;    // what the player last heard, for the crossing
+static void where_storeys_forget(void);
+
+static int where_collect(void* obj, int which, int idx, void* ctx)
+{
+    (void)which; (void)ctx;
+    if (g_where_n >= WHERE_VOLUMES) { g_where_full = 1; return 0; }
+    const void* v;
+    if (!field_ptr(obj, "BrushComponent", &g_fv_brush, sizeof(void*), &v) || !*(void* const*)v)
+        return 1;
+    void* brush = *(void* const*)v;
+    if (!field_ptr(brush, "Bounds", &g_brush_bounds, 7 * sizeof(float), &v)) return 1;
+    const float* b = (const float*)v;           // Origin, BoxExtent, SphereRadius
+    WhereVolume* w = &g_where_vol[g_where_n++];
+    w->v = obj;
+    w->idx = idx;
+    for (int k = 0; k < 3; k++) {
+        w->lo[k] = b[k] - b[3 + k];
+        w->hi[k] = b[k] + b[3 + k];
+    }
+    return 1;
+}
+
+// The floor volumes of this map, walked in full once per world and topped up
+// from where the last walk stopped after that. 0 when there are none to ask.
+static int where_volumes(void)
+{
+    if (!objects_ready()) return 0;
+    if (!g_where_cls) g_where_cls = objects_class("XComFloorVolume");
+    if (!g_where_cls) return 0;
+    void* world = cursor_world();
+    if (world != g_where_world || g_where_next > objects_count()) {
+        g_where_world = world;
+        g_where_n = g_where_next = g_where_full = 0;
+        where_storeys_forget();
+        memset(&g_where_heard, 0, sizeof g_where_heard);
+        objects_each_from(&g_where_cls, 1, 0, &g_where_next, where_collect, NULL);
+        unsigned ms;
+        int entries;
+        objects_last_walk(&ms, &entries);
+        logf_("where: %d floor volumes on this map%s (%d entries, %u ms)\n", g_where_n,
+              g_where_full ? ", the list is full" : "", entries, ms);
+    } else if (!g_where_full) {
+        int had = g_where_n;
+        objects_each_from(&g_where_cls, 1, g_where_next, &g_where_next, where_collect, NULL);
+        if (g_where_n != had) logf_("where: %d more floor volumes\n", g_where_n - had);
+    }
+    return g_where_n;
+}
+
+// A bool on a building volume, or `dflt` while the bool mask is not known.
+static int where_bool(void* bv, const char* name, int dflt)
+{
+    if (!props_mask_offset()) return dflt;
+    static struct { const void* cls; const void* prop; char name[24]; } cache[8];
+    uint32_t class_off = props_class_offset();
+    if (!class_off || !readable((uint8_t*)bv + class_off, sizeof(void*))) return dflt;
+    const void* cls = *(void* const*)((uint8_t*)bv + class_off);
+    const void* prop = NULL;
+    int k;
+    for (k = 0; k < 8 && cache[k].cls; k++)
+        if (cache[k].cls == cls && strcmp(cache[k].name, name) == 0) break;
+    if (k < 8 && cache[k].cls) {
+        prop = cache[k].prop;
+    } else {
+        prop = object_field_prop(bv, name);
+        if (k == 8) k = 7;
+        cache[k].cls = cls;
+        cache[k].prop = prop;
+        strncpy_s(cache[k].name, sizeof cache[k].name, name, _TRUNCATE);
+    }
+    int b = dflt;
+    if (!prop || !props_read_object_bool(prop, (const uint8_t*)bv, &b)) return dflt;
+    return b;
+}
+
+// The storeys a building really has. Its Floors array is its cut-away bands,
+// and a band is not a floor: in the 22:29 log of 2026-09-27 a building's
+// volumes were bands 0..192, 192..384 and 384..576 under a roof band, but the
+// only surfaces in it were the ground at 2 and an upper floor at 388 -- F from
+// the ground went straight to 388 on every tile tried, and the middle band held
+// nothing but a stair landing at 290 on one tile. Said by band it was "floor 1
+// of 3" under a ceiling with one floor above it. So a band counts as a storey
+// only when the game has a floor in it somewhere: each of the building's own
+// volumes is asked, tile by tile across its box and layer by layer up its
+// height, with the probe F uses (GetFloorZForPosition from the layer's top,
+// else IsPositionOnFloor at its middle), and the floor found must lie inside
+// that same volume. Pieces the map marks as not to be entered
+// (m_bNonEnterableBuildingPiece) and the roof band are left out. Worked out
+// once per building, and its make-up logged then, with each volume's
+// m_FloorVolumeType -- the map's own word for a band, whose meaning for an
+// empty one is not known yet.
+#define WHERE_STOREYS    16
+#define WHERE_BAND_TILES 400     // tiles asked per layer of a volume, at most
+static void* g_where_bv;                 // the building the list below is for
+static int   g_where_bv_nums[WHERE_STOREYS], g_where_bv_n;
+static FieldSlot g_fv_type;
+
+static void where_storeys_forget(void)
+{
+    g_where_bv = NULL;
+    g_where_bv_n = 0;
+}
+
+// The game's floor queries, as F asks them, gathered once per question.
+typedef struct {
+    void*          world;
+    EncompassFn    inside;
+    PositionTestFn on_floor;
+    FloorZFn       floorz;
+    CursorGrid     g;
+} WhereProbe;
+
+static int where_probe_init(WhereProbe* p)
+{
+    p->world = cursor_world();
+    p->inside = (EncompassFn)g_volume_fn_encompass;
+    if (!p->world || !p->inside || !cursor_grid(&p->g)) return 0;
+    p->on_floor = (PositionTestFn)tile_vfn(p->world, g_tile_slot_onfloor);
+    p->floorz = (FloorZFn)tile_vfn(p->world, g_tile_slot_floorz);
+    return p->on_floor || p->floorz;
+}
+
+// The tile range of volume `w`'s box on the grid, clamped to the map. 0 when
+// it lies off the map.
+static int where_box(const CursorGrid* g, const WhereVolume* w,
+                     int* x0, int* x1, int* y0, int* y1, int* z0, int* z1)
+{
+    *x0 = cursor_tile_axis(w->lo[0] + 1.0f, g->min_x, CURSOR_TILE);
+    *x1 = cursor_tile_axis(w->hi[0] - 1.0f, g->min_x, CURSOR_TILE);
+    *y0 = cursor_tile_axis(w->lo[1] + 1.0f, g->min_y, CURSOR_TILE);
+    *y1 = cursor_tile_axis(w->hi[1] - 1.0f, g->min_y, CURSOR_TILE);
+    *z0 = cursor_tile_axis(w->lo[2] + 1.0f, g->min_z, 64.0f);
+    *z1 = cursor_tile_axis(w->hi[2] - 1.0f, g->min_z, 64.0f);
+    if (*x0 < 0) *x0 = 0;
+    if (*y0 < 0) *y0 = 0;
+    if (*x1 >= g->num_x) *x1 = g->num_x - 1;
+    if (*y1 >= g->num_y) *y1 = g->num_y - 1;
+    return *x1 >= *x0 && *y1 >= *y0 && *z1 >= *z0;
+}
+
+// A floor on tile (tx, ty) inside volume `w`, lowest layer first; its height
+// in `*found`. F's own probe: GetFloorZForPosition from each layer's top, else
+// IsPositionOnFloor at its middle, and the floor must lie in the volume.
+static int where_tile_floor(const WhereProbe* p, const WhereVolume* w, int tx, int ty,
+                            int z0, int z1, float* found)
+{
+    float x = p->g.min_x + ((float)tx + 0.5f) * CURSOR_TILE;
+    float y = p->g.min_y + ((float)ty + 0.5f) * CURSOR_TILE;
+    for (int tz = z0; tz <= z1; tz++) {
+        float bottom = p->g.min_z + (float)tz * 64.0f;
+        float z = 0.0f;
+        int has = 0;
+        if (p->floorz) {
+            float top[3] = { x, y, bottom + 63.0f };
+            z = p->floorz(p->world, NULL, top, 0);
+            has = z != top[2] && z >= bottom - 1.0f && z <= bottom + 63.0f;
+        }
+        if (!has && p->on_floor) {
+            float mid[3] = { x, y, bottom + 32.0f };
+            if (p->on_floor(p->world, NULL, mid)) {
+                z = aim_floor_exact(p->world, mid, bottom);
+                has = 1;
+            }
+        }
+        if (!has) continue;
+        if (!p->inside(w->v, NULL, x, y, z + WHERE_LIFT, 0.0f, 0.0f, 0.0f)) continue;
+        *found = z;
+        return 1;
+    }
+    return 0;
+}
+
+// Whether the game has a floor anywhere inside volume `w`; where, in
+// `*fx, *fy, *found`. Asks at most WHERE_BAND_TILES tiles, spread over the box.
+static int where_band_floor(const WhereVolume* w, int* fx, int* fy, float* found)
+{
+    WhereProbe p;
+    int x0, x1, y0, y1, z0, z1;
+    if (!where_probe_init(&p) || !where_box(&p.g, w, &x0, &x1, &y0, &y1, &z0, &z1)) return 0;
+    int area = (x1 - x0 + 1) * (y1 - y0 + 1);
+    int step = 1;
+    while (area / (step * step) > WHERE_BAND_TILES) step++;
+    for (int ty = y0; ty <= y1; ty += step)
+        for (int tx = x0; tx <= x1; tx += step)
+            if (where_tile_floor(&p, w, tx, ty, z0, z1, found)) {
+                *fx = tx;
+                *fy = ty;
+                return 1;
+            }
+    return 0;
+}
+
+// The tile nearest (tx, ty) with a floor in storey `num` of building `bv`:
+// every tile of that storey's volumes is asked, nearest first wins. For F / C
+// when the storey is not over or under the tile they were pressed on.
+static int where_storey_near(const void* bv, int num, int tx, int ty, int* nx, int* ny)
+{
+    WhereProbe p;
+    if (!where_probe_init(&p)) return 0;
+    int best = -1;
+    for (int i = 0; i < g_where_n; i++) {
+        WhereVolume* w = &g_where_vol[i];
+        if (!objects_still(w->v, w->idx, &g_where_cls, 1)) continue;
+        const void* v;
+        if (!field_ptr(w->v, "CachedBuildingVolume", &g_fv_building, sizeof(void*), &v) ||
+            *(void* const*)v != bv)
+            continue;
+        if (!field_ptr(w->v, "FloorNumber", &g_fv_number, sizeof(int32_t), &v) ||
+            *(const int32_t*)v != num)
+            continue;
+        if (where_bool(w->v, "m_bNonEnterableBuildingPiece", 0)) continue;
+        int x0, x1, y0, y1, z0, z1;
+        if (!where_box(&p.g, w, &x0, &x1, &y0, &y1, &z0, &z1)) continue;
+        for (int y = y0; y <= y1; y++) {
+            for (int x = x0; x <= x1; x++) {
+                int d = (x - tx) * (x - tx) + (y - ty) * (y - ty);
+                if (best >= 0 && d >= best) continue;
+                float z;
+                if (!where_tile_floor(&p, w, x, y, z0, z1, &z)) continue;
+                best = d;
+                *nx = x;
+                *ny = y;
+            }
+        }
+    }
+    return best >= 0;
+}
+
+// The 1-based storey `floor_no` is of `bv`: how many of its real storeys are
+// at or below that band, so a stair landing in an empty band is said as the
+// storey under it. 0 when the building has none to count.
+static int where_storeys(void* bv, int bands, int floor_no)
+{
+    if (bv != g_where_bv) {
+        g_where_bv = bv;
+        g_where_bv_n = 0;
+        char parts[768] = "";
+        size_t used = 0;
+        ULONGLONG t0 = GetTickCount64();
+        for (int i = 0; i < g_where_n; i++) {
+            WhereVolume* w = &g_where_vol[i];
+            if (!objects_still(w->v, w->idx, &g_where_cls, 1)) continue;
+            const void* v;
+            if (!field_ptr(w->v, "CachedBuildingVolume", &g_fv_building, sizeof(void*), &v) ||
+                *(void* const*)v != bv)
+                continue;
+            int num = field_ptr(w->v, "FloorNumber", &g_fv_number, sizeof(int32_t), &v)
+                ? *(const int32_t*)v : 0;
+            int type = field_ptr(w->v, "m_FloorVolumeType", &g_fv_type, 1, &v)
+                ? *(const uint8_t*)v : -1;
+            int closed = where_bool(w->v, "m_bNonEnterableBuildingPiece", 0);
+            int roof = bands > 1 && num == bands;
+            float z = 0.0f;
+            int fx = 0, fy = 0;
+            int floored = !closed && !roof && num > 0 && where_band_floor(w, &fx, &fy, &z);
+            char what[48];
+            if (floored)
+                _snprintf_s(what, sizeof what, _TRUNCATE, " floor at %.0f on %d, %d", z, fx, fy);
+            else strcpy_s(what, sizeof what, closed ? " closed" : roof ? " roof" : " empty");
+            int wrote = _snprintf_s(parts + used, sizeof parts - used, _TRUNCATE,
+                                    "%s#%d z %.0f..%.0f type %d%s", used ? ", " : "", num,
+                                    w->lo[2], w->hi[2], type, what);
+            if (wrote > 0) used += (size_t)wrote;
+            if (!floored) continue;
+            int at = 0;
+            while (at < g_where_bv_n && g_where_bv_nums[at] < num) at++;
+            if (at < g_where_bv_n && g_where_bv_nums[at] == num) continue;
+            if (g_where_bv_n == WHERE_STOREYS) continue;
+            memmove(&g_where_bv_nums[at + 1], &g_where_bv_nums[at],
+                    (size_t)(g_where_bv_n - at) * sizeof(int));
+            g_where_bv_nums[at] = num;
+            g_where_bv_n++;
+        }
+        logf_("where: building %p, %d bands, %d storeys with a floor (%u ms): %s\n", bv, bands,
+              g_where_bv_n, (unsigned)(GetTickCount64() - t0), parts);
+    }
+    int rank = 0;
+    for (int i = 0; i < g_where_bv_n; i++)
+        if (g_where_bv_nums[i] <= floor_no) rank = i + 1;
+    return rank;
+}
+
+// Where the tile whose floor is at `floor` stands. 0 when the game could not
+// be asked at all -- which is silence, never "Outside".
+static int where_at(int tx, int ty, float floor, TileWhere* out)
+{
+    memset(out, 0, sizeof *out);
+    CursorGrid g;
+    EncompassFn inside = (EncompassFn)g_volume_fn_encompass;
+    if (!inside || !cursor_grid(&g) || !where_volumes()) return 0;
+    float p[3] = { g.min_x + ((float)tx + 0.5f) * CURSOR_TILE,
+                   g.min_y + ((float)ty + 0.5f) * CURSOR_TILE,
+                   floor + WHERE_LIFT };
+
+    struct { void* bv; int number; int internal; } hit[WHERE_HITS];
+    int n = 0, any_internal = 0;
+    for (int i = 0; i < g_where_n && n < WHERE_HITS; i++) {
+        WhereVolume* w = &g_where_vol[i];
+        if (p[0] < w->lo[0] || p[0] > w->hi[0] || p[1] < w->lo[1] || p[1] > w->hi[1] ||
+            p[2] < w->lo[2] || p[2] > w->hi[2])
+            continue;
+        if (!objects_still(w->v, w->idx, &g_where_cls, 1)) continue;
+        if (!inside(w->v, NULL, p[0], p[1], p[2], 0.0f, 0.0f, 0.0f)) continue;
+        const void* v;
+        hit[n].number = field_ptr(w->v, "FloorNumber", &g_fv_number, sizeof(int32_t), &v)
+            ? *(const int32_t*)v : 0;
+        hit[n].bv = field_ptr(w->v, "CachedBuildingVolume", &g_fv_building, sizeof(void*), &v)
+            ? *(void* const*)v : NULL;
+        if (hit[n].bv && !unit_is_live(hit[n].bv)) hit[n].bv = NULL;
+        hit[n].internal = hit[n].bv ? where_bool(hit[n].bv, "m_bIsInternalBuilding", 0) : 0;
+        if (hit[n].internal) any_internal = 1;
+        n++;
+    }
+
+    out->state = TILE_WHERE_OUTSIDE;
+    if (!n) return 1;
+
+    // CheckForFloorVolumeEvents, which walks its list from the end.
+    void* bv = NULL;
+    int floor_no = 0;
+    for (int i = n - 1; i >= 0; i--) {
+        if (any_internal && !hit[i].internal) continue;
+        if (bv && hit[i].bv != bv) continue;
+        bv = hit[i].bv;
+        if (hit[i].number > floor_no) floor_no = hit[i].number;
+    }
+
+    int floors = 0, is_inside = 1, ufo = 0, dropship = 0;
+    if (bv) {
+        const void* v;
+        if (field_ptr(bv, "Floors", &g_bv_floors, 3 * sizeof(int32_t), &v))
+            floors = ((const int32_t*)v)[1];
+        if (floors < 0 || floors > 64) floors = 0;
+        is_inside = where_bool(bv, "IsInside", 1);
+        ufo = where_bool(bv, "IsUfo", 0);
+        dropship = where_bool(bv, "IsDropShip", 0);
+    }
+
+    if (!is_inside)
+        out->state = TILE_WHERE_OUTSIDE;
+    else if (bv && floors > 1 && floor_no == floors)
+        out->state = TILE_WHERE_ROOF;
+    else
+        out->state = TILE_WHERE_INSIDE;
+    out->floor = floor_no;
+    out->storeys = floors > 1 ? floors - 1 : floors;
+    int rank = bv ? where_storeys(bv, floors, floor_no) : 0;
+    if (rank > 0) {
+        out->floor = rank;
+        out->storeys = g_where_bv_n;
+    }
+    out->kind = ufo ? TILE_UFO : dropship ? TILE_DROPSHIP : TILE_BUILDING;
+    out->building = bv;
+
+    logf_("where: %d, %d floor %.1f: %d volume%s, building %p (%d bands, inside %d, "
+          "internal %d, ufo %d, dropship %d), floor number %d, storey %d of %d -> %s\n",
+          tx, ty, floor, n, n == 1 ? "" : "s", bv, floors, is_inside, any_internal,
+          ufo, dropship, floor_no, out->floor, out->storeys,
+          out->state == TILE_WHERE_ROOF ? "roof" : out->state == TILE_WHERE_INSIDE
+              ? "inside" : "outside (the building's IsInside is off)");
+    return 1;
+}
+
+// The words for arriving at (tx, ty), said only on a crossing -- or always,
+// with `force`. Empty when nothing changed or the game could not be asked.
+static void where_say(int tx, int ty, float floor, int force, char* out, size_t out_sz)
+{
+    out[0] = 0;
+    TileWhere now;
+    int ok = 0;
+    Fault f;
+    __try { ok = where_at(tx, ty, floor, &now); }
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        fault_log("where", &f, NULL);
+        ok = 0;
+    }
+    if (!ok) return;
+    tile_where_text(&g_where_heard, &now, force, out, out_sz);
+    g_where_heard = now;
+}
+
+// A new navigation starts from nothing heard, as X2Access's plant does: the
+// first tile says so if it is inside, and outside goes unsaid.
+static void where_forget(void)
+{
+    memset(&g_where_heard, 0, sizeof g_where_heard);
+}
+
+// How many of a building's floors lie between heights `from` and `to` on tile
+// (tx, ty), when both are in the same building: its storeys, and the roof one
+// above the top one. The 22:42 log of 2026-09-27 had "Hagen, two floors up"
+// from the ground at 64 to the roof at 450 of a building with one storey --
+// 386 is two storeys of 192, but there is no floor between. 0 when either
+// height is outside, or the two are in different buildings: then the storeys
+// of 192 stand.
+static int where_level(const TileWhere* w)
+{
+    if (w->state == TILE_WHERE_ROOF) return w->storeys + 1;
+    if (w->state == TILE_WHERE_INSIDE) return w->floor;
+    return 0;
+}
+
+static int where_levels_between(int tx, int ty, float from, float to, int* dz)
+{
+    TileWhere a, b;
+    int ok = 0;
+    Fault f;
+    __try {
+        ok = where_at(tx, ty, from, &a) && where_at(tx, ty, to, &b) &&
+             a.building && a.building == b.building &&
+             where_level(&a) > 0 && where_level(&b) > 0 && a.storeys > 0;
+    }
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        fault_log("where: levels", &f, NULL);
+        ok = 0;
+    }
+    if (!ok) return 0;
+    *dz = where_level(&b) - where_level(&a);
+    return 1;
+}
+
+// After F / C inside a building: the next storey that way, when the key did
+// not land on it -- passed over, or nothing found at all -- and where the
+// nearest tile of it is. In the 22:35 log of 2026-09-27 a building had floors
+// at 2, 193 and 388, but 193 was not over the tiles F was pressed on: F went
+// 2 -> 388 as "2 storeys up. Floor 3 of 3.", and elsewhere said "No floor
+// above." under "floor 1 of 3". Both were true and neither said where floor 2
+// was. Now: "Floor 2 of 3 does not reach this tile; nearest 3 north, 2 east."
+// Empty when outside, on a storey reached as asked, or with nothing that way.
+static void floor_missed(int tx, int ty, float from, int found, float to, int dir,
+                         char* out, size_t out_sz)
+{
+    out[0] = 0;
+    TileWhere here, there;
+    if (!where_at(tx, ty, from, &here) || here.state != TILE_WHERE_INSIDE ||
+        !here.building || here.building != g_where_bv || here.floor < 1 ||
+        here.floor > g_where_bv_n)
+        return;
+    int next = here.floor + dir;                 // the storey rank asked for
+    if (next < 1 || next > g_where_bv_n) return;
+    if (found && where_at(tx, ty, to, &there) && there.building == here.building &&
+        there.state == TILE_WHERE_INSIDE && there.floor == next)
+        return;
+    int num = g_where_bv_nums[next - 1];
+    int nx, ny;
+    if (!where_storey_near(here.building, num, tx, ty, &nx, &ny)) {
+        logf_("where: storey %d (floor number %d) has no tile with a floor\n", next, num);
+        return;
+    }
+    char where[64];
+    tile_offset_text(nx - tx, ny - ty, where, sizeof where);
+    _snprintf_s(out, out_sz, _TRUNCATE, "Floor %d of %d does not reach this tile; nearest %s.",
+                next, g_where_bv_n, where);
+    logf_("where: F / C at %d, %d %s storey %d (floor number %d); nearest on %d, %d\n",
+          tx, ty, found ? "passed" : "found nothing, missing", next, num, nx, ny);
+}
 
 // ---- a step up or down a floor ---------------------------------------------
 //
@@ -8322,6 +8838,7 @@ static void nav_arrive(int tx, int ty)
 {
     g_tile_due = 0;
     g_step_note[0] = 0;
+    g_step_where[0] = 0;
     g_floor_hold = 0;
     navh_begin_tile();
     g_nav_path_tile[0] = tx;
@@ -8432,7 +8949,7 @@ static void nav_press(int digit, int gliding)
         // not necessarily the target, if that was somewhere it cannot stand.
         // And what is there, from the cursor's own height: it stands
         // NAVH_LIFT above the floor it was placed on.
-        char say[NAV_MAX_TEXT + TILE_MAX_TEXT];
+        char say[NAV_MAX_TEXT + TILE_MAX_TEXT + 64];
         char what[TILE_MAX_TEXT] = "";
         char coords[NAV_MAX_TEXT];
         nav_describe(tx, ty, coords, sizeof coords);
@@ -8453,7 +8970,10 @@ static void nav_press(int digit, int gliding)
             fault_log("tile: report", &f, NULL);
             what[0] = 0;
         }
-        _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s.", what, what[0] ? " " : "", coords);
+        char where[64];
+        where_say(tx, ty, z - NAV_CURSOR_LIFT, 1, where, sizeof where);
+        _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s.", where, where[0] ? " " : "",
+                    what, what[0] ? " " : "", coords);
         // Nothing is played here. Numpad 5 is the key for "where am I", and
         // the shape of the room is the larger half of that answer -- but the
         // field has been answering it all along, so the key only has to
@@ -8485,6 +9005,7 @@ static void nav_press(int digit, int gliding)
         // The soldier's floor, so the first step off a roof is heard too.
         g_floor_prev = navh_ground();
         g_floor_prev_ok = 1;
+        where_forget();
     }
 
     char say[NAV_MAX_TEXT + TILE_MAX_TEXT];
@@ -10479,16 +11000,45 @@ static void nav_floor(int dir)
     if (!found) {
         logf_("nav: %s at %d, %d from %.1f -- no floor that way (%s)\n",
               dir > 0 ? "F" : "C", tx, ty, from, seen);
+        char missed[128] = "", say[160];
+        Fault f2;
+        __try { floor_missed(tx, ty, from, 0, from, dir, missed, sizeof missed); }
+        __except (fault_note(GetExceptionInformation(), &f2)) {
+            fault_log("nav: floor missed", &f2, NULL);
+            missed[0] = 0;
+        }
+        _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s",
+                    dir > 0 ? "No floor above here." : "No floor below here.",
+                    missed[0] ? " " : "", missed);
         speech_cancel_pending();
-        speech_say_now(dir > 0 ? "No floor above." : "No floor below.");
+        speech_say_now(say);
         return;
     }
     logf_("nav: %s at %d, %d: %.1f -> %.1f, storey %d (%s)\n", dir > 0 ? "F" : "C",
           tx, ty, from, to, storey, seen);
     scan_focus(tx, ty, to, dir > 0 ? "the floor above" : "the floor below");
-    // How far, in storeys -- what height advantage is counted in -- not the
-    // camera's floor number (tile_height_step).
-    tile_height_step(to - from, g_step_note, sizeof g_step_note);
+    // How far: inside a building, in its own floors (asked for 2026-09-27,
+    // after "2 storeys up" from a tall ground floor to the one above it);
+    // elsewhere, or between two heights on the same floor of it, in storeys
+    // of 192 -- not the camera's floor number (tile_height_step).
+    int levels = 0;
+    if (where_levels_between(tx, ty, from, to, &levels) && levels)
+        tile_floor_step(levels, g_step_note, sizeof g_step_note);
+    else
+        tile_height_step(to - from, g_step_note, sizeof g_step_note);
+    {
+        char missed[128] = "";
+        Fault f2;
+        __try { floor_missed(tx, ty, from, 1, to, dir, missed, sizeof missed); }
+        __except (fault_note(GetExceptionInformation(), &f2)) {
+            fault_log("nav: floor missed", &f2, NULL);
+            missed[0] = 0;
+        }
+        if (missed[0]) {
+            size_t used = strlen(g_step_note);
+            _snprintf_s(g_step_note + used, sizeof g_step_note - used, _TRUNCATE, " %s", missed);
+        }
+    }
     g_floor_hold = 1;
     g_floor_hold_z = to;
     surface_note(tx, ty, from);
@@ -11260,11 +11810,20 @@ static void nav_poll(void)
                     what[0] = 0;
                 }
                 height_step(tx, ty, navh_ground());
-                if (!nav_step_say(what) && g_step_late && what[0] &&
-                    tx == g_step_late_at[0] && ty == g_step_late_at[1]) {
+                // Asked only when it will be said: the crossing is kept as
+                // heard, and one worked out for a step nobody hears is lost.
+                int late = g_step_late && what[0] &&
+                           tx == g_step_late_at[0] && ty == g_step_late_at[1];
+                if (g_step_pending || late)
+                    where_say(tx, ty, navh_ground(), 0, g_step_where, sizeof g_step_where);
+                if (!nav_step_say(what) && late) {
                     g_step_late = 0;
-                    logf_("nav: %d, %d described late -- \"%s\"\n", tx, ty, what);
-                    speech_say_now(what);
+                    char both[sizeof g_step_where + TILE_MAX_TEXT];
+                    _snprintf_s(both, sizeof both, _TRUNCATE, "%s%s%s", g_step_where,
+                                g_step_where[0] ? " " : "", what);
+                    g_step_where[0] = 0;
+                    logf_("nav: %d, %d described late -- \"%s\"\n", tx, ty, both);
+                    speech_say_now(both);
                 }
             }
         } else if (!g_nav_aim && navh_poll(GetTickCount64()) == NAVH_NO_PATH) {

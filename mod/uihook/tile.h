@@ -186,9 +186,44 @@ void tile_contacts(const TileContact* c, int n, const char* none,
 // or advantage, so it is not used.
 void tile_height_step(float delta, char* out, size_t out_sz);
 
+// The same inside a building, counted in its own floors rather than in
+// height: "One floor up.", "2 floors down." -- a building's floors need not be
+// 192 apart, and a tall room is one floor however high it is.
+void tile_floor_step(int levels, char* out, size_t out_sz);
+
 // Names as a list is spoken, in first-seen order with repeats counted:
 // "2 Floaters, Sectoid". "Floater, Floater" read as two names, or as one said
 // twice. `total` is how many there were, when only the first `n` were kept:
 // the rest are ", and 3 more".
 #define TILE_NAMES_MAX 16
 void tile_names_counted(const char* const* names, int n, int total, char* out, size_t out_sz);
+
+// Where a tile stands against the buildings, the way the game's own tracker
+// (XComPawnIndoorOutdoorInfo.CheckForFloorVolumeEvents) works it out. The
+// roof is the game's IsOnRoof: the top band of a building with more than one,
+// so `storeys` counts the others. `building` only tells one building from the
+// next; it is never followed.
+typedef enum {
+    TILE_WHERE_UNKNOWN = 0,     // nothing heard yet
+    TILE_WHERE_OUTSIDE,
+    TILE_WHERE_INSIDE,
+    TILE_WHERE_ROOF
+} TileWhereState;
+
+typedef enum { TILE_BUILDING = 0, TILE_UFO, TILE_DROPSHIP } TileBuildingKind;
+
+typedef struct {
+    TileWhereState   state;
+    int              floor;     // the game's FloorNumber, from 1; 0 when not inside
+    int              storeys;   // the building's, roof left out; 0 when not known
+    TileBuildingKind kind;
+    const void*      building;
+} TileWhere;
+
+// The words for arriving at `now` from `before`, said on the crossing only:
+// "Inside building, floor 2 of 3." on the way in, "Floor 3 of 3." up a floor
+// of the same one, "On the roof.", "Outside." -- and "" when nothing changed.
+// With nothing heard before, outside is what a player assumes and is not
+// said. `force` says the state whatever it was (numpad 5).
+void tile_where_text(const TileWhere* before, const TileWhere* now, int force,
+                     char* out, size_t out_sz);

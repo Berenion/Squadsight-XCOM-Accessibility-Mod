@@ -1827,6 +1827,43 @@ int main(void)
         check(strcmp(say, "1 and a half storeys up.") == 0, "a storey and a half");
         tile_height_step(-20.0f, say, sizeof say);
         check(strcmp(say, "A step down.") == 0, "less than a quarter");
+        tile_floor_step(1, say, sizeof say);
+        check(strcmp(say, "One floor up.") == 0, "F one floor of a building");
+        tile_floor_step(-2, say, sizeof say);
+        check(strcmp(say, "2 floors down.") == 0, "C two floors of a building");
+
+        {
+            static const int shop, ufo;
+            TileWhere none = { TILE_WHERE_UNKNOWN, 0, 0, TILE_BUILDING, NULL };
+            TileWhere out = { TILE_WHERE_OUTSIDE, 0, 0, TILE_BUILDING, NULL };
+            TileWhere f1 = { TILE_WHERE_INSIDE, 1, 3, TILE_BUILDING, &shop };
+            TileWhere f2 = { TILE_WHERE_INSIDE, 2, 3, TILE_BUILDING, &shop };
+            TileWhere roof = { TILE_WHERE_ROOF, 4, 3, TILE_BUILDING, &shop };
+            TileWhere hut = { TILE_WHERE_INSIDE, 1, 1, TILE_BUILDING, &ufo };
+            TileWhere craft = { TILE_WHERE_INSIDE, 1, 1, TILE_UFO, &ufo };
+            tile_where_text(&none, &out, 0, say, sizeof say);
+            check(say[0] == 0, "outside is not said first");
+            tile_where_text(&none, &f1, 0, say, sizeof say);
+            check(strcmp(say, "Inside building, floor 1 of 3.") == 0, "inside said first");
+            tile_where_text(&out, &f1, 0, say, sizeof say);
+            check(strcmp(say, "Inside building, floor 1 of 3.") == 0, "walking in");
+            tile_where_text(&f1, &f1, 0, say, sizeof say);
+            check(say[0] == 0, "the same floor is not said again");
+            tile_where_text(&f1, &f2, 0, say, sizeof say);
+            check(strcmp(say, "Floor 2 of 3.") == 0, "up a floor");
+            tile_where_text(&f2, &roof, 0, say, sizeof say);
+            check(strcmp(say, "On the roof.") == 0, "onto the roof");
+            tile_where_text(&roof, &out, 0, say, sizeof say);
+            check(strcmp(say, "Outside.") == 0, "leaving");
+            tile_where_text(&out, &out, 1, say, sizeof say);
+            check(strcmp(say, "Outside.") == 0, "numpad 5 says outside");
+            tile_where_text(&f2, &f2, 1, say, sizeof say);
+            check(strcmp(say, "Inside building, floor 2 of 3.") == 0, "numpad 5 inside");
+            tile_where_text(&out, &hut, 0, say, sizeof say);
+            check(strcmp(say, "Inside building.") == 0, "one storey has no floor number");
+            tile_where_text(&f1, &craft, 0, say, sizeof say);
+            check(strcmp(say, "Inside the UFO.") == 0, "into another building, a UFO");
+        }
 
         // The checks below carry `r` on from here, so the exposure is put
         // back before they read it.

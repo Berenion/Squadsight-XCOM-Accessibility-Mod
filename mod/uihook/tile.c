@@ -305,6 +305,14 @@ static void plural(const char* name, char* out, size_t out_sz)
         _snprintf_s(out, out_sz, _TRUNCATE, "%ss", name);
 }
 
+void tile_floor_step(int levels, char* out, size_t out_sz)
+{
+    const char* way = levels >= 0 ? "up" : "down";
+    int n = levels >= 0 ? levels : -levels;
+    if (n == 1) _snprintf_s(out, out_sz, _TRUNCATE, "One floor %s.", way);
+    else _snprintf_s(out, out_sz, _TRUNCATE, "%d floors %s.", n, way);
+}
+
 void tile_names_counted(const char* const* names, int n, int total, char* out, size_t out_sz)
 {
     size_t used = 0;
@@ -333,5 +341,42 @@ void tile_names_counted(const char* const* names, int n, int total, char* out, s
         char t[32];
         _snprintf_s(t, sizeof t, _TRUNCATE, "%s%d more", parts ? ", and " : "", total - n);
         append(out, out_sz, &used, t);
+    }
+}
+
+void tile_where_text(const TileWhere* before, const TileWhere* now, int force,
+                     char* out, size_t out_sz)
+{
+    out[0] = 0;
+    int moved_in = now->state != before->state ||
+                   (now->state != TILE_WHERE_OUTSIDE && now->building != before->building);
+    int changed = moved_in ||
+                  (now->state == TILE_WHERE_INSIDE && now->floor != before->floor);
+    if (before->state == TILE_WHERE_UNKNOWN && now->state == TILE_WHERE_OUTSIDE) changed = 0;
+    if (!changed && !force) return;
+
+    if (now->state == TILE_WHERE_OUTSIDE) {
+        _snprintf_s(out, out_sz, _TRUNCATE, "Outside.");
+        return;
+    }
+    if (now->state == TILE_WHERE_ROOF) {
+        _snprintf_s(out, out_sz, _TRUNCATE, "On the roof.");
+        return;
+    }
+
+    // A one-storey building has no floor worth numbering.
+    char floor[48] = "";
+    if (now->storeys > 1)
+        _snprintf_s(floor, sizeof floor, _TRUNCATE, "floor %d of %d", now->floor, now->storeys);
+    else if (now->storeys == 0 && now->floor > 1)
+        _snprintf_s(floor, sizeof floor, _TRUNCATE, "floor %d", now->floor);
+
+    if (force || moved_in) {
+        const char* what = now->kind == TILE_UFO      ? "Inside the UFO"
+                         : now->kind == TILE_DROPSHIP ? "Inside the dropship"
+                         :                              "Inside building";
+        _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s.", what, floor[0] ? ", " : "", floor);
+    } else if (floor[0]) {
+        _snprintf_s(out, out_sz, _TRUNCATE, "F%s.", floor + 1);
     }
 }
