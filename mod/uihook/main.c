@@ -7383,6 +7383,17 @@ static float dist_sq_between(const float* a, const float* b)
 
 static void* soldier_unit(void);
 
+// Whether the soldier being moved has no moves left (XGUnit.m_iMoves, what
+// GetMoves returns), and so no path action for the cursor to drive.
+static FieldSlot g_unit_moves;
+static int soldier_out_of_moves(void)
+{
+    void* unit = soldier_unit();
+    const void* v;
+    if (!unit || !field_ptr(unit, "m_iMoves", &g_unit_moves, sizeof(int32_t), &v)) return 0;
+    return *(const int32_t*)v <= 0;
+}
+
 // Whether a soldier standing at `here` would flank `enemy`: the game's own
 // XComActionIconManager.IsLocationFlanking, which AddFlankingIcons asks for
 // every enemy in GetAllVisibleTargets while the cursor moves, and which puts
@@ -9192,8 +9203,18 @@ static void nav_arrive(int tx, int ty)
         }
     }
     // With no verdict coming for the soldier's own tile, its cover is
-    // described on a timer instead, once the floor search has settled.
-    if (mine) {
+    // described on a timer instead, once the floor search has settled. The
+    // same when the soldier has no moves left: XGUnit.AddPathAction gives an
+    // idle action instead of a path when GetMoves() is 0 -- after Run and
+    // Gun's dash, with only the shot to come -- so no path is ever computed.
+    // Every step then waited out STEP_FALLBACK_MS and said its coordinates
+    // alone (the 2026-09-28 00:20 log: "nothing decided the tile in 1500 ms
+    // (0 path calls)", five steps running).
+    int stuck = !mine && soldier_out_of_moves();
+    if (stuck)
+        logf_("nav: %d, %d described without a path -- the soldier has no moves left\n",
+              tx, ty);
+    if (mine || stuck) {
         g_tile_due = GetTickCount64() + OWN_TILE_DELAY_MS;
         g_tile_due_at[0] = tx;
         g_tile_due_at[1] = ty;
