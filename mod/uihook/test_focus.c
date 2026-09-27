@@ -1008,6 +1008,8 @@ int main(void)
         info_step(1, say, sizeof say);
         check(strcmp(say, "Health: 11. Will: 50. Offense: 69. Defense: 0.") == 0, "stats");
         info_step(1, say, sizeof say);
+        check(strcmp(say, "Abilities, 2: Bullet Swarm, Light Plasma Rifle.") == 0,
+              "the heading names what is under it");
         info_step(1, say, sizeof say);
         check(strcmp(say, "Bullet Swarm: Firing does not end the turn.") == 0,
               "an ability with its description");

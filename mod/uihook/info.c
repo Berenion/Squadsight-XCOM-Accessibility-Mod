@@ -271,8 +271,19 @@ static int lines(int want, char* out, size_t out_sz)
     for (int l = 0; l < INFO_LISTS; l++) {
         const InfoList* L = &g.lists[l];
         if (!L->n) continue;
-        _snprintf_s(piece, sizeof piece, _TRUNCATE, "%s, %d.",
-                    L->title[0] ? L->title : "List", L->n);
+        // The heading names what is under it: "Abilities, 1." alone sounded
+        // like the end of the screen, and Mind Merge was one press away
+        // (2026-09-27). The lines below still give each description.
+        int w = _snprintf_s(piece, sizeof piece, _TRUNCATE, "%s, %d:",
+                            L->title[0] ? L->title : "List", L->n);
+        for (int i = 0; i < L->n && w > 0 && (size_t)w < sizeof piece; i++) {
+            int more = _snprintf_s(piece + w, sizeof piece - (size_t)w, _TRUNCATE, "%s %s",
+                                   i ? "," : "", L->name[i]);
+            if (more < 0) break;
+            w += more;
+        }
+        if (w > 0 && (size_t)w < sizeof piece)
+            _snprintf_s(piece + w, sizeof piece - (size_t)w, _TRUNCATE, ".");
         LINE(piece);
         for (int i = 0; i < L->n; i++) {
             _snprintf_s(piece, sizeof piece, _TRUNCATE, "%s%s%s", L->name[i],
