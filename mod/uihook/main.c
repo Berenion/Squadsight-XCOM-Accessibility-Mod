@@ -6008,7 +6008,7 @@ typedef struct {
 } ColumnUnit;
 #define COLUMN_UNITS 8
 
-// A civilian with no flag over them (flagless_civilians), whom the unit
+// A civilian with no flag over them (flagless_units), whom the unit
 // table, built from the flags, never holds.
 typedef struct {
     void* unit;
@@ -6717,6 +6717,50 @@ static int civilian_seen(void* squad, const SeenSet* civilians, void* unit,
     return 0;
 }
 
+// ---- what the squad sees: the one rule --------------------------------------
+//
+// Whether a readout that names units may name this one. Kept in one place
+// because it was kept in three -- the scanner, who is on a tile, and the blast
+// list -- and a survivor the squad could see was missed by each in turn, and
+// had to be fixed in each in turn (2026-09-27).
+//
+//   - The squad's own: always.
+//   - A civilian (the neutral team): civilian_seen -- someone's
+//     m_arrVisibleCivilians, or a soldier's line to them.
+//   - Anyone else: the union of the squad's m_arrVisibleEnemies, as the
+//     radar and the targeting draw them. IsAliveAndVisible alone let
+//     unrevealed pods through.
+//
+// The readouts about threats -- the radar, the alien heartbeats, "Seen by"
+// and flanking, enemies coming into sight -- use `enemies` alone, on
+// purpose: a civilian is no threat.
+static int unit_team(void* unit);
+#define TEAM_NEUTRAL      1     // Object.ETeam.eTeam_Neutral -- a civilian
+
+typedef struct {
+    void*   squad;
+    SeenSet enemies;
+    SeenSet civilians;
+} SquadSight;
+
+// Taken once per readout; the sets are pointer lists, compared, never
+// dereferenced (see tile_exposure for what that costs when forgotten).
+static void squad_sight_take(void* squad, SquadSight* v)
+{
+    v->squad = squad;
+    squad_sight(squad, &v->enemies);
+    squad_sight_civilians(squad, &v->civilians);
+}
+
+static int squad_sees(const SquadSight* v, void* unit, const float* loc,
+                      int friendly, const char* name)
+{
+    if (friendly) return 1;
+    if (unit_team(unit) == TEAM_NEUTRAL)
+        return civilian_seen(v->squad, &v->civilians, unit, loc, name);
+    return seen_has(&v->enemies, unit);
+}
+
 static void unit_label(const UnitName* u, char* out, size_t out_sz)
 {
     _snprintf_s(out, out_sz, _TRUNCATE, u->nick[0] ? "%s, %s" : "%s", u->name, u->nick);
@@ -6750,10 +6794,7 @@ static void unit_label_state(const UnitName* u, void* unit, int enemy,
 // Everyone in sight whose pawn stands in the column of (tx, ty), on any
 // storey, with where their feet are: a pawn's origin is its middle,
 // NAV_CURSOR_LIFT above its feet. `mine` marks the soldier being moved.
-static int flagless_civilians(void* squad, const SeenSet* civilians,
-                              int refresh, FlaglessUnit* out, int max);
-static int unit_team(void* unit);
-#define TEAM_NEUTRAL      1     // Object.ETeam.eTeam_Neutral -- a civilian
+static int flagless_units(int refresh, FlaglessUnit* out, int max);
 
 static int units_in_column(int tx, int ty, ColumnUnit* out, int max)
 {
@@ -6763,23 +6804,19 @@ static int units_in_column(int tx, int ty, ColumnUnit* out, int max)
     void* soldier = NULL;
     cursor_chained_pawn(&soldier);
     // Someone not on the squad is named only once the squad has seen them,
-    // or stepping onto a hidden alien's tile would give it away.
+    // or stepping onto a hidden alien's tile would give it away. The tile is
+    // asked first: it is two subtractions, and a civilian's sight can be a
+    // line check per soldier.
     void* squad = squad_player();
-    static SeenSet sight, civilians;
-    squad_sight(squad, &sight);
-    squad_sight_civilians(squad, &civilians);
+    static SquadSight sight;
+    squad_sight_take(squad, &sight);
     for (int i = 0; i < g_nunits && n < max; i++) {
         UnitSeen s;
         if (!unit_seen(&g_units[i], squad, &s)) continue;
-        // A civilian is in no one's m_arrVisibleEnemies, so the enemies'
-        // test alone left every civilian off their tile, flagged or not.
-        if (!s.friendly && !seen_has(&sight, s.unit) &&
-            !(unit_team(s.unit) == TEAM_NEUTRAL &&
-              civilian_seen(squad, &civilians, s.unit, s.loc, s.who->name)))
-            continue;
         if (cursor_tile_axis(s.loc[0], g.min_x, CURSOR_TILE) != tx ||
             cursor_tile_axis(s.loc[1], g.min_y, CURSOR_TILE) != ty)
             continue;
+        if (!squad_sees(&sight, s.unit, s.loc, s.friendly, s.who->name)) continue;
         unit_label_state(&g_units[i], s.unit, !s.friendly, out[n].label, sizeof out[n].label);
         out[n].feet = s.loc[2] - NAV_CURSOR_LIFT;
         out[n].mine = s.pawn == soldier;
@@ -6790,10 +6827,12 @@ static int units_in_column(int tx, int ty, ColumnUnit* out, int max)
     // step onto that tile said only "No path. 8, 13."
     if (squad && n < max) {
         static FlaglessUnit found[COLUMN_FLAGLESS];
-        int nf = flagless_civilians(squad, &civilians, 0, found, COLUMN_FLAGLESS);
+        int nf = flagless_units(0, found, COLUMN_FLAGLESS);
         for (int i = 0; i < nf && n < max; i++) {
             if (cursor_tile_axis(found[i].loc[0], g.min_x, CURSOR_TILE) != tx ||
                 cursor_tile_axis(found[i].loc[1], g.min_y, CURSOR_TILE) != ty)
+                continue;
+            if (!squad_sees(&sight, found[i].unit, found[i].loc, 0, found[i].name))
                 continue;
             strcpy_s(out[n].label, sizeof out[n].label, found[i].name);
             out[n].feet = found[i].loc[2] - NAV_CURSOR_LIFT;
@@ -9486,35 +9525,26 @@ static void* scan_squad_player(void)
     return p ? p : g_scan_squad;
 }
 
-static void scan_add_flagless(void* squad, const SeenSet* civilians);
+static void scan_add_flagless(const SquadSight* sight);
 
 static void scan_add_units(void)
 {
     void* squad = scan_squad_player();
-    static SeenSet sight, civilians;
-    squad_sight(squad, &sight);
-    squad_sight_civilians(squad, &civilians);
+    static SquadSight sight;
+    squad_sight_take(squad, &sight);
 
     for (int i = 0; i < g_nunits; i++) {
         UnitSeen s;
         if (!unit_seen(&g_units[i], squad, &s)) continue;
+        if (!squad_sees(&sight, s.unit, s.loc, s.friendly, s.who->name)) continue;
 
         ScanItem it;
         memset(&it, 0, sizeof it);
         if (s.friendly) {
             it.kind = SCAN_SQUAD;
         } else if (unit_team(s.unit) == TEAM_NEUTRAL) {
-            // A civilian is on nobody's side, so no one holds them in
-            // m_arrVisibleEnemies; they have m_arrVisibleCivilians instead.
-            // IsAliveAndVisible alone was the gate once, and listed a
-            // civilian 43 tiles off whom no one had seen. A survivor is in
-            // no one's array at all, so civilian_seen also asks for a line.
-            if (!civilian_seen(squad, &civilians, s.unit, s.loc, s.who->name)) continue;
             it.kind = SCAN_CIVILIANS;
         } else {
-            // Aliens go through the squad's own sight, as the radar does:
-            // IsAliveAndVisible alone let unrevealed pods through.
-            if (!seen_has(&sight, s.unit)) continue;
             it.kind = SCAN_ENEMIES;
             if (unit_overwatch(s.unit))
                 strcpy_s(it.detail, sizeof it.detail, "on overwatch");
@@ -9522,7 +9552,7 @@ static void scan_add_units(void)
         unit_label(&g_units[i], it.name, sizeof it.name);
         if (scan_item_at(&it, s.loc, NAV_CURSOR_LIFT)) scan_add(&it);
     }
-    if (squad) scan_add_flagless(squad, &civilians);
+    if (squad) scan_add_flagless(&sight);
 }
 
 // ---- the targets -----------------------------------------------------------
@@ -10682,8 +10712,14 @@ static int world_refresh(void)
     int same_map = g_world_have && g_world_cursor == cursor_object() &&
                    memcmp(&g_world_grid, &g_scan_grid, sizeof g_world_grid) == 0 &&
                    g_world_next <= objects_count();
-    if (same_map) scan_world_catch_up(use, nclasses);
-    else          scan_world_full(use, nclasses);
+    // Several callers can ask within one key press -- the units, then the
+    // level actors, for "Everything" -- and the second catch-up walk would
+    // find nothing the first did not.
+    static ULONGLONG walked_at;
+    ULONGLONG now = GetTickCount64();
+    if (!same_map)                     scan_world_full(use, nclasses);
+    else if (now - walked_at >= 100)   scan_world_catch_up(use, nclasses);
+    walked_at = now;
 
     g_world_have = 1;
     g_world_cursor = cursor_object();
@@ -10708,7 +10744,8 @@ static void scan_add_world(void)
 // survivor is neither until rescued -- the 2026-09-27 (23:33) log has no
 // "SetNames Survivor" until the escort, and "No civilians" at every press
 // before it. So the units come from the object walk too, and a neutral one
-// with no flag is listed here, gated on the squad's sight as any civilian is.
+// with no flag is listed here. Whether the squad sees them is the caller's to
+// ask (squad_sees), after whatever cheaper test it has -- a tile, a blast.
 //
 // Named as UIUnitFlag.OnInit would name them: a civilian character's
 // strLastName (and nickname), else the unit's behavior says what it is.
@@ -10740,8 +10777,7 @@ static void flagless_name(void* unit, char* out, size_t out_sz)
         strcpy_s(out, out_sz, "Civilian");
 }
 
-static int flagless_civilians(void* squad, const SeenSet* civilians,
-                              int refresh, FlaglessUnit* out, int max)
+static int flagless_units(int refresh, FlaglessUnit* out, int max)
 {
     // The scanner brings the walk up to date; a step only walks the table
     // the first time, since a unit on the map at the start stays in it.
@@ -10757,8 +10793,8 @@ static int flagless_civilians(void* squad, const SeenSet* civilians,
         if (!unit_is_live(unit) || unit_team(unit) != TEAM_NEUTRAL) continue;
         if (unit_by_unit(unit)) continue;       // has a flag: scan_add_units' own
         // IsAlive, not IsAliveAndVisible: whether the squad sees them is
-        // civilian_seen's to say, and a survivor may never be "visible" in
-        // the sense the flags use.
+        // squad_sees' to say, and a survivor may never be "visible" in the
+        // sense the flags use.
         UnitTestFn alive = (UnitTestFn)tile_vfn(unit, g_unit_slot_alive);
         if (!alive || !alive(unit, NULL)) continue;
         void* pawn = unit_pawn(unit);
@@ -10768,7 +10804,6 @@ static int flagless_civilians(void* squad, const SeenSet* civilians,
 
         FlaglessUnit* f = &out[n];
         flagless_name(unit, f->name, sizeof f->name);
-        if (!civilian_seen(squad, civilians, unit, loc, f->name)) continue;
         f->unit = unit;
         f->pawn = pawn;
         memcpy(f->loc, loc, sizeof f->loc);
@@ -10777,11 +10812,12 @@ static int flagless_civilians(void* squad, const SeenSet* civilians,
     return n;
 }
 
-static void scan_add_flagless(void* squad, const SeenSet* civilians)
+static void scan_add_flagless(const SquadSight* sight)
 {
     static FlaglessUnit found[COLUMN_FLAGLESS];
-    int n = flagless_civilians(squad, civilians, 1, found, COLUMN_FLAGLESS);
+    int n = flagless_units(1, found, COLUMN_FLAGLESS);
     for (int i = 0; i < n; i++) {
+        if (!squad_sees(sight, found[i].unit, found[i].loc, 0, found[i].name)) continue;
         ScanItem it;
         memset(&it, 0, sizeof it);
         it.kind = SCAN_CIVILIANS;
@@ -12017,9 +12053,8 @@ static void blast_say(void)
     // a hidden one's highlight is never drawn -- so an alien or civilian is
     // named only while the squad sees them. It still counts as matched: it
     // is a unit, and must not be offered again as a destructible below.
-    static SeenSet sight, civilians;
-    squad_sight(squad, &sight);
-    squad_sight_civilians(squad, &civilians);
+    static SquadSight sight;
+    squad_sight_take(squad, &sight);
     for (int i = 0; i < g_nunits; i++) {
         UnitSeen s;
         if (!unit_seen(&g_units[i], squad, &s)) continue;
@@ -12027,11 +12062,25 @@ static void blast_say(void)
         for (int k = 0; k < num; k++)
             if (data[k] == s.unit || data[k] == s.pawn) { in = 1; matched[k] = 1; }
         if (!in) continue;
-        if (!s.friendly && !seen_has(&sight, s.unit) &&
-            !(unit_team(s.unit) == TEAM_NEUTRAL && civilian_seen(squad, &civilians, s.unit, s.loc, s.who->name)))
-            continue;
+        if (!squad_sees(&sight, s.unit, s.loc, s.friendly, s.who->name)) continue;
         if (s.friendly) { if (nours < TILE_NAMES_MAX) ours[nours++] = s.who->name; tours++; }
         else            { if (nthem < TILE_NAMES_MAX) them[nthem++] = s.who->name; tthem++; }
+    }
+    // And those with no flag: a survivor in the blast went unmentioned,
+    // being neither a flag's unit nor a destructible. `them` holds
+    // pointers, so the names stay in `found` until the line is built.
+    {
+        static FlaglessUnit found[COLUMN_FLAGLESS];
+        int nf = squad ? flagless_units(0, found, COLUMN_FLAGLESS) : 0;
+        for (int i = 0; i < nf; i++) {
+            int in = 0;
+            for (int k = 0; k < num; k++)
+                if (data[k] == found[i].unit || data[k] == found[i].pawn) { in = 1; matched[k] = 1; }
+            if (!in || !squad_sees(&sight, found[i].unit, found[i].loc, 0, found[i].name))
+                continue;
+            if (nthem < TILE_NAMES_MAX) them[nthem++] = found[i].name;
+            tthem++;
+        }
     }
 
     // The destructibles. Only what explodes is named -- a car or a gas
