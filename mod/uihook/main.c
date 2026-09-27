@@ -387,6 +387,43 @@ static void*     g_hq_menu;
 
 // The soldier a soldier screen is about, from its header panels.
 static char      g_soldier_info[256];
+
+// A soldier's medals are drawn as icons, AS_SetMedals("defender,honor")
+// (UIUtilities.GetMedalLabels), and medals can be renamed. So each icon's name
+// starts as the game's default (XGFacility_Barracks.m_arrMedalNames) and takes
+// whatever the Medals screen last showed for it (UIMedals.AS_SetInfo carries
+// both the name and the icon).
+static const char* const MEDAL_ICON[] = { "urbancombat", "defender", "international",
+                                          "honor", "starofterra" };
+static char g_medal_name[5][96] = { "Urban Combat Badge", "Defender's Medal",
+                                    "International Service Cross", "Council Medal of Honor",
+                                    "Star of Terra" };
+
+static void medal_learn(const char* icon, const char* name)
+{
+    if (!icon || !name || !name[0]) return;
+    for (int i = 0; i < 5; i++)
+        if (strcmp(icon, MEDAL_ICON[i]) == 0)
+            strncpy_s(g_medal_name[i], sizeof g_medal_name[i], name, _TRUNCATE);
+}
+
+// "defender,honor" -> "Medals: Defender's Medal, Council Medal of Honor".
+static void medal_line(const char* icons, char* out, size_t out_sz)
+{
+    out[0] = 0;
+    char buf[256];
+    strncpy_s(buf, sizeof buf, icons ? icons : "", _TRUNCATE);
+    size_t used = 0;
+    char* ctx = NULL;
+    for (char* t = strtok_s(buf, ",", &ctx); t; t = strtok_s(NULL, ",", &ctx)) {
+        const char* name = t;
+        for (int i = 0; i < 5; i++) if (strcmp(t, MEDAL_ICON[i]) == 0) name = g_medal_name[i];
+        int w = _snprintf_s(out + used, out_sz - used, _TRUNCATE, "%s%s",
+                            used ? ", " : "Medals: ", name);
+        if (w < 0) break;
+        used += (size_t)w;
+    }
+}
 static char      g_soldier_stats[128];
 static ULONGLONG g_soldier_info_at;
 #define SOLDIER_INFO_FRESH_MS 3000
@@ -2189,6 +2226,146 @@ static void capture_body(const char* tag, LONG n, void* stack)
             }
             return;
         }
+    }
+
+    // Medals (UIMedals, Barracks -> Medals). One screen, several views, each
+    // opened with AS_SetDisplayMode(view) (GoToView):
+    //   0  the medals: AS_SetTitle("CURRENT MEDALS"), then per medal
+    //      AS_SetInfo(i, name, status, bool locked, icon) -- a locked one is
+    //      only "LOCKED". No selection is sent until a move.
+    //   1  one medal: AS_SetEditingTitle("EDIT MEDAL", name, "Awards
+    //      remaining: 1"), AS_SetEditingButton(i, text, bool enabled) x3 --
+    //      RENAME MEDAL, ASSIGN POWER (or POWER ASSIGNED), AWARD MEDAL --
+    //      AS_SetEditingHelp (the power, or why it cannot be awarded yet),
+    //      AS_SetFocus(i).
+    //   2  its power: AS_SetTitle, AS_SetPowerInfo(i, description, image) x2,
+    //      AS_SetPowerButton x2 (both "ASSIGN THIS POWER"), AS_SetFocus(i).
+    //   3  the soldier list to award it (UISoldierList_AssignMedal), 4 its
+    //      name (UIInputDialogue) -- screens of their own.
+    // Up/Down move in 0 and 1, Left/Right in 2; Enter opens, picks, assigns
+    // (a warning dialogue first); Escape goes back a view. Every move is
+    // AS_SetFocus(i) as a bare number, which nothing resolved.
+    if (strncmp(obj_name, "UIMedals", 8) == 0) {
+        #define MEDAL_ROWS 12
+        static int  s_view, s_fresh;
+        static char s_title[96], s_row[MEDAL_ROWS][FOCUS_MAX_LABEL];
+        static int  s_nrow;
+        static char s_edit[3][96], s_btn[3][FOCUS_MAX_LABEL], s_help[512];
+        static int  s_btn_on[3];
+        static char s_power[2][512];
+        static int  s_sel0;                     // the medal selected, kept across views
+        static void* s_obj;
+        if (object != s_obj) { s_obj = object; s_sel0 = 0; }
+        if (strcmp(fn_name, "AS_SetDisplayMode") == 0 && p->nnumbers) {
+            s_view = (int)p->numbers[0];
+            s_fresh = 1;
+            if (s_view == 0) s_nrow = 0;
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetTitle") == 0) {
+            frame_string(node, locals, 0, s_title, sizeof s_title);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetInfo") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (i < 0 || i >= MEDAL_ROWS) return;
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            int locked = a.nb > 0 && a.b[0];
+            if (!locked && a.ns > 2) medal_learn(a.s[2], a.s[0]);
+            if (locked)
+                strcpy_s(s_row[i], FOCUS_MAX_LABEL, "Locked");
+            else
+                _snprintf_s(s_row[i], FOCUS_MAX_LABEL, _TRUNCATE, "%s%s%s", a.s[0],
+                            a.ns > 1 && a.s[1][0] ? ", " : "", a.ns > 1 ? a.s[1] : "");
+            if (i >= s_nrow) s_nrow = i + 1;
+            // Nothing follows the last medal and nothing is selected, so the
+            // arrival is said once the rows stop: each one puts it back.
+            if (s_view == 0 && s_fresh && i >= s_sel0) {
+                char say[FOCUS_MAX_LABEL + 256];
+                _snprintf_s(say, sizeof say, _TRUNCATE,
+                            "%s%s%s. Up and Down choose, Enter opens a medal.",
+                            s_title, s_title[0] ? ". " : "", s_row[s_sel0]);
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_after(say, SETTLE_MS);
+            }
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetEditingTitle") == 0) {
+            for (int i = 0; i < 3; i++) frame_string(node, locals, i, s_edit[i], sizeof s_edit[i]);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetEditingButton") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (i < 0 || i >= 3) return;
+            frame_string(node, locals, 0, s_btn[i], sizeof s_btn[i]);
+            s_btn_on[i] = !p->nbools || p->bools[0];
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetEditingHelp") == 0) {
+            frame_string(node, locals, 0, s_help, sizeof s_help);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetPowerInfo") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (i < 0 || i >= 2) return;
+            frame_string(node, locals, 0, s_power[i], sizeof s_power[i]);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetEditingImage") == 0 || strcmp(fn_name, "AS_SetPowerButton") == 0)
+            return;
+        if (strcmp(fn_name, "AS_SetFocus") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            char say[2048] = "";
+            if (s_view == 0 && i >= 0 && i < s_nrow) {
+                s_sel0 = i;
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s.", s_row[i]);
+            } else if (s_view == 1 && i >= 0 && i < 3) {
+                char btn[FOCUS_MAX_LABEL + 16];
+                _snprintf_s(btn, sizeof btn, _TRUNCATE, "%s%s.", s_btn[i],
+                            s_btn_on[i] ? "" : ", unavailable");
+                if (s_fresh)
+                    _snprintf_s(say, sizeof say, _TRUNCATE,
+                                "%s. %s. %s. %s%s%s Up and Down choose, Enter picks.",
+                                s_edit[0], s_edit[1], s_edit[2], s_help, s_help[0] ? " " : "",
+                                btn);
+                else
+                    strcpy_s(say, sizeof say, btn);
+            } else if (s_view == 2 && i >= 0 && i < 2) {
+                if (s_fresh)
+                    _snprintf_s(say, sizeof say, _TRUNCATE,
+                                "%s. Left and Right choose, Enter assigns. Power 1: %s Power 2: "
+                                "%s On power %d.",
+                                s_title, s_power[0], s_power[1], i + 1);
+                else
+                    _snprintf_s(say, sizeof say, _TRUNCATE, "Power %d: %s", i + 1, s_power[i]);
+            }
+            s_fresh = 0;
+            logf_("[%ld] %s %s.%s  MEDALS view %d, %d \"%s\"\n", n, tag, obj_name, fn_name,
+                  s_view, i, say);
+            if (say[0]) {
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_now(say);
+            }
+            return;
+        }
+    }
+
+    // A text box (UIInputDialogue): a medal's name, a soldier's. OnInit sends
+    // SetData(title, maxChars, the text as it stands) and nothing else; the
+    // typing goes to Flash's own text field, and the game reads it back only
+    // on Enter (GetInputText). So what is asked, and what it holds now.
+    if (strncmp(obj_name, "UIInputDialogue", 15) == 0 && strcmp(fn_name, "SetData") == 0) {
+        char title[256], text[256], say[640];
+        frame_string(node, locals, 0, title, sizeof title);
+        frame_string(node, locals, 1, text, sizeof text);
+        _snprintf_s(say, sizeof say, _TRUNCATE,
+                    "%s %s%s%s Type, then Enter accepts, Escape cancels.", title,
+                    text[0] ? "Now: " : "", text, text[0] ? "." : "");
+        logf_("[%ld] %s %s.%s  INPUT \"%s\"\n", n, tag, obj_name, fn_name, say);
+        speech_cancel_pending();
+        if (g_speak && !muted()) speech_say_now(say);
+        return;
     }
 
     // Build Items. UpdateLayout sends the heading and column labels
@@ -4274,6 +4451,18 @@ static void capture_body(const char* tag, LONG n, void* stack)
             g_soldier_info_at = GetTickCount64();
             logf_("[%ld] %s %s.%s  SOLDIER INFO \"%s\"\n", n, tag, obj_name, fn_name,
                   g_soldier_info);
+            return;
+        }
+        // Between the two: the medals, as icons. Said with the soldier.
+        if (strcmp(fn_name, "AS_SetMedals") == 0) {
+            char line[256];
+            medal_line(a.ns > 0 ? a.s[0] : "", line, sizeof line);
+            if (line[0] && g_soldier_info[0]) {
+                size_t u = strlen(g_soldier_info);
+                _snprintf_s(g_soldier_info + u, sizeof g_soldier_info - u, _TRUNCATE, ". %s",
+                            line);
+            }
+            logf_("[%ld] %s %s.%s  SOLDIER MEDALS \"%s\"\n", n, tag, obj_name, fn_name, line);
             return;
         }
         if (strcmp(fn_name, "AS_SetSoldierStats") == 0 && a.ns >= 4) {
