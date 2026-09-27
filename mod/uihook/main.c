@@ -472,6 +472,39 @@ static volatile ULONGLONG g_eng_left_at;
 static ULONGLONG g_builditem_at;
 static ULONGLONG g_man_at;
 #define ENG_SAME_DRAW_MS 100
+
+// The hiring screen as it last drew. See the handler in capture_body.
+static struct {
+    void*     obj;
+    ULONGLONG at;             // its last call, to claim the widget helper's
+    int       fresh;          // nothing said yet on this visit
+    char      title[96], cost[128], cap[128], confirm[48], count[32];
+} g_hire;
+
+// "Hiring Cost: §10." as said: "Hiring Cost: 10 credits." and "13/70" as
+// "13 of 70".
+static void hire_text(const char* in, char* out, size_t out_sz)
+{
+    size_t w = 0;
+    for (const char* r = in; *r && w + 12 < out_sz; r++) {
+        if ((unsigned char)r[0] == 0xC2 && (unsigned char)r[1] == 0xA7) {
+            r += 2;
+            const char* d = r;
+            while (*r >= '0' && *r <= '9' && w + 12 < out_sz) out[w++] = *r++;
+            w += (size_t)_snprintf_s(out + w, out_sz - w, _TRUNCATE,
+                                     r - d == 1 && *d == '1' ? " credit" : " credits");
+            r--;
+            continue;
+        }
+        if (*r == '/' && r > in && r[-1] >= '0' && r[-1] <= '9' && r[1] >= '0' && r[1] <= '9') {
+            w += (size_t)_snprintf_s(out + w, out_sz - w, _TRUNCATE, " of ");
+            continue;
+        }
+        out[w++] = *r;
+    }
+    out[w] = 0;
+}
+
 // Whether the build queue is taking the arrows (Review an order): only then
 // is its selection a move to say.
 static int       g_queue_editing;
@@ -2272,6 +2305,78 @@ static void capture_body(const char* tag, LONG n, void* stack)
             focus_announce(n, tag, obj_name, fn_name, object, idx);
             return;
         }
+    }
+
+    // Hiring: soldiers (UIHiring_Barracks, Barracks -> Hire Soldiers) and
+    // interceptors (UIHiring_Hangar, an empty hangar slot). Every change
+    // redraws it all (UpdateData):
+    //     AS_UpdateInfo("Hiring Cost:<br>§10<br>", "Barracks Capacity:<br>13/70")
+    //     AS_SetTitle("HIRE SOLDIERS"); AS_SetIcon
+    //     the count, a spinner on the screen's UIWidgetHelper:
+    //         SetSpinnerValue("1"), SetSpinnerArrows
+    // Up and Down go to the spinner first and raise or lower the count
+    // (OnIncreaseQuantity / OnDecreaseQuantity); Enter hires, Escape cancels.
+    // On the general path only the first "1" was said, and the count went to
+    // 8 and the cost to §80 without a word (log of 2026-09-25). As for an
+    // order (below), a helper call within a moment of a hiring draw is the
+    // hiring's; the draw is said at its spinner value, whole on arrival and
+    // then when the count changes.
+    if (strncmp(obj_name, "UIWidgetHelper", 14) == 0 && g_hire.at &&
+        GetTickCount64() - g_hire.at < ENG_SAME_DRAW_MS) {
+        if (strstr(fn_name, "SpinnerValue") && p->nstrings) {
+            char count[32];
+            strncpy_s(count, sizeof count, p->strings[0], _TRUNCATE);
+            char say[1024] = "";
+            if (g_hire.fresh)
+                _snprintf_s(say, sizeof say, _TRUNCATE,
+                            "%s%s%s. %s %s Up and Down change the number, Enter: %s, "
+                            "Escape: cancel.",
+                            g_hire.title, g_hire.title[0] ? ". " : "", count, g_hire.cost,
+                            g_hire.cap, g_hire.confirm[0] ? g_hire.confirm : "confirm");
+            else if (strcmp(count, g_hire.count) != 0)
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s. %s %s", count, g_hire.cost,
+                            g_hire.cap);
+            g_hire.fresh = 0;
+            strncpy_s(g_hire.count, sizeof g_hire.count, count, _TRUNCATE);
+            logf_("[%ld] %s %s.%s  HIRE \"%s\"\n", n, tag, obj_name, fn_name, say);
+            if (say[0]) {
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_now(say);
+            }
+            return;
+        }
+        // The arrows and the helper's own focus: nothing to say apart.
+        if (strstr(fn_name, "Spinner") || strcmp(fn_name, "RealizeSelected") == 0) return;
+    }
+    if (strncmp(obj_name, "UIHiring", 8) == 0) {
+        g_hire.at = GetTickCount64();
+        if (object != g_hire.obj) {
+            memset(&g_hire, 0, sizeof g_hire);
+            g_hire.obj = object;
+            g_hire.fresh = 1;
+            g_hire.at = GetTickCount64();
+        }
+        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
+            char t[256];
+            frame_string(node, locals, 0, t, sizeof t);
+            hire_text(t, g_hire.cost, sizeof g_hire.cost);
+            frame_string(node, locals, 1, t, sizeof t);
+            hire_text(t, g_hire.cap, sizeof g_hire.cap);
+            // The cost ends in a <br>, and so a stop; the capacity does not.
+            size_t cl = strlen(g_hire.cap);
+            if (cl && !strchr(".!?", g_hire.cap[cl - 1]))
+                strncat_s(g_hire.cap, sizeof g_hire.cap, ".", _TRUNCATE);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetTitle") == 0) {
+            frame_string(node, locals, 0, g_hire.title, sizeof g_hire.title);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetMouseConfirmText") == 0) {
+            frame_string(node, locals, 0, g_hire.confirm, sizeof g_hire.confirm);
+            return;
+        }
+        if (strcmp(fn_name, "AS_SetIcon") == 0) return;
     }
 
     // An order (UIManufacturing): a new one from Build Items, or one already
