@@ -1572,7 +1572,7 @@ typedef struct {
 // the way to its own (refactor step 4 in HANDOFF.md). A family's prefixes
 // may catch more than its handler takes -- the handler tests the names
 // again -- but never less.
-typedef enum { FAM_OTHER, FAM_BASE } CallFamily;
+typedef enum { FAM_OTHER, FAM_BASE, FAM_TACTICAL } CallFamily;
 
 static int name_is(const char* name, const char* prefix)
 {
@@ -1602,6 +1602,7 @@ static CallFamily call_family(const char* o)
         break;
     case 'M':
         if (name_is(o, "UIManufacturing") || name_is(o, "UIMedals")) return FAM_BASE;
+        if (name_is(o, "UIMessageMgr_Container")) return FAM_TACTICAL;
         break;
     case 'O':
         if (name_is(o, "UIOTS") || name_is(o, "UIObjectivesScreen_")) return FAM_BASE;
@@ -1611,9 +1612,24 @@ static CallFamily call_family(const char* o)
         if (name_is(o, "UISituationRoom") || name_is(o, "UISoldierGeneMods") ||
             name_is(o, "UIStrategyHUD_") || name_is(o, "UIStrategyComponent_"))
             return FAM_BASE;
+        if (name_is(o, "UISightlineHUD_SightlineContainer")) return FAM_TACTICAL;
         break;
-    case 'T': if (name_is(o, "UITellMeMore")) return FAM_BASE; break;
-    case 'W': if (name_is(o, "UIWidgetHelper")) return FAM_BASE; break;
+    case 'T':
+        if (name_is(o, "UITellMeMore")) return FAM_BASE;
+        // UITacticalHUD_0 itself as well as its panels: LowerTargetSystem
+        // is declared on UITacticalHUD alone, which has no subclass in
+        // either build.
+        if (name_is(o, "UITacticalHUD") || name_is(o, "UITargetingReticle") ||
+            name_is(o, "UITurnOverlay"))
+            return FAM_TACTICAL;
+        break;
+    case 'U':
+        if (name_is(o, "UIUnitFlag_") || name_is(o, "UIUnitGermanMode")) return FAM_TACTICAL;
+        break;
+    case 'W':
+        if (name_is(o, "UIWidgetHelper")) return FAM_BASE;
+        if (name_is(o, "UIWorldMessageMgr")) return FAM_TACTICAL;
+        break;
     }
     return FAM_OTHER;
 }
@@ -2964,6 +2980,211 @@ static int base_call(const Call* c)
     return 0;
 }
 
+// The tactical HUD: the objectives, F1, the unit flags, the selected
+// soldier and weapon panels, the turn banner, the ticker, floating combat
+// text, the sightline strip, the ability bar, targeting lowered, the aiming
+// reticle and the shot panel.
+static int tactical_call(const Call* c)
+{
+    const char* tag = c->tag;
+    LONG n = c->n;
+    void* stack = c->stack;
+    void* node = c->node;
+    void* object = c->object;
+    uint8_t* locals = c->locals;
+    const char* obj_name = c->obj_name;
+    const char* fn_name = c->fn_name;
+    Payload* p = c->p;
+
+    // The mission's objectives. See mission.h. Kept, and said once a burst
+    // of changes is over (mission_poll).
+    if (strncmp(obj_name, "UITacticalHUD_ObjectivesList", 28) == 0) {
+        mission_note(n, object, fn_name, node, locals, p);
+        return 1;
+    }
+
+    // The unit information screen (F1). See info.h. Its calls are read by
+    // position, and nothing is said until the burst is over (info_settle).
+    // The summary is due from the cursor's per-frame poll; it is checked
+    // here too, since the HUD goes on redrawing while the screen is up, in
+    // case the cursor does not.
+    if (strncmp(obj_name, "UIUnitGermanMode", 16) == 0) {
+        info_note(n, object, obj_name, fn_name, node, locals);
+        return 1;
+    }
+
+    // The shot about to be taken. Its panel states one thing per call and
+    // says nothing on any of them, so the burst is composed and spoken once.
+    // shot.c holds the order it depends on.
+    // A unit's name, over its head. Each argument arrives twice -- as the
+    // parameter and again in the ASValue array -- and an empty nickname not
+    // at all, so a second string equal to the first is the name repeated.
+    if (strncmp(obj_name, "UIUnitFlag_", 11) == 0 && strcmp(fn_name, "SetNames") == 0 &&
+        p->nstrings > 0) {
+        const char* nick = p->nstrings > 1 && strcmp(p->strings[1], p->strings[0]) != 0
+                               ? p->strings[1] : "";
+        unit_note(object, p->strings[0], nick);
+    }
+    if (strncmp(obj_name, "UIUnitFlag_", 11) == 0)
+        unit_flag_drew(object, fn_name, p);
+    // The selected soldier's panel. See soldier.h. Not spoken as it passes:
+    // soldier_poll announces a switch once the flags have caught up.
+    if (strncmp(obj_name, "UITacticalHUD_SoldierStatsContainer", 35) == 0 &&
+        strcmp(fn_name, "SetStats") == 0) {
+        soldier_stats_note(n, p);
+        return 1;
+    }
+    // The weapon panels: the equipped weapon and the ammo each has. Kept for
+    // the soldier's readouts, not said as they pass (weapon_note).
+    if (weapon_note(n, obj_name, fn_name, p)) return 1;
+    // Whose turn it is. See combat_turn in combat.h.
+    if (strncmp(obj_name, "UITurnOverlay", 13) == 0) {
+        const char* strs[8];
+        int ns = 0;
+        for (int i = 0; i < p->nstrings && ns < 8; i++) strs[ns++] = p->strings[i];
+        char say[80];
+        if (combat_turn(fn_name, strs, ns, say, sizeof say)) {
+            logf_("[%ld] %s %s.%s  TURN \"%s\"\n", n, tag, obj_name, fn_name, say);
+            announce_as(SET_TURN, say);
+        } else {
+            logf_("[%ld] %s %s.%s  (turn banner)\n", n, tag, obj_name, fn_name);
+        }
+        return 1;
+    }
+    // The message ticker along the top of the screen: "Sq. O'Reilly takes a
+    // reaction shot!", "Corporal Hudson has earned a promotion!". Everything
+    // goes through UIMessageMgr.Message, which has already decided whether
+    // the local player may see it, then UIMessageMgr_Container.Message, whose
+    // CreateMessageBox hands Flash (id, title, icon, pulse). The id is
+    // "default<n>" or the caller's own; the title is the text.
+    if (strncmp(obj_name, "UIMessageMgr_Container", 22) == 0 &&
+        strcmp(fn_name, "CreateMessageBox") == 0) {
+        const char* title = NULL;
+        for (int i = 1; i < p->nstrings; i++)
+            if (p->strings[i][0] && strcmp(p->strings[i], p->strings[0]) != 0 &&
+                !looks_like_asset(p->strings[i])) {
+                title = p->strings[i];
+                break;
+            }
+        if (title) {
+            logf_("[%ld] %s %s.%s  TICKER \"%s\"\n", n, tag, obj_name, fn_name, title);
+            announce_as(SET_TICKER, title);
+        }
+        return 1;
+    }
+
+    // Floating combat text. See combat.h.
+    if (strncmp(obj_name, "UIWorldMessageMgr", 17) == 0 &&
+        (strcmp(fn_name, "CreateNewMessage") == 0 ||
+         strcmp(fn_name, "UpdateExistingMessageContents") == 0)) {
+        combat_message(n, stack, p);
+        return 1;
+    }
+    if (strncmp(obj_name, "UISightlineHUD_SightlineContainer", 33) == 0)
+        strip_note(object, fn_name, p);
+
+    // The ability bar, kept for numpad . to read. Nothing is said as it
+    // passes: it is rebuilt on every soldier switch, move and target change.
+    if (strncmp(obj_name, "UITacticalHUD_AbilityContainer", 30) == 0) {
+        if (object != g_abar_obj) {
+            abar_reset();
+            g_abar_obj = object;
+        }
+        if (strstr(fn_name, "SetNumActiveAbilities") && p->nnumbers > 0) {
+            abar_set_count((int)p->numbers[0]);
+        } else if (strcmp(fn_name, "PopulateFlash") == 0) {
+            int got = abar_from_frame(stack);
+            if (got < 0 && !g_abar_logged_fail) {
+                g_abar_logged_fail = 1;
+                logf_("[%ld] abar: PopulateFlash's stream did not parse -- the bar "
+                      "will be out of date\n", n);
+            } else if (got >= 0) {
+                char bar[1024];
+                abar_describe(bar, sizeof bar);
+                logf_("[%ld] abar: %d slot%s updated -> \"%s\"\n", n, got,
+                      got == 1 ? "" : "s", bar);
+            }
+            return 1;
+        }
+    }
+
+    // Targeting lowered, by Escape or by the shot being taken. Without this,
+    // picking the same ability again after a cancel was dropped as a repeat
+    // and said nothing.
+    // UITacticalHUD is the only class with this function, in both builds.
+    if (strcmp(fn_name, "LowerTargetSystem") == 0) {
+        shot_forget_said();
+        g_reticle_said[0] = 0;
+        // An aim has nothing left to point once targeting is down.
+        if (g_nav_aim) nav_stop("targeting lowered");
+    }
+
+    // The aiming reticle's message: "Shot is blocked." is the one warning the
+    // game gives before a free-aimed shot goes into a wall, and it is drawn
+    // nowhere else. UITargetingReticle.UpdateShotData sends it when the
+    // blocked state changes, and OnInit sends an empty one while the reticle
+    // builds, so an empty message is not "clear" and is not spoken. The same
+    // message is said again only after a pause, so the re-send that follows
+    // OnInit is not heard twice.
+    if (strncmp(obj_name, "UITargetingReticle", 18) == 0 &&
+        strcmp(fn_name, "SetCursorMessage") == 0) {
+        const char* msg = p->nstrings ? p->strings[0] : "";
+        ULONGLONG t = GetTickCount64();
+        if (*msg && (strcmp(msg, g_reticle_said) != 0 ||
+                     t - g_reticle_said_at > RETICLE_REPEAT_MS)) {
+            strncpy_s(g_reticle_said, sizeof g_reticle_said, msg, _TRUNCATE);
+            g_reticle_said_at = t;
+            logf_("[%ld] %s %s.%s  RETICLE \"%s\"\n", n, tag, obj_name, fn_name, msg);
+            if (g_speak && !muted()) speech_say(msg);
+            return 1;
+        }
+    }
+
+    if (shot_is_panel(obj_name)) {
+        // Each argument arrives twice -- once as the parameter, once inside
+        // the ASValue array built from it -- so the first occurrences are
+        // taken and the repeats dropped. Empty arguments never arrive at all:
+        // read_fstring rejects a zero-length string, which is how
+        // SetShotChance("", "") reads as a call with no text.
+        const char* a = "";
+        const char* b = "";
+        for (int i = 0; i < p->nstrings; i++) {
+            if (looks_like_asset(p->strings[i])) continue;
+            if (!*a) { a = p->strings[i]; continue; }
+            if (strcmp(p->strings[i], a) == 0) continue;
+            b = p->strings[i];
+            break;
+        }
+        int flag = p->nbools ? p->bools[0] : -1;
+
+        // Who the shot is at, looked up as the burst ends, since that is the
+        // one call made from inside Update and so the one with the soldier
+        // in reach.
+        if (strstr(fn_name, "UpdateLayout")) shot_target_now(stack);
+
+        char say[SHOT_MAX_TEXT];
+        shot_set_brief(g_nav_aim);
+        if (shot_note(fn_name, a, b, flag, say, sizeof say)) {
+            logf_("[%ld] %s %s.%s  SHOT \"%s\"\n", n, tag, obj_name, fn_name, say);
+            // While the numpad moves an aim, the chance follows the step that
+            // moved it, and must not cut its coordinates off.
+            if (g_nav_aim) {
+                if (g_speak && !muted()) speech_say(say);
+            } else {
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_now(say);
+            }
+        } else if (*a) {
+            logf_("[%ld] %s %s.%s  SHOT held \"%s\"%s%s\n", n, tag, obj_name,
+                  fn_name, a, *b ? " / " : "", b);
+        } else {
+            logf_("[%ld] %s %s.%s  SHOT held (no text)\n", n, tag, obj_name, fn_name);
+        }
+        return 1;
+    }
+    return 0;
+}
+
 static void capture_body(const char* tag, LONG n, void* stack)
 {
     if (!readable(stack, 0x20)) {
@@ -3094,7 +3315,8 @@ static void capture_body(const char* tag, LONG n, void* stack)
         g_seen_tactical_at = GetTickCount64();
 
     Call call = { tag, n, stack, node, object, locals, obj_name, fn_name, p };
-    switch (call_family(obj_name)) {
+    CallFamily family = call_family(obj_name);
+    switch (family) {
     case FAM_BASE: {
         // Once a run, so a log shows the route taken.
         static int logged;
@@ -3108,194 +3330,21 @@ static void capture_body(const char* tag, LONG n, void* stack)
     default: break;
     }
 
-    // The mission's objectives. See mission.h. Kept, and said once a burst
-    // of changes is over (mission_poll).
+    // Due whatever drew: the objectives are said once a burst of changes is
+    // over (mission_poll), and F1's summary once its burst is (info_settle),
+    // checked here as well as from the cursor's poll since the HUD goes on
+    // redrawing while the screen is up.
     if (g_mission_due) mission_poll();
-    if (strncmp(obj_name, "UITacticalHUD_ObjectivesList", 28) == 0) {
-        mission_note(n, object, fn_name, node, locals, p);
-        return;
-    }
-
-    // The unit information screen (F1). See info.h. Its calls are read by
-    // position, and nothing is said until the burst is over (info_settle).
-    // The summary is due from the cursor's per-frame poll; it is checked
-    // here too, since the HUD goes on redrawing while the screen is up, in
-    // case the cursor does not.
     if (g_info_due) info_settle();
-    if (strncmp(obj_name, "UIUnitGermanMode", 16) == 0) {
-        info_note(n, object, obj_name, fn_name, node, locals);
-        return;
-    }
-
-    // The shot about to be taken. Its panel states one thing per call and
-    // says nothing on any of them, so the burst is composed and spoken once.
-    // shot.c holds the order it depends on.
-    // A unit's name, over its head. Each argument arrives twice -- as the
-    // parameter and again in the ASValue array -- and an empty nickname not
-    // at all, so a second string equal to the first is the name repeated.
-    if (strncmp(obj_name, "UIUnitFlag_", 11) == 0 && strcmp(fn_name, "SetNames") == 0 &&
-        p->nstrings > 0) {
-        const char* nick = p->nstrings > 1 && strcmp(p->strings[1], p->strings[0]) != 0
-                               ? p->strings[1] : "";
-        unit_note(object, p->strings[0], nick);
-    }
-    if (strncmp(obj_name, "UIUnitFlag_", 11) == 0)
-        unit_flag_drew(object, fn_name, p);
-    // The selected soldier's panel. See soldier.h. Not spoken as it passes:
-    // soldier_poll announces a switch once the flags have caught up.
-    if (strncmp(obj_name, "UITacticalHUD_SoldierStatsContainer", 35) == 0 &&
-        strcmp(fn_name, "SetStats") == 0) {
-        soldier_stats_note(n, p);
-        return;
-    }
-    // The weapon panels: the equipped weapon and the ammo each has. Kept for
-    // the soldier's readouts, not said as they pass (weapon_note).
-    if (weapon_note(n, obj_name, fn_name, p)) return;
-    // Whose turn it is. See combat_turn in combat.h.
-    if (strncmp(obj_name, "UITurnOverlay", 13) == 0) {
-        const char* strs[8];
-        int ns = 0;
-        for (int i = 0; i < p->nstrings && ns < 8; i++) strs[ns++] = p->strings[i];
-        char say[80];
-        if (combat_turn(fn_name, strs, ns, say, sizeof say)) {
-            logf_("[%ld] %s %s.%s  TURN \"%s\"\n", n, tag, obj_name, fn_name, say);
-            announce_as(SET_TURN, say);
-        } else {
-            logf_("[%ld] %s %s.%s  (turn banner)\n", n, tag, obj_name, fn_name);
+    if (family == FAM_TACTICAL) {
+        static int logged;
+        if (!logged) {
+            logged = 1;
+            logf_("[%ld] capture: tactical HUD routed from %s.%s\n", n, obj_name, fn_name);
         }
-        return;
-    }
-    // The message ticker along the top of the screen: "Sq. O'Reilly takes a
-    // reaction shot!", "Corporal Hudson has earned a promotion!". Everything
-    // goes through UIMessageMgr.Message, which has already decided whether
-    // the local player may see it, then UIMessageMgr_Container.Message, whose
-    // CreateMessageBox hands Flash (id, title, icon, pulse). The id is
-    // "default<n>" or the caller's own; the title is the text.
-    if (strncmp(obj_name, "UIMessageMgr_Container", 22) == 0 &&
-        strcmp(fn_name, "CreateMessageBox") == 0) {
-        const char* title = NULL;
-        for (int i = 1; i < p->nstrings; i++)
-            if (p->strings[i][0] && strcmp(p->strings[i], p->strings[0]) != 0 &&
-                !looks_like_asset(p->strings[i])) {
-                title = p->strings[i];
-                break;
-            }
-        if (title) {
-            logf_("[%ld] %s %s.%s  TICKER \"%s\"\n", n, tag, obj_name, fn_name, title);
-            announce_as(SET_TICKER, title);
-        }
-        return;
+        if (tactical_call(&call)) return;
     }
 
-    // Floating combat text. See combat.h.
-    if (strncmp(obj_name, "UIWorldMessageMgr", 17) == 0 &&
-        (strcmp(fn_name, "CreateNewMessage") == 0 ||
-         strcmp(fn_name, "UpdateExistingMessageContents") == 0)) {
-        combat_message(n, stack, p);
-        return;
-    }
-    if (strncmp(obj_name, "UISightlineHUD_SightlineContainer", 33) == 0)
-        strip_note(object, fn_name, p);
-
-    // The ability bar, kept for numpad . to read. Nothing is said as it
-    // passes: it is rebuilt on every soldier switch, move and target change.
-    if (strncmp(obj_name, "UITacticalHUD_AbilityContainer", 30) == 0) {
-        if (object != g_abar_obj) {
-            abar_reset();
-            g_abar_obj = object;
-        }
-        if (strstr(fn_name, "SetNumActiveAbilities") && p->nnumbers > 0) {
-            abar_set_count((int)p->numbers[0]);
-        } else if (strcmp(fn_name, "PopulateFlash") == 0) {
-            int got = abar_from_frame(stack);
-            if (got < 0 && !g_abar_logged_fail) {
-                g_abar_logged_fail = 1;
-                logf_("[%ld] abar: PopulateFlash's stream did not parse -- the bar "
-                      "will be out of date\n", n);
-            } else if (got >= 0) {
-                char bar[1024];
-                abar_describe(bar, sizeof bar);
-                logf_("[%ld] abar: %d slot%s updated -> \"%s\"\n", n, got,
-                      got == 1 ? "" : "s", bar);
-            }
-            return;
-        }
-    }
-
-    // Targeting lowered, by Escape or by the shot being taken. Without this,
-    // picking the same ability again after a cancel was dropped as a repeat
-    // and said nothing.
-    // UITacticalHUD is the only class with this function, in both builds.
-    if (strcmp(fn_name, "LowerTargetSystem") == 0) {
-        shot_forget_said();
-        g_reticle_said[0] = 0;
-        // An aim has nothing left to point once targeting is down.
-        if (g_nav_aim) nav_stop("targeting lowered");
-    }
-
-    // The aiming reticle's message: "Shot is blocked." is the one warning the
-    // game gives before a free-aimed shot goes into a wall, and it is drawn
-    // nowhere else. UITargetingReticle.UpdateShotData sends it when the
-    // blocked state changes, and OnInit sends an empty one while the reticle
-    // builds, so an empty message is not "clear" and is not spoken. The same
-    // message is said again only after a pause, so the re-send that follows
-    // OnInit is not heard twice.
-    if (strncmp(obj_name, "UITargetingReticle", 18) == 0 &&
-        strcmp(fn_name, "SetCursorMessage") == 0) {
-        const char* msg = p->nstrings ? p->strings[0] : "";
-        ULONGLONG t = GetTickCount64();
-        if (*msg && (strcmp(msg, g_reticle_said) != 0 ||
-                     t - g_reticle_said_at > RETICLE_REPEAT_MS)) {
-            strncpy_s(g_reticle_said, sizeof g_reticle_said, msg, _TRUNCATE);
-            g_reticle_said_at = t;
-            logf_("[%ld] %s %s.%s  RETICLE \"%s\"\n", n, tag, obj_name, fn_name, msg);
-            if (g_speak && !muted()) speech_say(msg);
-            return;
-        }
-    }
-
-    if (shot_is_panel(obj_name)) {
-        // Each argument arrives twice -- once as the parameter, once inside
-        // the ASValue array built from it -- so the first occurrences are
-        // taken and the repeats dropped. Empty arguments never arrive at all:
-        // read_fstring rejects a zero-length string, which is how
-        // SetShotChance("", "") reads as a call with no text.
-        const char* a = "";
-        const char* b = "";
-        for (int i = 0; i < p->nstrings; i++) {
-            if (looks_like_asset(p->strings[i])) continue;
-            if (!*a) { a = p->strings[i]; continue; }
-            if (strcmp(p->strings[i], a) == 0) continue;
-            b = p->strings[i];
-            break;
-        }
-        int flag = p->nbools ? p->bools[0] : -1;
-
-        // Who the shot is at, looked up as the burst ends, since that is the
-        // one call made from inside Update and so the one with the soldier
-        // in reach.
-        if (strstr(fn_name, "UpdateLayout")) shot_target_now(stack);
-
-        char say[SHOT_MAX_TEXT];
-        shot_set_brief(g_nav_aim);
-        if (shot_note(fn_name, a, b, flag, say, sizeof say)) {
-            logf_("[%ld] %s %s.%s  SHOT \"%s\"\n", n, tag, obj_name, fn_name, say);
-            // While the numpad moves an aim, the chance follows the step that
-            // moved it, and must not cut its coordinates off.
-            if (g_nav_aim) {
-                if (g_speak && !muted()) speech_say(say);
-            } else {
-                speech_cancel_pending();
-                if (g_speak && !muted()) speech_say_now(say);
-            }
-        } else if (*a) {
-            logf_("[%ld] %s %s.%s  SHOT held \"%s\"%s%s\n", n, tag, obj_name,
-                  fn_name, a, *b ? " / " : "", b);
-        } else {
-            logf_("[%ld] %s %s.%s  SHOT held (no text)\n", n, tag, obj_name, fn_name);
-        }
-        return;
-    }
 
     // The help bar: the screen's own list of what it can do, kept so that a
     // key can read it back.  It is not spoken as it passes -- a screen
