@@ -352,6 +352,17 @@ int cursor_grid(CursorGrid* g)
     return 1;
 }
 
+// The tile the cursor stands on, by the native's own arithmetic.
+int cursor_tile(const CursorGrid* g, int* tx, int* ty, float* z)
+{
+    float x, y, cz;
+    if (!cursor_position(&x, &y, &cz)) return 0;
+    *tx = cursor_tile_axis(x, g->min_x, CURSOR_TILE);
+    *ty = cursor_tile_axis(y, g->min_y, CURSOR_TILE);
+    if (z) *z = cz;
+    return 1;
+}
+
 void* cursor_world(void) { return g_world_resolved && g_world && world_live() ? g_world : NULL; }
 
 int cursor_position(float* x, float* y, float* z)

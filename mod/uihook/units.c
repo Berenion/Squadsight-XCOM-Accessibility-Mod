@@ -8,6 +8,7 @@
 #include "cursor.h"
 #include "nav.h"
 #include "combat.h"
+#include "names.h"
 #include "ue3.h"
 
 // Every unit has a flag over its head, and UIUnitFlag.SetNames(unitName,
@@ -399,6 +400,22 @@ int soldier_out_of_moves(void)
     const void* v;
     if (!unit || !field_ptr(unit, "m_iMoves", &g_unit_moves, sizeof(int32_t), &v)) return 0;
     return *(const int32_t*)v <= 0;
+}
+
+static FieldSlot g_aim_action;
+
+int soldier_aiming(void)
+{
+    void* unit = soldier_unit();
+    const void* v;
+    if (!unit || !field_ptr(unit, "m_kCurrAction", &g_aim_action, sizeof(void*), &v))
+        return 0;
+    void* action = *(void* const*)v;
+    char name[128];
+    if (!action || !unit_is_live(action) || !object_name(action, name, sizeof name))
+        return 0;
+    return strncmp(name, "XGAction_Targeting", 18) == 0 ||
+           strncmp(name, "XGAction_Fire", 13) == 0;
 }
 
 // ---- units with no flag ----------------------------------------------------

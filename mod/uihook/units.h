@@ -132,6 +132,7 @@ void* soldier_unit(void);               // the cursor's chained unit, if live
 // The soldier's tile, and the pawn's height (NAVH_LIFT above the feet).
 int   soldier_tile(const CursorGrid* g, int* tx, int* ty, float* z);
 int   soldier_out_of_moves(void);       // XGUnit.m_iMoves <= 0
+int   soldier_aiming(void);             // m_kCurrAction is XGAction_Targeting / _Fire
 
 // ---- units with no flag ----------------------------------------------------
 // A civilian with no flag over them (flagless_units), whom the unit

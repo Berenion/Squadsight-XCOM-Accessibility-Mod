@@ -132,6 +132,9 @@ int cursor_grid(CursorGrid* g);
 // NULL before then. tile queries call its natives through it.
 void* cursor_world(void);
 
+// The tile the cursor stands on, and its height in *z (may be NULL).
+int cursor_tile(const CursorGrid* g, int* tx, int* ty, float* z);
+
 // One axis of the native's arithmetic.  `step` is CURSOR_TILE for X and Y.
 static __inline int cursor_tile_axis(float pos, float min, float step)
 {
