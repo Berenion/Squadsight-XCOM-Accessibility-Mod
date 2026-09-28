@@ -6988,8 +6988,8 @@ void sight_poll(void)
         cur[n].unit = s.unit;
         unit_label(&g_units[i], cur[n].label, sizeof cur[n].label);
         cur[n].has_pos = have_pos;
-        cur[n].dx = have_pos ? cursor_tile_axis(s.loc[0], g.min_x, CURSOR_TILE) - sx : 0;
-        cur[n].dy = have_pos ? cursor_tile_axis(s.loc[1], g.min_y, CURSOR_TILE) - sy : 0;
+        cur[n].dx = have_pos ? grid_x(&g, s.loc[0]) - sx : 0;
+        cur[n].dy = have_pos ? grid_y(&g, s.loc[1]) - sy : 0;
         n++;
     }
 

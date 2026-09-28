@@ -288,7 +288,7 @@ static int tile_layers(int tx, int ty, float ground, int span, TileLayerFlags* l
     if (!on_floor || !standable) return -1;
 
     // The layer is found as tile_report finds it, from the floor plus 4.
-    int mid = cursor_tile_axis(ground + 4.0f, g.min_z, 64.0f);
+    int mid = grid_floor_layer(&g, ground);
     if (mid_out) *mid_out = mid;
     size_t used = 0;
     int n = 0;
@@ -298,9 +298,9 @@ static int tile_layers(int tx, int ty, float ground, int span, TileLayerFlags* l
         // The middle of the layer: the natives make a tile of it themselves,
         // and the middle is as far as can be from either edge's rounding.
         float pos[3] = {
-            g.min_x + ((float)tx + 0.5f) * CURSOR_TILE,
-            g.min_y + ((float)ty + 0.5f) * CURSOR_TILE,
-            g.min_z + ((float)tz + 0.5f) * 64.0f,
+            grid_centre_x(&g, tx),
+            grid_centre_y(&g, ty),
+            grid_layer_middle(&g, tz),
         };
         TileLayerFlags* l = &layers[n++];
         l->floor = on_floor(world, NULL, pos) != 0;
@@ -378,25 +378,25 @@ static float aim_floor(const CursorGrid* g, int tx, int ty, float from)
     if (!world) return from;
     PositionTestFn on_floor = (PositionTestFn)tile_vfn(world, g_tile_slot_onfloor);
     if (!on_floor) return from;
-    int start = cursor_tile_axis(from + 4.0f, g->min_z, 64.0f);
+    int start = grid_floor_layer(g, from);
     float pos[3] = {
-        g->min_x + ((float)tx + 0.5f) * CURSOR_TILE,
-        g->min_y + ((float)ty + 0.5f) * CURSOR_TILE,
+        grid_centre_x(g, tx),
+        grid_centre_y(g, ty),
         0.0f,
     };
     Fault f;
     __try {
         for (int tz = start; tz >= 0; tz--) {
             if (g->num_z > 0 && tz >= g->num_z) continue;
-            pos[2] = g->min_z + ((float)tz + 0.5f) * 64.0f;
+            pos[2] = grid_layer_middle(g, tz);
             if (on_floor(world, NULL, pos))
-                return aim_floor_exact(world, pos, g->min_z + (float)tz * 64.0f);
+                return aim_floor_exact(world, pos, grid_layer_bottom(g, tz));
         }
         for (int tz = start + 1; tz <= start + AIM_FLOOR_UP; tz++) {
             if (tz < 0 || (g->num_z > 0 && tz >= g->num_z)) break;
-            pos[2] = g->min_z + ((float)tz + 0.5f) * 64.0f;
+            pos[2] = grid_layer_middle(g, tz);
             if (on_floor(world, NULL, pos))
-                return aim_floor_exact(world, pos, g->min_z + (float)tz * 64.0f);
+                return aim_floor_exact(world, pos, grid_layer_bottom(g, tz));
         }
     }
     __except (fault_note(GetExceptionInformation(), &f)) {
@@ -488,8 +488,8 @@ static void radar(int friendly)
             }
         }
         c[n].name = labels[n];
-        c[n].dx = cursor_tile_axis(s.loc[0], g.min_x, CURSOR_TILE) - ox;
-        c[n].dy = cursor_tile_axis(s.loc[1], g.min_y, CURSOR_TILE) - oy;
+        c[n].dx = grid_x(&g, s.loc[0]) - ox;
+        c[n].dy = grid_y(&g, s.loc[1]) - oy;
         n++;
     }
     static char say[2048];
@@ -888,8 +888,8 @@ static void nav_press(int digit, int gliding)
     // An aim is asked at one height instead: the floor search is driven by
     // path verdicts, aiming builds no paths, and the cursor snaps itself to
     // the floor as it moves (XCom3DCursor's CursorSnapToFloor).
-    g_nav_world[0] = g.min_x + ((float)tx + 0.5f) * CURSOR_TILE;
-    g_nav_world[1] = g.min_y + ((float)ty + 0.5f) * CURSOR_TILE;
+    g_nav_world[0] = grid_centre_x(&g, tx);
+    g_nav_world[1] = grid_centre_y(&g, ty);
     if (g_nav_aim) {
         float was = g_aim_floor;
         g_aim_floor = aim_floor(&g, tx, ty, g_aim_floor);
@@ -941,8 +941,8 @@ void nav_focus(int tx, int ty, float ground, const char* what)
     if (g_nav_aim) g_aim_floor = aim_floor(&g, tx, ty, ground);
     nav_arrive(tx, ty);
 
-    g_nav_world[0] = g.min_x + ((float)tx + 0.5f) * CURSOR_TILE;
-    g_nav_world[1] = g.min_y + ((float)ty + 0.5f) * CURSOR_TILE;
+    g_nav_world[0] = grid_centre_x(&g, tx);
+    g_nav_world[1] = grid_centre_y(&g, ty);
     g_nav_world[2] = g_nav_aim ? g_aim_floor : navh_query_z();
     g_nav_live = 1;
     g_nav_key_at = GetTickCount64();
@@ -986,11 +986,11 @@ static int floor_probe(const CursorGrid* g, int tx, int ty, float from, int dir,
     PositionTestFn on_floor = (PositionTestFn)tile_vfn(world, g_tile_slot_onfloor);
     FloorZFn floorz = (FloorZFn)tile_vfn(world, g_tile_slot_floorz);
     if (!on_floor) return 0;
-    float x = g->min_x + ((float)tx + 0.5f) * CURSOR_TILE;
-    float y = g->min_y + ((float)ty + 0.5f) * CURSOR_TILE;
+    float x = grid_centre_x(g, tx);
+    float y = grid_centre_y(g, ty);
     float here[3] = { x, y, from + 4.0f };
     int cur = floor_of(here);
-    int layer = cursor_tile_axis(from + 4.0f, g->min_z, 64.0f);
+    int layer = grid_floor_layer(g, from);
     int w = _snprintf_s(seen, seen_sz, _TRUNCATE, "from layer %d storey %d:", layer, cur);
     if (w > 0) used = (size_t)w;
     (void)cur;
@@ -1020,7 +1020,7 @@ static int floor_probe(const CursorGrid* g, int tx, int ty, float from, int dir,
     // still further than the step, or not.
     for (int tz = dir < 0 ? layer : layer + dir; tz >= 0 && (g->num_z <= 0 || tz < g->num_z);
          tz += dir) {
-        float bottom = g->min_z + (float)tz * 64.0f;
+        float bottom = grid_layer_bottom(g, tz);
         float top[3] = { x, y, bottom + 63.0f };
         float z = 0.0f;
         int has = 0;
@@ -1113,8 +1113,8 @@ static int floor_next(const CursorGrid* g, int tx, int ty, float from, int dir,
         _snprintf_s(seen + used, seen_sz - used, _TRUNCATE, " known:%.1f", zk);
     if (!probe && !known) return 0;
     if (known && (!probe || (zk - from) * (float)dir < (zp - from) * (float)dir)) {
-        float at[3] = { g->min_x + ((float)tx + 0.5f) * CURSOR_TILE,
-                        g->min_y + ((float)ty + 0.5f) * CURSOR_TILE, zk + 4.0f };
+        float at[3] = { grid_centre_x(g, tx),
+                        grid_centre_y(g, ty), zk + 4.0f };
         *out = zk;
         *storey = floor_of(at);
         return 1;
@@ -1266,10 +1266,10 @@ static int destructible_cover(void* a)
     void* smc = *(void* const*)v;
     if (!field_ptr(smc, "Bounds", &g_blast_bounds, 7 * sizeof(float), &v)) return 0;
     const float* b = (const float*)v;           // Origin, BoxExtent, SphereRadius
-    int x0 = cursor_tile_axis(b[0] - b[3] + 8.0f, g.min_x, CURSOR_TILE);
-    int x1 = cursor_tile_axis(b[0] + b[3] - 8.0f, g.min_x, CURSOR_TILE);
-    int y0 = cursor_tile_axis(b[1] - b[4] + 8.0f, g.min_y, CURSOR_TILE);
-    int y1 = cursor_tile_axis(b[1] + b[4] - 8.0f, g.min_y, CURSOR_TILE);
+    int x0 = grid_x(&g, b[0] - b[3] + 8.0f);
+    int x1 = grid_x(&g, b[0] + b[3] - 8.0f);
+    int y0 = grid_y(&g, b[1] - b[4] + 8.0f);
+    int y1 = grid_y(&g, b[1] + b[4] - 8.0f);
     if (x1 < x0) x1 = x0;                       // thinner than a tile
     if (y1 < y0) y1 = y0;
     if (x1 - x0 > 12) x1 = x0 + 12;             // a long wall: its first stretch
@@ -1290,8 +1290,8 @@ static int destructible_cover(void* a)
             if (x < 0 || y < 0 || x >= g.num_x || y >= g.num_y) continue;
             TileCoverPoint cp;
             memset(&cp, 0, sizeof cp);
-            float wx = g.min_x + ((float)x + 0.5f) * CURSOR_TILE;
-            float wy = g.min_y + ((float)y + 0.5f) * CURSOR_TILE;
+            float wx = grid_centre_x(&g, x);
+            float wy = grid_centre_y(&g, y);
             if (!cover(world, NULL, wx, wy, z, &cp) || cp.x != x || cp.y != y ||
                 (cp.flags & TILE_COVER_DIAGONAL) || !(cp.flags & bit))
                 continue;
@@ -1829,8 +1829,8 @@ static void cursor_watch(void* self)
     // The fraction is printed so the log can confirm it rather than trust it
     // -- a cursor at rest in the middle of a tile should read +0.50 on both
     // axes, and anything else means Min is not the origin the native uses.
-    int tx = cursor_tile_axis(x, g.min_x, CURSOR_TILE);
-    int ty = cursor_tile_axis(y, g.min_y, CURSOR_TILE);
+    int tx = grid_x(&g, x);
+    int ty = grid_y(&g, y);
     float fx = (x - g.min_x) / CURSOR_TILE - (float)tx;
     float fy = (y - g.min_y) / CURSOR_TILE - (float)ty;
     int off_grid = tx < 0 || ty < 0 || tx >= g.num_x || ty >= g.num_y;
@@ -1991,8 +1991,8 @@ static void nav_aim_landed(const CursorGrid* g, int px, int py)
     }
     logf_("nav: aim for %d, %d held at %d, %d -- out of range\n", tx, ty, px, py);
     nav_begin(px, py);
-    g_nav_world[0] = g->min_x + ((float)px + 0.5f) * CURSOR_TILE;
-    g_nav_world[1] = g->min_y + ((float)py + 0.5f) * CURSOR_TILE;
+    g_nav_world[0] = grid_centre_x(g, px);
+    g_nav_world[1] = grid_centre_y(g, py);
     g_aim_floor = aim_floor(g, px, py, g_aim_floor);
     g_nav_world[2] = g_aim_floor;
     nav_describe(px, py, g_step_coords, sizeof g_step_coords);
@@ -2009,8 +2009,8 @@ static void nav_placed(const float* v)
     CursorGrid g;
     int tx, ty;
     if (!cursor_grid(&g) || !readable(v, 3 * sizeof(float))) return;
-    int px = cursor_tile_axis(v[0], g.min_x, CURSOR_TILE);
-    int py = cursor_tile_axis(v[1], g.min_y, CURSOR_TILE);
+    int px = grid_x(&g, v[0]);
+    int py = grid_y(&g, v[1]);
     // An aim is announced as it lands, and before the same-tile check below:
     // a step pushed against the range limit lands where the last one did.
     if (g_nav_aim && g_step_pending) nav_aim_landed(&g, px, py);
@@ -2378,8 +2378,8 @@ static void nav_path_result(void* self, void* stack, void* result)
     CursorGrid g;
     int tx = -1, ty = -1;
     if (dest && cursor_grid(&g)) {
-        tx = cursor_tile_axis(dest[0], g.min_x, CURSOR_TILE);
-        ty = cursor_tile_axis(dest[1], g.min_y, CURSOR_TILE);
+        tx = grid_x(&g, dest[0]);
+        ty = grid_y(&g, dest[1]);
     }
     // After F / C, a path whose end is not on the chosen floor is the one
     // from before the key: the same tile, the old storey.

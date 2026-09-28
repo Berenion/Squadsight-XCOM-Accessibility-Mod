@@ -397,8 +397,8 @@ int cursor_tile(const CursorGrid* g, int* tx, int* ty, float* z)
 {
     float x, y, cz;
     if (!cursor_position(&x, &y, &cz)) return 0;
-    *tx = cursor_tile_axis(x, g->min_x, CURSOR_TILE);
-    *ty = cursor_tile_axis(y, g->min_y, CURSOR_TILE);
+    *tx = grid_x(g, x);
+    *ty = grid_y(g, y);
     if (z) *z = cz;
     return 1;
 }

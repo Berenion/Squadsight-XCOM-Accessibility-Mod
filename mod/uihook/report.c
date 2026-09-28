@@ -109,8 +109,8 @@ int units_in_column(int tx, int ty, ColumnUnit* out, int max)
     for (int i = 0; i < g_nunits && n < max; i++) {
         UnitSeen s;
         if (!unit_seen(&g_units[i], squad, &s)) continue;
-        if (cursor_tile_axis(s.loc[0], g.min_x, CURSOR_TILE) != tx ||
-            cursor_tile_axis(s.loc[1], g.min_y, CURSOR_TILE) != ty)
+        if (grid_x(&g, s.loc[0]) != tx ||
+            grid_y(&g, s.loc[1]) != ty)
             continue;
         if (!squad_sees(&sight, s.unit, s.loc, s.friendly, s.who->name)) continue;
         unit_label_state(&g_units[i], s.unit, !s.friendly, out[n].label, sizeof out[n].label);
@@ -125,8 +125,8 @@ int units_in_column(int tx, int ty, ColumnUnit* out, int max)
         static FlaglessUnit found[COLUMN_FLAGLESS];
         int nf = flagless_units(0, found, COLUMN_FLAGLESS);
         for (int i = 0; i < nf && n < max; i++) {
-            if (cursor_tile_axis(found[i].loc[0], g.min_x, CURSOR_TILE) != tx ||
-                cursor_tile_axis(found[i].loc[1], g.min_y, CURSOR_TILE) != ty)
+            if (grid_x(&g, found[i].loc[0]) != tx ||
+                grid_y(&g, found[i].loc[1]) != ty)
                 continue;
             if (!squad_sees(&sight, found[i].unit, found[i].loc, 0, found[i].name))
                 continue;
@@ -486,8 +486,8 @@ int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     if (!cover) return 0;
 
     // Where XGAction_EndMove asks: the floor under the destination, plus 4.
-    float x = g.min_x + ((float)tx + 0.5f) * CURSOR_TILE;
-    float y = g.min_y + ((float)ty + 0.5f) * CURSOR_TILE;
+    float x = grid_centre_x(&g, tx);
+    float y = grid_centre_y(&g, ty);
     float z = floor + 4.0f;
     TileCoverPoint cp;
     memset(&cp, 0, sizeof cp);
@@ -495,7 +495,7 @@ int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
 
     // The layer is WORLD_FloorHeight (64) deep, measured from Min.Z as the
     // tile natives do.
-    int tz = cursor_tile_axis(z, g.min_z, 64.0f);
+    int tz = grid_layer(&g, z);
     TileTestFn smoke = (TileTestFn)tile_vfn(world, g_tile_slot_smoke);
     TileTestFn poison = (TileTestFn)tile_vfn(world, g_tile_slot_poison);
 

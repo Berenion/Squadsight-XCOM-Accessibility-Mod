@@ -222,11 +222,11 @@ float aim_floor_exact(void* world, float* pos, float bottom)
 {
     FloorZFn floorz = (FloorZFn)tile_vfn(world, g_tile_slot_floorz);
     if (!floorz) return bottom;
-    pos[2] = bottom + 64.0f;
+    pos[2] = bottom + CURSOR_LAYER;
     float z = floorz(world, NULL, pos, 0);
     // The height it was given back means none found; anything outside the
     // layer is a different floor from the one the flags found.
-    if (z == pos[2] || !(z >= bottom - 1.0f && z <= bottom + 64.0f)) return bottom;
+    if (z == pos[2] || !(z >= bottom - 1.0f && z <= bottom + CURSOR_LAYER)) return bottom;
     return z;
 }
 
@@ -254,12 +254,12 @@ static int where_probe_init(WhereProbe* p)
 static int where_box(const CursorGrid* g, const WhereVolume* w,
                      int* x0, int* x1, int* y0, int* y1, int* z0, int* z1)
 {
-    *x0 = cursor_tile_axis(w->lo[0] + 1.0f, g->min_x, CURSOR_TILE);
-    *x1 = cursor_tile_axis(w->hi[0] - 1.0f, g->min_x, CURSOR_TILE);
-    *y0 = cursor_tile_axis(w->lo[1] + 1.0f, g->min_y, CURSOR_TILE);
-    *y1 = cursor_tile_axis(w->hi[1] - 1.0f, g->min_y, CURSOR_TILE);
-    *z0 = cursor_tile_axis(w->lo[2] + 1.0f, g->min_z, 64.0f);
-    *z1 = cursor_tile_axis(w->hi[2] - 1.0f, g->min_z, 64.0f);
+    *x0 = grid_x(g, w->lo[0] + 1.0f);
+    *x1 = grid_x(g, w->hi[0] - 1.0f);
+    *y0 = grid_y(g, w->lo[1] + 1.0f);
+    *y1 = grid_y(g, w->hi[1] - 1.0f);
+    *z0 = grid_layer(g, w->lo[2] + 1.0f);
+    *z1 = grid_layer(g, w->hi[2] - 1.0f);
     if (*x0 < 0) *x0 = 0;
     if (*y0 < 0) *y0 = 0;
     if (*x1 >= g->num_x) *x1 = g->num_x - 1;
@@ -275,10 +275,10 @@ static int where_box(const CursorGrid* g, const WhereVolume* w,
 static int where_tile_floor(const WhereProbe* p, const WhereVolume* w, int tx, int ty,
                             int z0, int z1, float reach, float* found)
 {
-    float x = p->g.min_x + ((float)tx + 0.5f) * CURSOR_TILE;
-    float y = p->g.min_y + ((float)ty + 0.5f) * CURSOR_TILE;
+    float x = grid_centre_x(&p->g, tx);
+    float y = grid_centre_y(&p->g, ty);
     for (int tz = z0; tz <= z1; tz++) {
-        float bottom = p->g.min_z + (float)tz * 64.0f;
+        float bottom = grid_layer_bottom(&p->g, tz);
         float z = 0.0f;
         int has = 0;
         if (p->floorz) {
@@ -422,8 +422,8 @@ static int where_at(int tx, int ty, float floor, TileWhere* out)
     CursorGrid g;
     EncompassFn inside = (EncompassFn)g_volume_fn_encompass;
     if (!inside || !cursor_grid(&g) || !where_volumes()) return 0;
-    float p[3] = { g.min_x + ((float)tx + 0.5f) * CURSOR_TILE,
-                   g.min_y + ((float)ty + 0.5f) * CURSOR_TILE,
+    float p[3] = { grid_centre_x(&g, tx),
+                   grid_centre_y(&g, ty),
                    floor + WHERE_LIFT };
 
     struct { void* bv; int number; int internal; } hit[WHERE_HITS];
@@ -586,8 +586,8 @@ int evac_at(int tx, int ty, float floor)
     EncompassFn inside = (EncompassFn)g_volume_fn_encompass;
     if (!inside || !cursor_grid(&g)) return 0;
     int n = evac_live(use);
-    float x = g.min_x + ((float)tx + 0.5f) * CURSOR_TILE;
-    float y = g.min_y + ((float)ty + 0.5f) * CURSOR_TILE;
+    float x = grid_centre_x(&g, tx);
+    float y = grid_centre_y(&g, ty);
     for (int i = 0; i < n; i++) {
         const WhereVolume* w = &g_evac[use[i]];
         if (x < w->lo[0] || x > w->hi[0] || y < w->lo[1] || y > w->hi[1] ||
@@ -618,7 +618,7 @@ int evac_nearest(int ox, int oy, int* nx, int* ny, float* nz)
         const WhereVolume* w = &g_evac[use[i]];
         int x0, x1, y0, y1, z0, z1;
         if (!where_box(&p.g, w, &x0, &x1, &y0, &y1, &z0, &z1)) continue;
-        z0 -= (int)(EVAC_REACH / 64.0f);
+        z0 -= (int)(EVAC_REACH / CURSOR_LAYER);
         if (z0 < 0) z0 = 0;
         int found = 0;
         for (int y = y0; y <= y1; y++)
@@ -764,6 +764,6 @@ int floor_count(void)
     }
     CursorGrid g;
     if (!cursor_grid(&g)) return 1;
-    int n = (int)((float)g.num_z * 64.0f / CURSOR_FLOOR_HEIGHT);
+    int n = (int)((float)g.num_z * CURSOR_LAYER / CURSOR_FLOOR_HEIGHT);
     return n > 0 ? n : 1;
 }

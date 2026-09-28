@@ -75,7 +75,7 @@ static int walls_scan(const CursorGrid* g, int tx, int ty, float floor,
     TileTestFn occupied = (TileTestFn)tile_vfn(world, g_tile_slot_occupied);
 
     float z = floor + 4.0f;
-    int tz = cursor_tile_axis(z, g->min_z, 64.0f);
+    int tz = grid_layer(g, z);
 
     for (int dy = -WALL_TILES; dy <= WALL_TILES; dy++) {
         for (int dx = -WALL_TILES; dx <= WALL_TILES; dx++) {
@@ -90,8 +90,8 @@ static int walls_scan(const CursorGrid* g, int tx, int ty, float floor,
 
             TileCoverPoint cp;
             memset(&cp, 0, sizeof cp);
-            float wx = g->min_x + ((float)x + 0.5f) * CURSOR_TILE;
-            float wy = g->min_y + ((float)y + 0.5f) * CURSOR_TILE;
+            float wx = grid_centre_x(g, x);
+            float wy = grid_centre_y(g, y);
             // An answer about some other tile is an answer about some other
             // floor, and is worth less than no answer at all.
             if (cover(world, NULL, wx, wy, z, &cp) && cp.x == x && cp.y == y &&
@@ -435,8 +435,8 @@ void hearts_poll(void)
                 if (!g_heart_follow[0] || strcmp(label, g_heart_follow) != 0) continue;
                 followed = 1;
             }
-            int dx = cursor_tile_axis(s.loc[0], g.min_x, CURSOR_TILE) - tx;
-            int dy = cursor_tile_axis(s.loc[1], g.min_y, CURSOR_TILE) - ty;
+            int dx = grid_x(&g, s.loc[0]) - tx;
+            int dy = grid_y(&g, s.loc[1]) - ty;
             // The selected soldier is where the player is listening from
             // until they navigate away; then their heart marks the spot.
             // One the player chose to follow is heard even there.

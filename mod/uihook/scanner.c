@@ -74,8 +74,8 @@ static int scan_item_at(ScanItem* it, const float* world, float lift)
 {
     if (!g_scan_have) return 0;
     memcpy(it->world, world, 3 * sizeof(float));
-    it->tx = cursor_tile_axis(world[0], g_scan_grid.min_x, CURSOR_TILE);
-    it->ty = cursor_tile_axis(world[1], g_scan_grid.min_y, CURSOR_TILE);
+    it->tx = grid_x(&g_scan_grid, world[0]);
+    it->ty = grid_y(&g_scan_grid, world[1]);
     // Off the grid is not a place the cursor can go, so it is not a place the
     // scanner may offer. A class default object put "Radar array" on tile
     // 65, -12 -- world (0, 0), which is where an object with no position sits
@@ -314,8 +314,8 @@ static void scan_add_evac(void)
         found = 0;
     }
     if (!found) return;
-    float at[3] = { g_scan_grid.min_x + ((float)nx + 0.5f) * CURSOR_TILE,
-                    g_scan_grid.min_y + ((float)ny + 0.5f) * CURSOR_TILE, nz };
+    float at[3] = { grid_centre_x(&g_scan_grid, nx),
+                    grid_centre_y(&g_scan_grid, ny), nz };
     ScanItem it;
     memset(&it, 0, sizeof it);
     it.kind = SCAN_OBJECTIVES;
@@ -386,8 +386,8 @@ static void scan_add_climbs(void)
             int x = g_scan_from[0] + dx, y = g_scan_from[1] + dy;
             if (x < 0 || y < 0 || x >= g->num_x || y >= g->num_y) continue;
 
-            float wx = g->min_x + ((float)x + 0.5f) * CURSOR_TILE;
-            float wy = g->min_y + ((float)y + 0.5f) * CURSOR_TILE;
+            float wx = grid_centre_x(g, x);
+            float wy = grid_centre_y(g, y);
             TileCoverPoint cp;
             memset(&cp, 0, sizeof cp);
             // An answer about some other tile is an answer about some other
@@ -468,8 +468,8 @@ static int scan_origin(CursorGrid* g, int* tx, int* ty, int* tz, float* world_z)
     }
 
     float feet[3];
-    feet[0] = g->min_x + ((float)*tx + 0.5f) * CURSOR_TILE;
-    feet[1] = g->min_y + ((float)*ty + 0.5f) * CURSOR_TILE;
+    feet[0] = grid_centre_x(g, *tx);
+    feet[1] = grid_centre_y(g, *ty);
     feet[2] = z - NAVH_LIFT;
     *tz = floor_of(feet);
     // The climb scan asks the cover native, which wants a world height and

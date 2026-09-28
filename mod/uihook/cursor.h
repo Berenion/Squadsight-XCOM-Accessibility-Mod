@@ -149,6 +149,62 @@ static __inline int cursor_tile_axis(float pos, float min, float step)
     return (int)floorf((pos - min) / step);
 }
 
+// The grid in named pieces (refactor step 6), so that the two ways of
+// counting height are not mixed at a call site:
+//   - a *layer* is one row of tiles, WORLD_FloorHeight (64) deep from Min.Z,
+//     as the tile natives count them. Something standing on a floor is in
+//     the layer 4 above that floor, as XGAction_EndMove asks
+//     (grid_floor_layer); a pawn's Location is NAVH_LIFT above its feet.
+//   - a *storey* is the cursor's floor, three layers (192) deep, asked of
+//     the game through floor_of (where.h). Never worked out from a layer.
+// X and Y are tiles, CURSOR_TILE wide, counted from Min.X / Min.Y.
+#define CURSOR_LAYER       64.0f
+#define CURSOR_ABOVE_FLOOR 4.0f
+
+static __inline int grid_x(const CursorGrid* g, float x)
+{
+    return cursor_tile_axis(x, g->min_x, CURSOR_TILE);
+}
+
+static __inline int grid_y(const CursorGrid* g, float y)
+{
+    return cursor_tile_axis(y, g->min_y, CURSOR_TILE);
+}
+
+// The middle of a tile, in world units.
+static __inline float grid_centre_x(const CursorGrid* g, int tx)
+{
+    return g->min_x + ((float)tx + 0.5f) * CURSOR_TILE;
+}
+
+static __inline float grid_centre_y(const CursorGrid* g, int ty)
+{
+    return g->min_y + ((float)ty + 0.5f) * CURSOR_TILE;
+}
+
+// The layer a height is in.
+static __inline int grid_layer(const CursorGrid* g, float z)
+{
+    return cursor_tile_axis(z, g->min_z, CURSOR_LAYER);
+}
+
+// A layer's lowest height, and its middle, in world units.
+static __inline float grid_layer_bottom(const CursorGrid* g, int tz)
+{
+    return g->min_z + (float)tz * CURSOR_LAYER;
+}
+
+static __inline float grid_layer_middle(const CursorGrid* g, int tz)
+{
+    return g->min_z + ((float)tz + 0.5f) * CURSOR_LAYER;
+}
+
+// The layer of whatever stands on a floor at height `floor`.
+static __inline int grid_floor_layer(const CursorGrid* g, float floor)
+{
+    return grid_layer(g, floor + CURSOR_ABOVE_FLOOR);
+}
+
 // Forgets the cursor -- leaving a mission destroys it, and the next mission
 // spawns another.
 void cursor_forget(void);

@@ -229,9 +229,9 @@ int civilian_seen(void* squad, const SeenSet* civilians, void* unit,
     if (!see) return 0;
     // The tile the civilian stands in, as tile_report works one out: feet
     // plus 4, in 64-unit layers from Min.Z.
-    int tx = cursor_tile_axis(loc[0], g.min_x, CURSOR_TILE);
-    int ty = cursor_tile_axis(loc[1], g.min_y, CURSOR_TILE);
-    int tz = cursor_tile_axis(loc[2] - NAVH_LIFT + 4.0f, g.min_z, 64.0f);
+    int tx = grid_x(&g, loc[0]);
+    int ty = grid_y(&g, loc[1]);
+    int tz = grid_floor_layer(&g, loc[2] - NAVH_LIFT);
     for (int i = 0; i < g_nunits; i++) {
         UnitSeen s;
         if (!unit_seen(&g_units[i], squad, &s) || !s.friendly) continue;
@@ -385,8 +385,8 @@ int soldier_tile(const CursorGrid* g, int* tx, int* ty, float* z)
         !field_ptr(pawn, "Location", &g_soldier_loc, 3 * sizeof(float), &v))
         return 0;
     const float* loc = (const float*)v;
-    *tx = cursor_tile_axis(loc[0], g->min_x, CURSOR_TILE);
-    *ty = cursor_tile_axis(loc[1], g->min_y, CURSOR_TILE);
+    *tx = grid_x(g, loc[0]);
+    *ty = grid_y(g, loc[1]);
     *z = loc[2];
     return 1;
 }

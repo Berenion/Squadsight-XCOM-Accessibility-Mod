@@ -90,8 +90,8 @@ static void world_keep(const ScanItem* it)
 static int world_item_at(ScanItem* it, const float* world)
 {
     memcpy(it->world, world, 3 * sizeof(float));
-    it->tx = cursor_tile_axis(world[0], g_world_grid.min_x, CURSOR_TILE);
-    it->ty = cursor_tile_axis(world[1], g_world_grid.min_y, CURSOR_TILE);
+    it->tx = grid_x(&g_world_grid, world[0]);
+    it->ty = grid_y(&g_world_grid, world[1]);
     if (it->tx < 0 || it->ty < 0 ||
         it->tx >= g_world_grid.num_x || it->ty >= g_world_grid.num_y)
         return 0;
