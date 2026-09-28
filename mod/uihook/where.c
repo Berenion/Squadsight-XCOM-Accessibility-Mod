@@ -14,6 +14,7 @@
 #include "props.h"
 #include "mission.h"
 #include "tile.h"
+#include "names.h"
 
 // ---- inside or outside -----------------------------------------------------
 //
@@ -51,9 +52,10 @@ static WhereVolume g_where_vol[WHERE_VOLUMES];
 static int         g_where_n, g_where_next, g_where_full;
 static void*       g_where_world;
 static const void* g_where_cls;
-static const void* g_where_walk[2];      // XComFloorVolume, XComBuildingVolume
+static const void* g_where_walk[3];      // XComFloorVolume, XComBuildingVolume,
+                                         // SeqAct_GetExtractionVolume
 
-// The evac zone: the level's XComBuildingVolume with IsDropShip, which is what
+// The evac zone: a level's XComBuildingVolume with IsDropShip, which is what
 // SeqAct_GetExtractionVolume hands the mission scripts ("Get Extraction
 // Volume"), and what XComUnitPawn.Touch watches to raise "On Unit Touched
 // Dropship Volume" and set m_bInDropShip. It has no floor volumes of its own,
@@ -61,8 +63,24 @@ static const void* g_where_walk[2];      // XComFloorVolume, XComBuildingVolume
 // same walk as the floor volumes. Only said while an open objective mentions
 // evac ("Escort the survivor to the EVAC Zone."): every map has one, and a
 // mission that does not ask for it shows the player no zone.
-static WhereVolume g_evac;
-static int         g_evac_have;
+//
+// A map can hold several. The 2026-09-28 (13:02) log, escorting Zhang
+// (Slingshot's first mission), had four: one off the map at x 784..1040,
+// another off it past x 496, the soldiers' spawn
+// (SoldierSpawns_DrpshipVol_Arc0, with an empty box) and the zone on the
+// south edge. The first one kept was the one off the map, and the scanner
+// found nothing; the 13:06 log found the south edge's, the only one left. The game takes
+// the first from AllActors, the level's actor order, which is not the object
+// table's -- so the one the mission asked for is read from the Get Extraction
+// Volume action itself (its ExtractionVolume, set when it ran), and only
+// while no action has run are all the ones on the map offered.
+#define EVAC_MAX 8
+#define EVAC_SEQ 4
+static WhereVolume g_evac[EVAC_MAX];
+static int         g_evac_n;
+static void*       g_evac_seq[EVAC_SEQ];
+static int         g_evac_seq_idx[EVAC_SEQ], g_evac_seq_n;
+static FieldSlot   g_seq_extraction;
 static int where_bool(void* bv, const char* name, int dflt);
 static FieldSlot   g_fv_brush, g_fv_number, g_fv_building, g_brush_bounds, g_bv_floors;
 static TileWhere   g_where_heard;    // what the player last heard, for the crossing
@@ -71,15 +89,25 @@ static void where_storeys_forget(void);
 static int where_collect(void* obj, int which, int idx, void* ctx)
 {
     (void)ctx;
+    if (which == 2) {
+        if (g_evac_seq_n < EVAC_SEQ) {
+            g_evac_seq[g_evac_seq_n] = obj;
+            g_evac_seq_idx[g_evac_seq_n++] = idx;
+        }
+        return 1;
+    }
     if (which == 0 && g_where_n >= WHERE_VOLUMES) { g_where_full = 1; return 0; }
-    if (which == 1 && (g_evac_have || !where_bool(obj, "IsDropShip", 0))) return 1;
+    if (which == 1 && (g_evac_n >= EVAC_MAX || !where_bool(obj, "IsDropShip", 0))) return 1;
     const void* v;
     if (!field_ptr(obj, "BrushComponent", &g_fv_brush, sizeof(void*), &v) || !*(void* const*)v)
         return 1;
     void* brush = *(void* const*)v;
     if (!field_ptr(brush, "Bounds", &g_brush_bounds, 7 * sizeof(float), &v)) return 1;
     const float* b = (const float*)v;           // Origin, BoxExtent, SphereRadius
-    WhereVolume* w = which == 1 ? &g_evac : &g_where_vol[g_where_n++];
+    // A dropship volume with no brush size (the Zhang map's soldier spawn, 0..0)
+    // holds no tile, and would count as on the map at the origin.
+    if (which == 1 && b[3] <= 0.0f && b[4] <= 0.0f) return 1;
+    WhereVolume* w = which == 1 ? &g_evac[g_evac_n++] : &g_where_vol[g_where_n++];
     w->v = obj;
     w->idx = idx;
     for (int k = 0; k < 3; k++) {
@@ -87,9 +115,10 @@ static int where_collect(void* obj, int which, int idx, void* ctx)
         w->hi[k] = b[k] + b[3 + k];
     }
     if (which == 1) {
-        g_evac_have = 1;
-        logf_("where: the dropship volume (the evac zone) spans %.0f..%.0f, %.0f..%.0f, "
-              "%.0f..%.0f\n", w->lo[0], w->hi[0], w->lo[1], w->hi[1], w->lo[2], w->hi[2]);
+        char name[64] = "?";
+        object_name(obj, name, sizeof name);
+        logf_("where: dropship volume %d, %s, spans %.0f..%.0f, %.0f..%.0f, %.0f..%.0f\n",
+              g_evac_n, name, w->lo[0], w->hi[0], w->lo[1], w->hi[1], w->lo[2], w->hi[2]);
     }
     return 1;
 }
@@ -100,25 +129,29 @@ static int where_volumes(void)
 {
     if (!objects_ready()) return 0;
     if (!g_where_cls) {
-        static const char* const names[] = { "XComFloorVolume", "XComBuildingVolume" };
-        objects_classes(names, g_where_walk, 2);
+        static const char* const names[] = { "XComFloorVolume", "XComBuildingVolume",
+                                             "SeqAct_GetExtractionVolume" };
+        objects_classes(names, g_where_walk, 3);
         g_where_cls = g_where_walk[0];
     }
     if (!g_where_cls) return 0;
-    int nwalk = g_where_walk[1] ? 2 : 1;
+    // The list stops at the first class not found, so each one keeps its index.
+    int nwalk = 1;
+    while (nwalk < 3 && g_where_walk[nwalk]) nwalk++;
     void* world = cursor_world();
     if (world != g_where_world || g_where_next > objects_count()) {
         g_where_world = world;
         g_where_n = g_where_next = g_where_full = 0;
-        g_evac_have = 0;
+        g_evac_n = g_evac_seq_n = 0;
         where_storeys_forget();
         memset(&g_where_heard, 0, sizeof g_where_heard);
         objects_each_from(g_where_walk, nwalk, 0, &g_where_next, where_collect, NULL);
         unsigned ms;
         int entries;
         objects_last_walk(&ms, &entries);
-        logf_("where: %d floor volumes on this map%s (%d entries, %u ms)\n", g_where_n,
-              g_where_full ? ", the list is full" : "", entries, ms);
+        logf_("where: %d floor volumes on this map%s, %d dropship volumes, %d Get Extraction "
+              "Volume actions (%d entries, %u ms)\n", g_where_n,
+              g_where_full ? ", the list is full" : "", g_evac_n, g_evac_seq_n, entries, ms);
     } else if (!g_where_full) {
         int had = g_where_n;
         objects_each_from(g_where_walk, nwalk, g_where_next, &g_where_next, where_collect, NULL);
@@ -236,9 +269,11 @@ static int where_box(const CursorGrid* g, const WhereVolume* w,
 
 // A floor on tile (tx, ty) inside volume `w`, lowest layer first; its height
 // in `*found`. F's own probe: GetFloorZForPosition from each layer's top, else
-// IsPositionOnFloor at its middle, and the floor must lie in the volume.
+// IsPositionOnFloor at its middle, and the floor must lie in the volume --
+// just above it, or, with `reach` past WHERE_LIFT, anywhere up to `reach`
+// above it (a unit's body, for the evac zone).
 static int where_tile_floor(const WhereProbe* p, const WhereVolume* w, int tx, int ty,
-                            int z0, int z1, float* found)
+                            int z0, int z1, float reach, float* found)
 {
     float x = p->g.min_x + ((float)tx + 0.5f) * CURSOR_TILE;
     float y = p->g.min_y + ((float)ty + 0.5f) * CURSOR_TILE;
@@ -259,7 +294,10 @@ static int where_tile_floor(const WhereProbe* p, const WhereVolume* w, int tx, i
             }
         }
         if (!has) continue;
-        if (!p->inside(w->v, NULL, x, y, z + WHERE_LIFT, 0.0f, 0.0f, 0.0f)) continue;
+        int in = 0;
+        for (float up = WHERE_LIFT; !in && up <= reach + 0.5f; up += WHERE_LIFT)
+            in = p->inside(w->v, NULL, x, y, z + up, 0.0f, 0.0f, 0.0f) != 0;
+        if (!in) continue;
         *found = z;
         return 1;
     }
@@ -278,7 +316,7 @@ static int where_band_floor(const WhereVolume* w, int* fx, int* fy, float* found
     while (area / (step * step) > WHERE_BAND_TILES) step++;
     for (int ty = y0; ty <= y1; ty += step)
         for (int tx = x0; tx <= x1; tx += step)
-            if (where_tile_floor(&p, w, tx, ty, z0, z1, found)) {
+            if (where_tile_floor(&p, w, tx, ty, z0, z1, WHERE_LIFT, found)) {
                 *fx = tx;
                 *fy = ty;
                 return 1;
@@ -312,7 +350,7 @@ static int where_storey_near(const void* bv, int num, int tx, int ty, int* nx, i
                 int d = (x - tx) * (x - tx) + (y - ty) * (y - ty);
                 if (best >= 0 && d >= best) continue;
                 float z;
-                if (!where_tile_floor(&p, w, x, y, z0, z1, &z)) continue;
+                if (!where_tile_floor(&p, w, x, y, z0, z1, WHERE_LIFT, &z)) continue;
                 best = d;
                 *nx = x;
                 *ny = y;
@@ -475,54 +513,136 @@ void where_say(int tx, int ty, float floor, int force, char* out, size_t out_sz)
     g_where_heard = now;
 }
 
-// Whether the evac zone is one to speak of, and still there.
-static int evac_live(void)
+// How far above its floor a unit reaches into the evac zone. The game counts
+// a unit in when its collision cylinder touches the dropship volume
+// (XComUnitPawn.Touch / UnTouch set m_bInDropShip), and that cylinder stands
+// from the floor to twice CollisionHeight (Pawn's default 78) above it. The
+// 2026-09-28 (12:51) log had the zone's box from 128 to 384, above the
+// ground, so a floor asked for inside the box, and a point 32 over it, never
+// met it: the scanner had "Objectives, 0 found." on a mission to escort Zhang
+// to the zone.
+#define EVAC_REACH 144.0f
+
+// Whether the evac zone is one to speak of, and which dropship volumes make it:
+// their indices into g_evac, in `use`. The one a Get Extraction Volume action
+// picked when there is one, else every one whose box is on the map. Why none,
+// and which were picked, logged when it changes.
+static int evac_live(int* use)
 {
-    if (!where_volumes() || !g_evac_have || !mission_open_mentions("evac")) return 0;
-    if (!g_where_walk[1] || !objects_still(g_evac.v, g_evac.idx, &g_where_walk[1], 1)) {
-        g_evac_have = 0;
-        return 0;
+    static int said = -1, said_n = -1;
+    static void* said_pick;
+    int why = 0, n = 0;
+    void* pick = NULL;
+    CursorGrid g;
+    if (!where_volumes()) why = 1;
+    else if (!g_evac_n) why = 2;
+    else if (!mission_open_mentions("evac")) why = 3;
+    else if (!cursor_grid(&g)) why = 4;
+    else {
+        for (int i = 0; i < g_evac_seq_n && !pick; i++) {
+            const void* v;
+            if (!objects_still(g_evac_seq[i], g_evac_seq_idx[i], &g_where_walk[2], 1)) continue;
+            if (field_ptr(g_evac_seq[i], "ExtractionVolume", &g_seq_extraction, sizeof(void*), &v))
+                pick = *(void* const*)v;
+        }
+        for (int i = 0; i < g_evac_n; i++) {
+            if (!objects_still(g_evac[i].v, g_evac[i].idx, &g_where_walk[1], 1)) continue;
+            if (pick && g_evac[i].v != pick) continue;
+            int x0, x1, y0, y1, z0, z1;
+            if (!where_box(&g, &g_evac[i], &x0, &x1, &y0, &y1, &z0, &z1)) continue;
+            use[n++] = i;
+        }
+        if (!n) why = pick ? 5 : 6;
     }
-    return 1;
+    if (why != said || n != said_n || pick != said_pick) {
+        static const char* const text[] = { "", "no floor volumes", "no dropship volume",
+                                             "no open objective mentions evac", "no grid",
+                                             "the volume Get Extraction Volume picked is not "
+                                             "on the map",
+                                             "no dropship volume on the map" };
+        if (why) {
+            logf_("where: evac zone not said: %s\n", text[why]);
+        } else {
+            char name[64] = "?";
+            object_name(g_evac[use[0]].v, name, sizeof name);
+            logf_("where: evac zone from %s%s, %d volume%s\n", name,
+                  pick ? " (Get Extraction Volume picked it)"
+                       : " and the rest on the map (no Get Extraction Volume has run)",
+                  n, n == 1 ? "" : "s");
+        }
+    }
+    said = why;
+    said_n = n;
+    said_pick = pick;
+    return why ? 0 : n;
 }
 
-// Whether the tile whose floor is at `floor` is in the evac zone: the point
-// where_at asks for a floor volume, asked of the dropship volume's brush.
+// Whether the tile whose floor is at `floor` is in the evac zone: the dropship
+// volume's brush asked at points up a unit's body, as the Touch would find it.
 int evac_at(int tx, int ty, float floor)
 {
     CursorGrid g;
+    int use[EVAC_MAX];
     EncompassFn inside = (EncompassFn)g_volume_fn_encompass;
-    if (!inside || !cursor_grid(&g) || !evac_live()) return 0;
-    float p[3] = { g.min_x + ((float)tx + 0.5f) * CURSOR_TILE,
-                   g.min_y + ((float)ty + 0.5f) * CURSOR_TILE,
-                   floor + WHERE_LIFT };
-    if (p[0] < g_evac.lo[0] || p[0] > g_evac.hi[0] || p[1] < g_evac.lo[1] ||
-        p[1] > g_evac.hi[1] || p[2] < g_evac.lo[2] || p[2] > g_evac.hi[2])
-        return 0;
-    return inside(g_evac.v, NULL, p[0], p[1], p[2], 0.0f, 0.0f, 0.0f) != 0;
+    if (!inside || !cursor_grid(&g)) return 0;
+    int n = evac_live(use);
+    float x = g.min_x + ((float)tx + 0.5f) * CURSOR_TILE;
+    float y = g.min_y + ((float)ty + 0.5f) * CURSOR_TILE;
+    for (int i = 0; i < n; i++) {
+        const WhereVolume* w = &g_evac[use[i]];
+        if (x < w->lo[0] || x > w->hi[0] || y < w->lo[1] || y > w->hi[1] ||
+            floor + EVAC_REACH < w->lo[2] || floor + WHERE_LIFT > w->hi[2])
+            continue;
+        for (float up = WHERE_LIFT; up <= EVAC_REACH + 0.5f; up += WHERE_LIFT)
+            if (inside(w->v, NULL, x, y, floor + up, 0.0f, 0.0f, 0.0f)) return 1;
+    }
+    return 0;
 }
 
 // The tile of the evac zone nearest (ox, oy) that has a floor in it, and that
-// floor's height. Every tile of its box is asked, as where_storey_near does.
+// floor's height. Every tile of each volume's box is asked, as
+// where_storey_near does, from the layers a unit could stand in and still
+// reach the box.
 int evac_nearest(int ox, int oy, int* nx, int* ny, float* nz)
 {
     WhereProbe p;
-    int x0, x1, y0, y1, z0, z1;
-    if (!evac_live() || !where_probe_init(&p) ||
-        !where_box(&p.g, &g_evac, &x0, &x1, &y0, &y1, &z0, &z1))
+    int use[EVAC_MAX];
+    int n = evac_live(use);
+    if (!n) return 0;
+    if (!where_probe_init(&p)) {
+        logf_("where: evac zone: no floor probe\n");
         return 0;
+    }
     int best = -1;
-    for (int y = y0; y <= y1; y++)
-        for (int x = x0; x <= x1; x++) {
-            int d = (x - ox) * (x - ox) + (y - oy) * (y - oy);
-            if (best >= 0 && d >= best) continue;
-            float z;
-            if (!where_tile_floor(&p, &g_evac, x, y, z0, z1, &z)) continue;
-            best = d;
-            *nx = x;
-            *ny = y;
-            *nz = z;
-        }
+    for (int i = 0; i < n; i++) {
+        const WhereVolume* w = &g_evac[use[i]];
+        int x0, x1, y0, y1, z0, z1;
+        if (!where_box(&p.g, w, &x0, &x1, &y0, &y1, &z0, &z1)) continue;
+        z0 -= (int)(EVAC_REACH / 64.0f);
+        if (z0 < 0) z0 = 0;
+        int found = 0;
+        for (int y = y0; y <= y1; y++)
+            for (int x = x0; x <= x1; x++) {
+                int d = (x - ox) * (x - ox) + (y - oy) * (y - oy);
+                if (best >= 0 && d >= best) continue;
+                float z;
+                if (!where_tile_floor(&p, w, x, y, z0, z1, EVAC_REACH, &z)) continue;
+                best = d;
+                found = 1;
+                *nx = x;
+                *ny = y;
+                *nz = z;
+            }
+        char name[64] = "?";
+        object_name(w->v, name, sizeof name);
+        if (found)
+            logf_("where: evac zone %s nearest (%d, %d): tile (%d, %d), floor %.0f "
+                  "(tiles %d..%d, %d..%d, layers %d..%d)\n", name, ox, oy, *nx, *ny, *nz,
+                  x0, x1, y0, y1, z0, z1);
+        else
+            logf_("where: evac zone %s: nothing nearer on tiles %d..%d, %d..%d, layers "
+                  "%d..%d\n", name, x0, x1, y0, y1, z0, z1);
+    }
     return best >= 0;
 }
 
