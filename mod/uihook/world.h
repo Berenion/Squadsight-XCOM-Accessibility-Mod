@@ -18,6 +18,10 @@ int world_refresh(const CursorGrid* g);
 // with tile and floor on that grid.
 const ScanItem* world_items(int* n);
 
+// The door actors within a tile of (tx, ty) on storey `tz` (floor_of), as
+// of the last world_refresh; how many.
+int world_doors_near(int tx, int ty, int tz, void** out, int max);
+
 // Whether `actor` is a destructible that blows up (as of the last refresh).
 int world_explodes(const void* actor);
 

@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "world.h"
 #include "where.h"
 #include "units.h"
@@ -497,6 +498,31 @@ int flagless_units(int refresh, FlaglessUnit* out, int max)
     int n = 0;
     for (int i = 0; i < g_wactor_n && n < max; i++)
         if (g_wactors[i].kind == 5 && flagless_unit(g_wactors[i].actor, &out[n])) n++;
+    return n;
+}
+
+// The doors whose tile is within a tile of (tx, ty), on storey tz, as of the
+// last world_refresh: the actors themselves, for move.c to read their state.
+int world_doors_near(int tx, int ty, int tz, void** out, int max)
+{
+    int n = 0;
+    for (int i = 0; i < g_wactor_n && n < max; i++) {
+        void* a = g_wactors[i].actor;
+        if (g_wactors[i].kind != 0 || !objects_live(a) ||
+            !object_is_a(a, "XComInteractiveLevelActor"))
+            continue;
+        const void* v;
+        int icon = 0;
+        if (field_ptr(a, "IconSocket", &g_icon, 1, &v)) icon = *(const uint8_t*)v;
+        if (icon == ICON_WINDOW || icon == ICON_BUTTON ||
+            object_is_a(a, "XComRadarArrayActor"))
+            continue;
+        float w[3];
+        if (!actor_location(a, &g_ilact_loc, w)) continue;
+        int x = grid_x(&g_world_grid, w[0]), y = grid_y(&g_world_grid, w[1]);
+        if (abs(x - tx) > 1 || abs(y - ty) > 1 || floor_of(w) != tz) continue;
+        out[n++] = a;
+    }
     return n;
 }
 

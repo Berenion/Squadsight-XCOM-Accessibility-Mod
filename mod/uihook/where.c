@@ -508,6 +508,20 @@ void where_say(int tx, int ty, float floor, int force, char* out, size_t out_sz)
     g_where_heard = now;
 }
 
+// The same words, always said, and without touching what the numpad has
+// heard: a unit's place is not a step, and taking it as one would make the
+// next step's crossing go unsaid.
+void where_is(int tx, int ty, float floor, char* out, size_t out_sz)
+{
+    out[0] = 0;
+    TileWhere now, none;
+    int ok = 0;
+    GUARDED("where", ok = where_at(tx, ty, floor, &now), ok = 0);
+    if (!ok) return;
+    memset(&none, 0, sizeof none);
+    tile_where_text(&none, &now, 1, out, out_sz);
+}
+
 // How far above its floor a unit reaches into the evac zone. The game counts
 // a unit in when its collision cylinder touches the dropship volume
 // (XComUnitPawn.Touch / UnTouch set m_bInDropShip), and that cylinder stands

@@ -6049,6 +6049,33 @@ static void combat_message(LONG n, void* stack, const Payload* p)
     // the cursor's own help ("cursorHelp_Dashing", "Dashing!") is left to
     // navigation, which already says "Dash".
     const char* text = NULL;
+    // A Meld canister's "collect" prompt, whose id is the canister's own name
+    // (UISpecialMissionHUD_MeldStats.UpdatePanel: Message(m_strInteractMessage,
+    // ..., string(kMeldCanister.Name))). Its words are a button picture and
+    // "to collect" -- the mouse's left button, or the pad's A -- which came
+    // out as the picture's name. It is up only while the soldier can collect
+    // with no path planned, which is when V does it (Key_V -> PerformAction ->
+    // PerformInteract on the canister's lid). UpdatePanel raises it every UI
+    // update, so it is said once until it has been gone MELD_PROMPT_GAP_MS.
+    for (int i = 0; i < p->nstrings; i++) {
+        if (strncmp(p->strings[i], "XComMeldContainerActor", 22) != 0) continue;
+        #define MELD_PROMPT_GAP_MS 3000
+        static char said_id[64];
+        static ULONGLONG seen_at;
+        ULONGLONG now = GetTickCount64();
+        int again = strcmp(said_id, p->strings[i]) == 0 && now - seen_at < MELD_PROMPT_GAP_MS;
+        seen_at = now;
+        if (again) return;
+        strncpy_s(said_id, sizeof said_id, p->strings[i], _TRUNCATE);
+        char raw[256] = "";
+        for (int k = 0; k < p->nstrings; k++)
+            if (k != i && p->strings[k][0] && !raw[0])
+                strncpy_s(raw, sizeof raw, p->strings[k], _TRUNCATE);
+        logf_("[%ld] meld: collect prompt for %s, the game's words \"%s\"\n", n,
+              p->strings[i], raw);
+        announce("Meld canister. V to collect.");
+        return;
+    }
     for (int i = 0; i < p->nstrings; i++) {
         const char* s = p->strings[i];
         if (strncmp(s, "cursorHelp", 10) == 0) return;

@@ -11,6 +11,9 @@
 // game could not be asked.
 void where_say(int tx, int ty, float floor, int force, char* out, size_t out_sz);
 
+// The words for (tx, ty) at `floor`, always, leaving the crossing state alone.
+void where_is(int tx, int ty, float floor, char* out, size_t out_sz);
+
 // A new navigation starts from nothing heard.
 void where_forget(void);
 

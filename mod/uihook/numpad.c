@@ -39,6 +39,7 @@
 #include "sounds.h"
 #include "scanner.h"
 #include "menus.h"
+#include "move.h"
 
 // The soldier's m_kCurrAction, which says whether they are aiming.
 static FieldSlot g_nav_curr_action;
@@ -405,6 +406,31 @@ static float aim_floor(const CursorGrid* g, int tx, int ty, float from)
     return from;
 }
 
+// Where the path the game holds for a described tile ends, when that is not
+// the tile -- logged, never said. The end is not a verdict on the tile:
+// XComPath.Path is cut at the pathing pawn's allowance of the moment, which
+// rises from one move to a dash a frame or more after the path asks for it.
+// Taken as "No path", the 19:08 log refused 14, 43 (cost 13) while the
+// allowance was still 12 -- the path ended on 14, 44, cost 11 -- and a frame
+// later the same tile read "Dash" with max 24. It was taken as a verdict after
+// the 18:58 log, where Hagen, confirmed onto floor 2 of 14, 40, walked a path
+// that ended on 14, 42 outside; that is caught at the confirm instead
+// (move_confirmed), when the path is the one the click performs. Read in the
+// ComputePath2 hook it is also a path behind: DrawPath updates it afterwards.
+static void path_note(int tx, int ty, float floor)
+{
+    float end[3];
+    CursorGrid g;
+    if (!g_path_pawn || !cursor_grid(&g) || !path_end(g_path_pawn, end)) return;
+    int ex = grid_x(&g, end[0]), ey = grid_y(&g, end[1]);
+    if (ex == tx && ey == ty && fabsf(end[2] - NAV_CURSOR_LIFT - floor) <= PATH_END_Z_SLACK)
+        return;
+    int cost, std, max, moves, turns;
+    tile_dash(&cost, &std, &max, &moves, &turns);
+    logf_("nav: the path to %d, %d floor %.1f ends on %d, %d (z %.1f) for now; "
+          "cost %d, max %d\n", tx, ty, floor, ex, ey, end[2], cost, max);
+}
+
 // A tile no path reaches. A unit standing on it is the likeliest reason, and
 // worth more than the verdict: when one was found on arrival, its name is the
 // whole answer. Otherwise the tile's flags say why.
@@ -616,6 +642,14 @@ static ULONGLONG g_nav_confirm_at;      // opens nav_watch_input's window
 
 static void nav_confirm(void)
 {
+    // Before the click: the path is read while it is still the one the click
+    // will perform (move.c). An aim fires rather than moves.
+    if (!g_nav_aim) {
+        int mx = -1, my = -1, go = 1;
+        if (!nav_target(&mx, &my)) mx = my = -1;
+        GUARDED("move: confirmed", go = move_confirmed(mx, my, navh_ground()), go = 1);
+        if (!go) return;
+    }
     g_nav_confirm_at = GetTickCount64();
     INPUT in[2];
     ZeroMemory(in, sizeof in);
@@ -1491,6 +1525,7 @@ static void nav_poll(void)
             int tx, ty;
             g_tile_due = 0;
             if (nav_target(&tx, &ty) && tx == g_tile_due_at[0] && ty == g_tile_due_at[1]) {
+                GUARDED("nav: path end", path_note(tx, ty, navh_ground()));
                 char what[TILE_MAX_TEXT] = "";
                 Fault f;
                 __try {
@@ -1716,6 +1751,7 @@ static void cursor_watch(void* self)
     // Every frame, not at the watch's four times a second: a key press lasts
     // a few frames, and a quarter-second poll would drop quick ones.
     if (cursor_resolved()) nav_poll();
+    GUARDED("move: poll", move_poll());
     combat_poll();
     GUARDED("soldier: poll", soldier_poll());
     GUARDED("mission: poll", mission_poll());
