@@ -135,6 +135,21 @@ static void scan_add_units(void)
         if (scan_item_at(&it, s.loc, NAVH_LIFT)) scan_add(&it);
     }
     if (squad) scan_add_flagless(&sight);
+
+    // Enemies out of sight, at the place the squad last saw them, after
+    // those in sight (rank -1). Home goes there as for any item.
+    static KnownLost lost[KNOWN_MAX];
+    int nlost = known_lost(squad, &sight.enemies, lost, KNOWN_MAX);
+    for (int i = 0; i < nlost; i++) {
+        ScanItem it;
+        memset(&it, 0, sizeof it);
+        it.kind = SCAN_ENEMIES;
+        it.last_seen = 1;
+        it.turns_ago = lost[i].turns_ago;
+        it.rank = -1;
+        strncpy_s(it.name, sizeof it.name, lost[i].label, _TRUNCATE);
+        if (scan_item_at(&it, lost[i].loc, NAVH_LIFT)) scan_add(&it);
+    }
 }
 
 // ---- the targets -----------------------------------------------------------

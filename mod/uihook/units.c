@@ -184,9 +184,12 @@ static void squad_sight_of(void* squad, SeenSet* set, const char* field, FieldSl
     }
 }
 
+static void known_number(void* squad, const SeenSet* set);
+
 void squad_sight(void* squad, SeenSet* set)
 {
     squad_sight_of(squad, set, "m_arrVisibleEnemies", &g_visen);
+    known_number(squad, set);
 }
 
 // The civilians the squad can see, the same way: each squad member's
@@ -297,6 +300,156 @@ int unit_gone(const UnitName* u, void* flag)
     return visible && !visible(unit, NULL);
 }
 
+// ---- enemies the squad has seen: numbers and last known places --------------
+//
+// See units.h. Keyed by the XGUnit, which is only ever compared here -- the
+// entry outlives the unit's flag, and a dead unit's object may be gone.
+
+typedef struct {
+    void* unit;
+    char  name[64];             // the kind, as its flag names it
+    int   number;
+    int   seen;                 // in sight at the last sight poll
+    int   placed;               // loc holds a place the squad saw it
+    float loc[3];
+    int   lost_turn;            // the squad's m_iTurn when sight was lost; -1 unknown
+} Known;
+
+static Known g_known[KNOWN_MAX];
+static int   g_nknown;
+static void* g_known_squad;     // the human player the table belongs to
+
+void known_reset(void)
+{
+    if (g_nknown) logf_("known: %d enemies forgotten\n", g_nknown);
+    memset(g_known, 0, sizeof g_known);
+    g_nknown = 0;
+    g_known_squad = NULL;
+    for (int i = 0; i < g_nunits; i++) g_units[i].number = 0;
+}
+
+// Whether `squad` is a human player; asked by class, remembered per pointer.
+static int squad_is_human(void* squad)
+{
+    static void* last;
+    static int   human;
+    if (!squad) return 0;
+    if (squad != last) {
+        char cls[64];
+        human = unit_is_live(squad) && object_class_name(squad, cls, sizeof cls) &&
+                (strcmp(cls, "XGPlayer") == 0 || strcmp(cls, "XGPlayer_MP") == 0);
+        last = squad;
+    }
+    return human;
+}
+
+// The table for this squad: a different human player is a new mission or a
+// load, and everything known belonged to the last one.
+static int known_for(void* squad)
+{
+    if (!squad_is_human(squad)) return 0;
+    if (squad != g_known_squad) {
+        known_reset();
+        g_known_squad = squad;
+    }
+    return 1;
+}
+
+static Known* known_find(const void* unit)
+{
+    for (int i = 0; i < g_nknown; i++)
+        if (g_known[i].unit == unit) return &g_known[i];
+    return NULL;
+}
+
+// Numbers what the squad sees for the first time, by kind: the next after
+// the highest this mission has given that kind, so a number is never given
+// twice, even once its alien is dead.
+static void known_number(void* squad, const SeenSet* set)
+{
+    if (!known_for(squad)) return;
+    for (int k = 0; k < set->n; k++) {
+        void* e = set->unit[k];
+        if (!e || known_find(e) || g_nknown >= KNOWN_MAX) continue;
+        UnitName* u = unit_by_unit(e);
+        if (!u || !u->name[0] || unit_team(e) == TEAM_NEUTRAL) continue;
+        Known* kn = &g_known[g_nknown++];
+        memset(kn, 0, sizeof *kn);
+        kn->unit = e;
+        kn->lost_turn = -1;
+        strncpy_s(kn->name, sizeof kn->name, u->name, _TRUNCATE);
+        int top = 0;
+        for (int i = 0; i < g_nknown - 1; i++)
+            if (strcmp(g_known[i].name, kn->name) == 0 && g_known[i].number > top)
+                top = g_known[i].number;
+        kn->number = top + 1;
+        u->number = kn->number;
+        logf_("known: %s %d first seen\n", kn->name, kn->number);
+    }
+}
+
+// The squad's turn: XGPlayer.m_iTurn, counted up as each of its turns begins
+// (XGPlayer.BeginTurn, not on a load) and kept in the save.
+static FieldSlot g_player_turn;
+
+static int squad_turn(void* squad)
+{
+    const void* v;
+    if (!squad || !field_ptr(squad, "m_iTurn", &g_player_turn, sizeof(int32_t), &v))
+        return -1;
+    return *(const int32_t*)v;
+}
+
+void known_seen(void* squad, void* const* units, const float (*locs)[3], int n)
+{
+    if (!known_for(squad)) return;
+    int turn = -2;                      // read once, and only if needed
+    for (int i = 0; i < g_nknown; i++) {
+        Known* kn = &g_known[i];
+        int j;
+        for (j = 0; j < n && units[j] != kn->unit; j++) {}
+        if (j < n) {
+            if (!kn->seen && kn->placed)
+                logf_("known: %s %d in sight again\n", kn->name, kn->number);
+            kn->seen = 1;
+            kn->placed = 1;
+            memcpy(kn->loc, locs[j], sizeof kn->loc);
+            continue;
+        }
+        if (!kn->seen) continue;
+        kn->seen = 0;
+        if (turn == -2) turn = squad_turn(squad);
+        kn->lost_turn = turn;
+        logf_("known: %s %d out of sight at %.0f, %.0f, %.0f (turn %d)\n", kn->name,
+              kn->number, kn->loc[0], kn->loc[1], kn->loc[2], turn);
+    }
+}
+
+int known_lost(void* squad, const SeenSet* now, KnownLost* out, int max)
+{
+    // The table is the human squad's; in the aliens' turn the cursor's player
+    // is theirs, and the last human one still owns it.
+    if (!squad_is_human(squad)) squad = g_known_squad;
+    if (!squad || squad != g_known_squad || !unit_is_live(squad)) return 0;
+    int turn = squad_turn(squad);
+    int k = 0;
+    for (int i = 0; i < g_nknown && k < max; i++) {
+        Known* kn = &g_known[i];
+        if (kn->seen || !kn->placed || seen_has(now, kn->unit)) continue;
+        // Dead, or its object gone: no longer somewhere to look.
+        if (!unit_is_live(kn->unit)) continue;
+        UnitTestFn alive = (UnitTestFn)tile_vfn(kn->unit, g_unit_slot_alive);
+        if (alive && !alive(kn->unit, NULL)) continue;
+        _snprintf_s(out[k].label, sizeof out[k].label, _TRUNCATE, "%s %d", kn->name,
+                    kn->number);
+        memcpy(out[k].loc, kn->loc, sizeof out[k].loc);
+        out[k].turns_ago = turn >= 0 && kn->lost_turn >= 0 && turn >= kn->lost_turn
+                               ? turn - kn->lost_turn : -1;
+        k++;
+    }
+    return k;
+}
+
 // ---- what the squad sees: the one rule -------------------------------------
 //
 // The rule and why it is one are in units.h.
@@ -321,7 +474,10 @@ int squad_sees(const SquadSight* v, void* unit, const float* loc,
 
 void unit_label(const UnitName* u, char* out, size_t out_sz)
 {
-    _snprintf_s(out, out_sz, _TRUNCATE, u->nick[0] ? "%s, %s" : "%s", u->name, u->nick);
+    char num[16] = "";
+    if (u->number > 0) _snprintf_s(num, sizeof num, _TRUNCATE, " %d", u->number);
+    _snprintf_s(out, out_sz, _TRUNCATE, u->nick[0] ? "%s%s, %s" : "%s%s", u->name, num,
+                u->nick);
 }
 
 // Whether a unit is on overwatch, asked of the game's own native. Only for

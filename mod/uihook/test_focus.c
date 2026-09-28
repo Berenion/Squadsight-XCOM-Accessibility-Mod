@@ -2138,6 +2138,28 @@ int main(void)
         scan_describe(&it, 10, 10, 2, say, sizeof say);
         check(strcmp(say, "Door, here.") == 0, "and one underfoot");
 
+        // An enemy out of sight, where it was last seen.
+        memset(&it, 0, sizeof it);
+        it.tx = 14; it.ty = 7; it.tz = 2;
+        strcpy_s(it.name, sizeof it.name, "Sectoid 2");
+        it.last_seen = 1;
+        it.turns_ago = 1;
+        scan_describe(&it, 10, 10, 2, say, sizeof say);
+        check(strcmp(say, "Sectoid 2, last seen 3 south, 4 east, 1 turn ago.") == 0,
+              "a last known place, a turn old");
+        it.turns_ago = 0;
+        scan_describe(&it, 10, 10, 1, say, sizeof say);
+        check(strcmp(say, "Sectoid 2, last seen 3 south, 4 east, one floor up, this turn.") == 0,
+              "and one lost this turn, a storey up");
+        it.turns_ago = 3;
+        scan_describe(&it, 10, 10, 2, say, sizeof say);
+        check(strcmp(say, "Sectoid 2, last seen 3 south, 4 east, 3 turns ago.") == 0,
+              "and three turns old");
+        it.turns_ago = -1;
+        scan_describe(&it, 10, 10, 2, say, sizeof say);
+        check(strcmp(say, "Sectoid 2, last seen 3 south, 4 east.") == 0,
+              "and with the turn unknown");
+
         scan_category_text(SCAN_ENEMIES, SCAN_ALL_FLOORS, 3, say, sizeof say);
         check(strcmp(say, "Enemies, 3 found.") == 0, "a category change");
         scan_category_text(SCAN_ENEMIES, 1, 1, say, sizeof say);

@@ -249,6 +249,18 @@ void scan_describe(const ScanItem* item, int from_tx, int from_ty, int from_tz,
     char storey[48];
     floor_offset_text(item->tz - from_tz, storey, sizeof storey);
 
+    if (item->last_seen) {
+        char ago[32] = "";
+        if (item->turns_ago == 0)
+            strcpy_s(ago, sizeof ago, "this turn");
+        else if (item->turns_ago > 0)
+            _snprintf_s(ago, sizeof ago, _TRUNCATE, "%d turn%s ago", item->turns_ago,
+                        item->turns_ago == 1 ? "" : "s");
+        _snprintf_s(out, out_sz, _TRUNCATE, "%s, last seen %s%s%s%s%s.", item->name, where,
+                    storey[0] ? ", " : "", storey, ago[0] ? ", " : "", ago);
+        return;
+    }
+
     _snprintf_s(out, out_sz, _TRUNCATE, "%s, %s%s%s%s%s.", item->name,
                 item->detail[0] ? item->detail : "", item->detail[0] ? ", " : "",
                 where, storey[0] ? ", " : "", storey);

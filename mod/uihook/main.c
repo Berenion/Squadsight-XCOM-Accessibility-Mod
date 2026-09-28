@@ -6934,11 +6934,13 @@ static void* sight_squad(void)
             logf_("sight: the squad is %s %p%s\n", cls, p,
                   g_sight_squad ? " -- a new one, starting afresh" : "");
             sight_reset();
+            known_reset();
             g_sight_squad = p;
         }
     }
     if (g_sight_squad && !unit_is_live(g_sight_squad)) {
         sight_reset();
+        known_reset();
         g_sight_squad = NULL;
     }
     return g_sight_squad;
@@ -6970,11 +6972,15 @@ void sight_poll(void)
     int have_pos = cursor_grid(&g) && soldier_tile(&g, &sx, &sy, &sz);
 
     static SightUnit cur[SIGHT_MAX];
+    static void* units[SIGHT_MAX];
+    static float locs[SIGHT_MAX][3];
     int n = 0;
     for (int i = 0; i < g_nunits && n < SIGHT_MAX; i++) {
         UnitSeen s;
         if (!unit_seen(&g_units[i], squad, &s) || s.friendly || !seen_has(&seen, s.unit))
             continue;
+        units[n] = s.unit;
+        memcpy(locs[n], s.loc, sizeof locs[n]);
         cur[n].unit = s.unit;
         unit_label(&g_units[i], cur[n].label, sizeof cur[n].label);
         cur[n].has_pos = have_pos;
@@ -6982,6 +6988,10 @@ void sight_poll(void)
         cur[n].dy = have_pos ? grid_y(&g, s.loc[1]) - sy : 0;
         n++;
     }
+
+    // Where each was seen, kept for when it is not (the scanner's last
+    // known places); unsettled, since a place seen is a place seen.
+    known_seen(squad, units, (const float (*)[3])locs, n);
 
     static SightEvent ev[SIGHT_MAX];
     int k = sight_step(now, cur, n, ev, SIGHT_MAX);

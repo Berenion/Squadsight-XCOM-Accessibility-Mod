@@ -75,6 +75,11 @@ typedef struct {
     // everything that has a place, kept out of a storey filter, and Home
     // has nowhere to take the cursor.
     int          unplaced;
+    // An enemy out of sight, at the place the squad last saw it (units.h,
+    // known_lost): said "Sectoid 2, last seen 5 north, 3 east, 1 turn ago."
+    // turns_ago is the squad's turns since, -1 when unknown.
+    int          last_seen;
+    int          turns_ago;
 } ScanItem;
 
 // "Everything", "Squad", "Enemies", ... -- as the category is spoken.
@@ -143,7 +148,8 @@ void scan_forget(void);
 
 // "Door, 4 north, 7 east, one floor up." -- or, with a detail, "Muton, 45%,
 // low cover, 3 north." -- or, unplaced, "Meld canister, location unknown,
-// 5 turns left." The offset is from where the scan
+// 5 turns left." -- or last seen, "Sectoid 2, last seen 5 north, 3 east,
+// 1 turn ago." The offset is from where the scan
 // began; the storey is left out when it is the same one.
 void scan_describe(const ScanItem* item, int from_tx, int from_ty, int from_tz,
                    char* out, size_t out_sz);

@@ -30,6 +30,7 @@ typedef struct {
     int   panicked;     // RealizeEKG: 1, 0, -1 unknown
     int   wounded;      // RealizeCriticallyWounded: SOLDIER_WOUND_* (soldier.h)
     int   bleed_turns;  // turns left while bleeding out
+    int   number;       // the mod's "Sectoid 2" (known_number); 0 for none
 } UnitName;
 
 // Walked by index; an entry whose flag is NULL is an emptied slot.
@@ -49,7 +50,8 @@ void unit_forget(UnitName* u);
 // The flag whose unit is `unit`, or NULL. Compares pointers only.
 UnitName* unit_by_unit(const void* unit);
 
-// "Surname, Nickname", or the name alone.
+// "Surname, Nickname", or the name alone; an enemy the squad has seen with
+// its number, "Sectoid 2".
 void unit_label(const UnitName* u, char* out, size_t out_sz);
 
 // The label with what the screen shows: "Sectoid, 3 of 4 HP, on overwatch".
@@ -126,6 +128,45 @@ int  civilian_seen(void* squad, const SeenSet* civilians, void* unit,
 void squad_sight_take(void* squad, SquadSight* v);
 int  squad_sees(const SquadSight* v, void* unit, const float* loc,
                 int friendly, const char* name);
+
+// ---- enemies the squad has seen: numbers and last known places --------------
+//
+// Two Sectoids used to be "Sectoid" and "Sectoid" everywhere, and an enemy
+// that left sight left every list with it. Both are kept here, per enemy
+// unit, for the mission (HANDOFF "Next", items 5 and 6):
+//
+//   - A number per kind, in the order the squad FIRST SEES each one -- never
+//     the game's own order or count, which would say that an unseen third
+//     exists. Given where every readout asks what the squad sees
+//     (squad_sight), so the scanner, the target list, a sighting and the
+//     tile all name the same alien the same way. Kept after death.
+//   - Where it was last seen: the pawn's position at the last sight poll
+//     that saw it, frozen once it is out of sight and never updated while
+//     unseen, with the squad's turn (XGPlayer.m_iTurn) when sight was lost.
+//     Dropped from the list when it is seen again or dies.
+//
+// Only a human player's sight counts (XGPlayer, XGPlayer_MP): in the aliens'
+// turn the cursor's player is theirs, and their "enemies" are the squad. A
+// different human player -- a new mission, a load -- starts again from 1.
+#define KNOWN_MAX 128
+
+// Forgets them all, as sight_reset does: a new squad, or the old one gone
+// (a load frees it, and the next may be made at the same address).
+void known_reset(void);
+
+// Called from sight_poll with who the squad sees now and where (the pawns'
+// Locations), so the places follow what was seen.
+void known_seen(void* squad, void* const* units, const float (*locs)[3], int n);
+
+typedef struct {
+    char  label[80];            // "Sectoid 2"
+    float loc[3];               // the pawn's Location when last seen
+    int   turns_ago;            // squad turns since sight was lost; -1 unknown
+} KnownLost;
+
+// The enemies out of sight now whose last place is known, alive as far as
+// the game says, and not in `now` (the sight a readout just took).
+int known_lost(void* squad, const SeenSet* now, KnownLost* out, int max);
 
 // ---- the soldier being moved -----------------------------------------------
 void* soldier_unit(void);               // the cursor's chained unit, if live
