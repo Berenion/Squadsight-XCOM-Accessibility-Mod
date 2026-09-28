@@ -1382,32 +1382,44 @@ static void blast_say(void)
     // (destructible_cover). Anything else is a count.
     static char names[3][TILE_NAMES_MAX][SCAN_NAME];
     const char* namep[3][TILE_NAMES_MAX];
-    int kept[3] = { 0 }, total[3] = { 0 }, others = 0, wrecked = 0;
+    int kept[3] = { 0 }, total[3] = { 0 }, others = 0, wrecked = 0, dressing = 0;
+    // The meshes behind the words, for the log: what each name came from.
+    char meshes[512] = "";
+    size_t mused = 0;
     for (int k = 0; k < num; k++) {
         void* a = data[k];
         if (matched[k] || !a || !unit_is_live(a) || !object_is_a(a, "XComDestructibleActor"))
             continue;
         if (field_ptr(a, "Health", &g_blast_health, sizeof(int32_t), &v) &&
             *(const int32_t*)v <= 0) { wrecked++; continue; }
-        int explodes = world_explodes(a);
-        int list;
-        if (explodes) list = 0;
-        else {
-            int c = destructible_cover(a);
-            if (!c) { others++; continue; }
-            list = c == 2 ? 1 : 2;
-        }
-        total[list]++;
-        if (kept[list] >= TILE_NAMES_MAX) continue;
         char mesh[SCAN_NAME] = "";
         if (field_ptr(a, "StaticMeshComponent", &g_blast_smc, sizeof(void*), &v) &&
             *(void* const*)v &&
             field_ptr(*(void* const*)v, "StaticMesh", &g_blast_mesh, sizeof(void*), &v) &&
             *(void* const*)v)
             object_name(*(void* const*)v, mesh, sizeof mesh);
+        int explodes = world_explodes(a);
+        int list;
+        if (explodes) list = 0;
+        else {
+            // Graffiti, a poster, a decal: flat on a wall, so the cover beside
+            // it is the wall's. The 12:05 log of 2026-09-28 had "High cover:
+            // .. Graffiti decals" in a blast.
+            if (scan_mesh_is_dressing(mesh)) { dressing++; others++; continue; }
+            int c = destructible_cover(a);
+            if (!c) { others++; continue; }
+            list = c == 2 ? 1 : 2;
+        }
+        total[list]++;
+        if (kept[list] >= TILE_NAMES_MAX) continue;
         char* out = names[list][kept[list]];
         scan_mesh_words(mesh, list ? "Cover" : "Explosive", out, SCAN_NAME);
         namep[list][kept[list]++] = out;
+        if (mused < sizeof meshes) {
+            int w = _snprintf_s(meshes + mused, sizeof meshes - mused, _TRUNCATE, "%s%s",
+                                mused ? ", " : "", mesh[0] ? mesh : "?");
+            if (w > 0) mused += (size_t)w;
+        }
     }
 
     // "In the blast: 2 Floaters. Squad in the blast: Vargas. Explodes: Car.
@@ -1440,8 +1452,9 @@ static void blast_say(void)
         _snprintf_s(say + used, sizeof say - used, _TRUNCATE, " %d other object%s.", others,
                     others == 1 ? "" : "s");
     logf_("blast: radius %.0f, %d marked, %d of them, %d of ours, %d explode, %d high cover, "
-          "%d low cover, %d other objects, %d wrecked -> \"%s\"\n", radius, num, tthem, tours,
-          total[0], total[1], total[2], others, wrecked, say);
+          "%d low cover, %d other objects (%d on a wall), %d wrecked -> \"%s\"  [%s]\n",
+          radius, num, tthem, tours, total[0], total[1], total[2], others, dressing, wrecked,
+          say, meshes);
     if (g_speak) speech_say(say);
 }
 

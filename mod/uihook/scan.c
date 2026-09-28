@@ -275,30 +275,89 @@ void scan_floor_text(int floor, char* out, size_t out_sz)
         _snprintf_s(out, out_sz, _TRUNCATE, "Floor %d.", floor + 1);
 }
 
+// Words in a mesh name that name no object: the maps' prefixes, texture and
+// material suffixes, and the artists' words for a state or a variant. Taken
+// from the names in the map packages (URB_CommercialAlley and four others,
+// read 2026-09-28): WoodenCrateStackBShortA, WoodenCrateStackB_DestroACharred,
+// GenUtilityBox_A, INT_PROP_Mop_and_Bucket, CrateDestBurnGeneric96x96A,
+// BoxStack_DIFF. Compared whole and without case.
+static const char* const k_mesh_noise[] = {
+    "int", "ext", "prop", "props", "gen", "bldg", "urb", "cty", "rur", "sm", "lod",
+    "mesh", "mat", "dif", "diff", "nrm", "norm", "spc", "spec",
+    "dest", "destro", "destruction", "destroyed", "damaged", "damage", "dmg",
+    "fractured", "charred", "burn", "broken", "plain", "alone", "multi", "rev",
+    "var", "variant", "generic",
+};
+
+static int mesh_noise(const char* w, size_t n)
+{
+    for (size_t i = 0; i < sizeof k_mesh_noise / sizeof k_mesh_noise[0]; i++)
+        if (strlen(k_mesh_noise[i]) == n && _strnicmp(w, k_mesh_noise[i], n) == 0) return 1;
+    return 0;
+}
+
+static int is_up(char c)    { return c >= 'A' && c <= 'Z'; }
+static int is_low(char c)   { return c >= 'a' && c <= 'z'; }
+static int is_digit(char c) { return c >= '0' && c <= '9'; }
+
 void scan_mesh_words(const char* mesh, const char* fallback, char* out, size_t out_sz)
 {
     if (!out || !out_sz) return;
     out[0] = 0;
-    char base[SCAN_NAME];
-    size_t n = 0;
-    for (; mesh && mesh[n] && mesh[n] != '_' && n + 1 < sizeof base; n++) base[n] = mesh[n];
-    base[n] = 0;
-    while (n && base[n - 1] >= '0' && base[n - 1] <= '9') base[--n] = 0;
-    if (n >= 2 && base[n - 1] >= 'A' && base[n - 1] <= 'Z' &&
-        base[n - 2] >= 'a' && base[n - 2] <= 'z')
-        base[--n] = 0;
-    if (!n) {
-        _snprintf_s(out, out_sz, _TRUNCATE, "%s", fallback ? fallback : "");
-        return;
-    }
     size_t used = 0;
-    for (size_t i = 0; i < n && used + 2 < out_sz; i++) {
-        char c = base[i];
-        int cap = c >= 'A' && c <= 'Z';
-        if (i && cap && base[i - 1] >= 'a' && base[i - 1] <= 'z') out[used++] = ' ';
-        out[used++] = (i && cap) ? (char)(c | 0x20) : c;
+    const char* s = mesh ? mesh : "";
+    size_t len = strlen(s);
+    size_t i = 0;
+    while (i < len) {
+        // One word: up to an underscore, a small letter followed by a
+        // capital ("Crate|Stack"), a capital that starts a word after
+        // another capital ("B|Short"), or a change between letters and
+        // digits ("Medium|02", "96|x|96").
+        if (s[i] == '_' || s[i] == '-' || s[i] == ' ') { i++; continue; }
+        size_t j = i + 1;
+        while (j < len && s[j] != '_' && s[j] != '-' && s[j] != ' ') {
+            char a = s[j - 1], c = s[j];
+            if (is_low(a) && is_up(c)) break;
+            if (is_up(a) && is_up(c) && j + 1 < len && is_low(s[j + 1])) break;
+            if (is_digit(a) != is_digit(c)) break;
+            j++;
+        }
+        const char* w = s + i;
+        size_t n = j - i;
+        i = j;
+        // A lone letter is a variant, a number or a size names nothing, and
+        // the noise words above are the art's bookkeeping.
+        int digits = 0;
+        for (size_t k = 0; k < n; k++) if (is_digit(w[k])) digits = 1;
+        if (n < 2 || digits || mesh_noise(w, n)) continue;
+        if (used + n + 2 >= out_sz) break;
+        if (used) out[used++] = ' ';
+        // "Wooden crate stack": capital at the front only. A word in capitals
+        // throughout ("TV") keeps them.
+        int all_caps = 1;
+        for (size_t k = 0; k < n; k++) if (is_low(w[k])) all_caps = 0;
+        for (size_t k = 0; k < n; k++) {
+            char c = w[k];
+            if (!all_caps) c = (used == 0 && k == 0) ? (char)(is_low(c) ? c - 32 : c)
+                                                     : (char)(is_up(c) ? c + 32 : c);
+            out[used++] = c;
+        }
+        out[used] = 0;
     }
-    out[used] = 0;
+    if (!used) _snprintf_s(out, out_sz, _TRUNCATE, "%s", fallback ? fallback : "");
+}
+
+int scan_mesh_is_dressing(const char* mesh)
+{
+    static const char* const dressing[] = { "decal", "graffiti", "poster", "sticker" };
+    char low[SCAN_NAME];
+    size_t n = 0;
+    for (; mesh && mesh[n] && n + 1 < sizeof low; n++)
+        low[n] = is_up(mesh[n]) ? (char)(mesh[n] + 32) : mesh[n];
+    low[n] = 0;
+    for (size_t i = 0; i < sizeof dressing / sizeof dressing[0]; i++)
+        if (strstr(low, dressing[i])) return 1;
+    return 0;
 }
 
 void scan_empty_text(ScanCategory c, char* out, size_t out_sz)

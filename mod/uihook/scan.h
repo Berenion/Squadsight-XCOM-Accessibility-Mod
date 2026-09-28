@@ -80,12 +80,18 @@ typedef struct {
 // "Everything", "Squad", "Enemies", ... -- as the category is spoken.
 const char* scan_category_name(ScanCategory c);
 
-// A static mesh's name as words for the scanner: "FlatBed" -> "Flat bed",
-// "SedanA_Damaged" -> "Sedan", "ForkLift" -> "Fork lift". Everything from the
-// first underscore goes, then trailing digits and a single trailing capital
-// (the maps' variant letter), then the words are split where a capital
-// follows a small letter. `fallback` when nothing is left.
+// A static mesh's name as words for the scanner and the blast list:
+// "FlatBed" -> "Flat bed", "SedanA_Damaged" -> "Sedan",
+// "WoodenCrateStackBShortA" -> "Wooden crate stack short",
+// "INT_PROP_Mop_and_Bucket" -> "Mop and bucket". Split at underscores, at
+// capitals and at digits; lone letters (variants), numbers and sizes, and the
+// maps' prefixes, texture suffixes and state words go. `fallback` when
+// nothing is left.
 void scan_mesh_words(const char* mesh, const char* fallback, char* out, size_t out_sz);
+
+// Whether a mesh is something stuck on a wall -- a decal, graffiti, a poster,
+// a sticker -- rather than an object. The cover beside one is the wall's.
+int scan_mesh_is_dressing(const char* mesh);
 
 // ---- building a scan -------------------------------------------------------
 //

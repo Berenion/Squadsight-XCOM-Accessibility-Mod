@@ -2153,6 +2153,29 @@ int main(void)
         check(strcmp(say, "Gas tank") == 0, "and its number");
         scan_mesh_words("", "Explosive", say, sizeof say);
         check(strcmp(say, "Explosive") == 0, "no mesh: the fallback");
+        // Names from the map packages (URB_CommercialAlley and others).
+        scan_mesh_words("WoodenCrateStackBShortA", "Cover", say, sizeof say);
+        check(strcmp(say, "Wooden crate stack short") == 0,
+              "a variant letter inside a name is dropped, not run into the next word");
+        scan_mesh_words("WoodenCrateStackB_DestroACharred", "Cover", say, sizeof say);
+        check(strcmp(say, "Wooden crate stack") == 0, "state words after it go");
+        scan_mesh_words("GenUtilityBox_A", "Cover", say, sizeof say);
+        check(strcmp(say, "Utility box") == 0, "the Gen prefix goes");
+        scan_mesh_words("INT_PROP_Mop_and_Bucket", "Cover", say, sizeof say);
+        check(strcmp(say, "Mop and bucket") == 0, "map prefixes go, the words after stay");
+        scan_mesh_words("CrateDestBurnGeneric96x96A", "Cover", say, sizeof say);
+        check(strcmp(say, "Crate") == 0, "sizes and destruction words go");
+        scan_mesh_words("WoodDebrisMedium02", "Cover", say, sizeof say);
+        check(strcmp(say, "Wood debris medium") == 0, "a number goes");
+        scan_mesh_words("ChemicalTankMulti", "Cover", say, sizeof say);
+        check(strcmp(say, "Chemical tank") == 0, "Multi goes");
+        scan_mesh_words("BoxStack_DIFF", "Cover", say, sizeof say);
+        check(strcmp(say, "Box stack") == 0, "a texture suffix goes");
+        scan_mesh_words("A_02", "Cover", say, sizeof say);
+        check(strcmp(say, "Cover") == 0, "nothing left: the fallback");
+        check(scan_mesh_is_dressing("GraffitiDecalsA") && scan_mesh_is_dressing("PosterBuyTacos") &&
+              !scan_mesh_is_dressing("WoodenCrateStackBShortA"),
+              "graffiti and posters are on a wall, a crate is not");
         scan_empty_text(SCAN_CIVILIANS, say, sizeof say);
         check(strcmp(say, "No civilians.") == 0, "an empty category");
         scan_empty_text(SCAN_ALL, say, sizeof say);
