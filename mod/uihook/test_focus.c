@@ -891,6 +891,17 @@ int main(void)
         sight_text(ev, k, say, sizeof say);
         check(k == 1 && ev[0].kind == SIGHT_GONE && strcmp(say, "Out of sight: Sectoid.") == 0,
               "out of sight, by name alone");
+        {
+            SightEvent two[3];
+            memset(two, 0, sizeof two);
+            for (int i = 0; i < 3; i++) two[i].kind = SIGHT_GONE;
+            strcpy_s(two[0].u.label, sizeof two[0].u.label, "Seeker");
+            strcpy_s(two[1].u.label, sizeof two[1].u.label, "Seeker");
+            strcpy_s(two[2].u.label, sizeof two[2].u.label, "Sectoid");
+            sight_text(two, 3, say, sizeof say);
+            check(strcmp(say, "Out of sight: 2 Seekers, Sectoid.") == 0,
+                  "two of a kind out of sight are counted, not repeated");
+        }
         cur[1].dx = -2; cur[1].dy = 0;
         sight_step(7000, cur, 2, ev, 8);
         k = sight_step(7000 + SIGHT_SETTLE_MS, cur, 2, ev, 8);

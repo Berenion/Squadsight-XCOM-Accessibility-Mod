@@ -107,11 +107,16 @@ static void group(const SightEvent* ev, int n, SightKind kind, const char* head,
         tile_contacts(c, m, "", list, sizeof list);
         append(out, out_sz, list);
     } else {
-        for (int i = 0; i < m; i++) {
-            if (i) append(out, out_sz, " ");
-            append(out, out_sz, c[i].name);
-            append(out, out_sz, ".");
-        }
+        // Counted, as the tile readout and the blast list count them: the
+        // 2026-09-28 (11:26) log said "Out of sight: Seeker. Seeker." for two
+        // of a kind, which reads as a stammer.
+        const char* names[TILE_NAMES_MAX];
+        int k = m < TILE_NAMES_MAX ? m : TILE_NAMES_MAX;
+        for (int i = 0; i < k; i++) names[i] = c[i].name;
+        char list[SIGHT_TEXT];
+        tile_names_counted(names, k, m, list, sizeof list);
+        append(out, out_sz, list);
+        append(out, out_sz, ".");
     }
 }
 

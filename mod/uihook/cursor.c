@@ -4,6 +4,8 @@
 #include "props.h"
 #include "names.h"
 #include "ue3.h"
+#include "objects.h"
+#include "log.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -306,9 +308,30 @@ int cursor_world_fields(char* why, size_t why_sz)
     return 2;
 }
 
+// Whether the world data is still one. A load frees the old XComWorldData,
+// and until GetWorldData hands over the new one (cursor_world_seen) g_world
+// points at freed memory -- which a native then runs on. The 2026-09-28
+// (11:26) log has "walls: scan faulted ... executing 00000003" three times
+// just after a load: GetCoverPoint, called on the dead object, jumped through
+// what was left of it. objects_live asks the object table, as unit_is_live
+// does for units; before the table is found it cannot, and the pointer is
+// trusted as it always was.
+static void* g_world_dead;          // the one already logged as gone
+
+static int world_live(void)
+{
+    if (!objects_ready() || objects_live(g_world)) return 1;
+    if (g_world_dead != g_world) {
+        g_world_dead = g_world;
+        logf_("cursor: the world data %p is no longer an object -- not asked until "
+              "the next one is seen\n", g_world);
+    }
+    return 0;
+}
+
 int cursor_grid(CursorGrid* g)
 {
-    if (!g_world_resolved || !g_world) return 0;
+    if (!g_world_resolved || !g_world || !world_live()) return 0;
     const uint8_t* w = (const uint8_t*)g_world;
     uint32_t lo = g_bounds_off, hi = g_bounds_off + 3 * sizeof(float);
     if (g_numx_off < lo) lo = g_numx_off;
@@ -329,7 +352,7 @@ int cursor_grid(CursorGrid* g)
     return 1;
 }
 
-void* cursor_world(void) { return g_world_resolved ? g_world : NULL; }
+void* cursor_world(void) { return g_world_resolved && g_world && world_live() ? g_world : NULL; }
 
 int cursor_position(float* x, float* y, float* z)
 {
