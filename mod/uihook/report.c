@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "report.h"
+#include "where.h"
 #include "units.h"
 #include "game.h"
 #include "log.h"

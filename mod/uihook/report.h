@@ -21,7 +21,7 @@ int tile_dash(int* cost_out, int* std_out, int* max_out, int* moves_out, int* tu
 // The pathing pawn that built the last path, set by hook_computepath.
 extern void* g_path_pawn;
 
-// ---- who is on the tile ---------------------------------------------------------
+// ---- who is on the tile ----------------------------------------------------
 // One unit in a tile's column, on any storey, and where its feet are
 // (units_in_column).
 typedef struct {
@@ -40,8 +40,6 @@ int  units_in_column(int tx, int ty, ColumnUnit* out, int max);
 void units_on_tile(int tx, int ty, int have_floor, float floor,
                    char* out, size_t out_sz, int* mine);
 
-// ---- still in main.c ----------------------------------------------------------------
-// Until their sections move too: the scanner's object walk, and the floor
-// volumes.
+// ---- still in main.c -------------------------------------------------------
+// Until the scanner's object walk moves too.
 int flagless_units(int refresh, FlaglessUnit* out, int max);
-int evac_at(int tx, int ty, float floor);
