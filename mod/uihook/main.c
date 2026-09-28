@@ -1185,8 +1185,18 @@ static void*     g_mission_panel;       // the UITacticalHUD_ObjectivesList
 // SeqAct_ToggleAllMissionObjectives shows it elsewhere -- so on an ordinary
 // mission it holds whatever the script put there at the start, never kept up
 // to date because nobody sees it. The first run read exactly that, a list the
-// player took for stale (2026-09-22). So what is said follows the screen:
-// UI_FxsPanel.IsVisible, a native asked through its vtable slot.
+// player took for stale (2026-09-22). So what is said follows the screen.
+//
+// Read from the panel's own b_IsVisible, which Show and Hide set, rather than
+// by calling its native IsVisible. The native reaches into the panel's Flash
+// side, and a load tears that down while the panel is still in the object
+// table: the 12:17 log of 2026-09-28 has "mission: poll faulted ..
+// XComEW.exe+0x415064, writing 0000062A" three times just after a save was
+// loaded mid-mission. A field read cannot write anything. The native stays as
+// the fallback for a build where the bool cannot be read (no BitMask).
+static const void* g_panel_vis_cls;
+static const void* g_panel_vis_prop;
+
 int mission_visible(void)
 {
     void* panel = g_mission_panel;
@@ -1199,6 +1209,20 @@ int mission_visible(void)
         mission_reset();
         return 0;
     }
+    uint32_t class_off = props_class_offset();
+    const void* cls = class_off && readable((uint8_t*)panel + class_off, sizeof(void*))
+                          ? *(void* const*)((uint8_t*)panel + class_off) : NULL;
+    if (cls && cls != g_panel_vis_cls) {
+        g_panel_vis_cls = cls;
+        g_panel_vis_prop = object_field_prop(panel, "b_IsVisible");
+        logf_("mission: the list's visibility read from %s\n",
+              g_panel_vis_prop && props_mask_offset() ? "b_IsVisible"
+                                                      : "the native IsVisible (no field)");
+    }
+    int shown = 0;
+    if (g_panel_vis_prop && props_mask_offset() &&
+        props_read_object_bool(g_panel_vis_prop, (const uint8_t*)panel, &shown))
+        return shown != 0;
     UnitTestFn visible = (UnitTestFn)tile_vfn(panel, g_panel_slot_visible);
     return visible ? visible(panel, NULL) != 0 : -1;
 }

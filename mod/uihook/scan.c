@@ -300,15 +300,38 @@ static int is_up(char c)    { return c >= 'A' && c <= 'Z'; }
 static int is_low(char c)   { return c >= 'a' && c <= 'z'; }
 static int is_digit(char c) { return c >= '0' && c <= '9'; }
 
+// Words the artists ran together, as they are said: BarrelMetalonPalletD.
+static const char* const k_mesh_split[][2] = {
+    { "metalon", "metal on" },
+};
+
+// Size and state words, said first so a count reads right: the 12:17 log of
+// 2026-09-28 said "2 Wooden crate stack talls" (WoodenCrateStackBTallB);
+// now "2 Tall wooden crate stacks".
+static const char* const k_mesh_front[] = {
+    "short", "tall", "small", "medium", "large", "big", "long", "wide", "narrow", "tipped",
+};
+
+static int word_is(const char* w, size_t n, const char* const* list, size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        if (strlen(list[i]) == n && _strnicmp(w, list[i], n) == 0) return 1;
+    return 0;
+}
+
+#define MESH_WORDS    16
+#define MESH_WORD_LEN 32
+
 void scan_mesh_words(const char* mesh, const char* fallback, char* out, size_t out_sz)
 {
     if (!out || !out_sz) return;
     out[0] = 0;
-    size_t used = 0;
+    char words[MESH_WORDS][MESH_WORD_LEN];
+    int  nwords = 0;
     const char* s = mesh ? mesh : "";
     size_t len = strlen(s);
     size_t i = 0;
-    while (i < len) {
+    while (i < len && nwords < MESH_WORDS) {
         // One word: up to an underscore, a small letter followed by a
         // capital ("Crate|Stack"), a capital that starts a word after
         // another capital ("B|Short"), or a change between letters and
@@ -329,20 +352,49 @@ void scan_mesh_words(const char* mesh, const char* fallback, char* out, size_t o
         // the noise words above are the art's bookkeeping.
         int digits = 0;
         for (size_t k = 0; k < n; k++) if (is_digit(w[k])) digits = 1;
-        if (n < 2 || digits || mesh_noise(w, n)) continue;
-        if (used + n + 2 >= out_sz) break;
-        if (used) out[used++] = ' ';
-        // "Wooden crate stack": capital at the front only. A word in capitals
-        // throughout ("TV") keeps them.
-        int all_caps = 1;
-        for (size_t k = 0; k < n; k++) if (is_low(w[k])) all_caps = 0;
-        for (size_t k = 0; k < n; k++) {
-            char c = w[k];
-            if (!all_caps) c = (used == 0 && k == 0) ? (char)(is_low(c) ? c - 32 : c)
-                                                     : (char)(is_up(c) ? c + 32 : c);
-            out[used++] = c;
+        if (n < 2 || n >= MESH_WORD_LEN || digits || mesh_noise(w, n)) continue;
+        const char* split = NULL;
+        for (size_t k = 0; k < sizeof k_mesh_split / sizeof k_mesh_split[0]; k++)
+            if (strlen(k_mesh_split[k][0]) == n && _strnicmp(w, k_mesh_split[k][0], n) == 0)
+                split = k_mesh_split[k][1];
+        if (split) {
+            // Its words, one by one ("metal on").
+            const char* p = split;
+            while (*p && nwords < MESH_WORDS) {
+                size_t m = strcspn(p, " ");
+                _snprintf_s(words[nwords++], MESH_WORD_LEN, _TRUNCATE, "%.*s", (int)m, p);
+                p += m;
+                while (*p == ' ') p++;
+            }
+            continue;
         }
-        out[used] = 0;
+        _snprintf_s(words[nwords++], MESH_WORD_LEN, _TRUNCATE, "%.*s", (int)n, w);
+    }
+
+    // Size and state words first, then the rest, each in the order found.
+    size_t used = 0;
+    int first = 1;
+    for (int pass = 0; pass < 2; pass++) {
+        for (int k = 0; k < nwords; k++) {
+            const char* w = words[k];
+            size_t n = strlen(w);
+            int front = word_is(w, n, k_mesh_front, sizeof k_mesh_front / sizeof k_mesh_front[0]);
+            if (front != (pass == 0)) continue;
+            if (used + n + 2 >= out_sz) break;
+            if (!first) out[used++] = ' ';
+            // "Wooden crate stack": capital at the front only. A word in
+            // capitals throughout ("TV") keeps them.
+            int all_caps = 1;
+            for (size_t c = 0; c < n; c++) if (is_low(w[c])) all_caps = 0;
+            for (size_t c = 0; c < n; c++) {
+                char ch = w[c];
+                if (!all_caps) ch = (first && c == 0) ? (char)(is_low(ch) ? ch - 32 : ch)
+                                                      : (char)(is_up(ch) ? ch + 32 : ch);
+                out[used++] = ch;
+            }
+            out[used] = 0;
+            first = 0;
+        }
     }
     if (!used) _snprintf_s(out, out_sz, _TRUNCATE, "%s", fallback ? fallback : "");
 }

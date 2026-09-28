@@ -349,6 +349,13 @@ int cursor_grid(CursorGrid* g)
     g->num_x = *(const int32_t*)(w + g_numx_off);
     g->num_y = *(const int32_t*)(w + g_numy_off);
     g->num_z = *(const int32_t*)(w + g_numz_off);
+    // A world data not yet filled in: the 12:17 log of 2026-09-28 had "grid:
+    // Min 0.0, 0.0, 0.0  size 1061158912 x 1065353216 x 1083182765 tiles"
+    // during a load, which put the cursor 41 tiles off the map. Maps are tens
+    // of tiles each way.
+    if (g->num_x <= 0 || g->num_y <= 0 || g->num_z <= 0 ||
+        g->num_x > 1000 || g->num_y > 1000 || g->num_z > 1000)
+        return 0;
     return 1;
 }
 

@@ -2155,8 +2155,8 @@ int main(void)
         check(strcmp(say, "Explosive") == 0, "no mesh: the fallback");
         // Names from the map packages (URB_CommercialAlley and others).
         scan_mesh_words("WoodenCrateStackBShortA", "Cover", say, sizeof say);
-        check(strcmp(say, "Wooden crate stack short") == 0,
-              "a variant letter inside a name is dropped, not run into the next word");
+        check(strcmp(say, "Short wooden crate stack") == 0,
+              "a variant letter inside a name is dropped, and the size said first");
         scan_mesh_words("WoodenCrateStackB_DestroACharred", "Cover", say, sizeof say);
         check(strcmp(say, "Wooden crate stack") == 0, "state words after it go");
         scan_mesh_words("GenUtilityBox_A", "Cover", say, sizeof say);
@@ -2166,11 +2166,26 @@ int main(void)
         scan_mesh_words("CrateDestBurnGeneric96x96A", "Cover", say, sizeof say);
         check(strcmp(say, "Crate") == 0, "sizes and destruction words go");
         scan_mesh_words("WoodDebrisMedium02", "Cover", say, sizeof say);
-        check(strcmp(say, "Wood debris medium") == 0, "a number goes");
+        check(strcmp(say, "Medium wood debris") == 0, "a number goes");
         scan_mesh_words("ChemicalTankMulti", "Cover", say, sizeof say);
         check(strcmp(say, "Chemical tank") == 0, "Multi goes");
         scan_mesh_words("BoxStack_DIFF", "Cover", say, sizeof say);
         check(strcmp(say, "Box stack") == 0, "a texture suffix goes");
+        // The 12:17 log's blast (2026-09-28).
+        scan_mesh_words("BarrelMetalonPalletD", "Cover", say, sizeof say);
+        check(strcmp(say, "Barrel metal on pallet") == 0, "words the artist ran together");
+        scan_mesh_words("BarrelPalletTippedA", "Cover", say, sizeof say);
+        check(strcmp(say, "Tipped barrel pallet") == 0, "a state word first");
+        scan_mesh_words("boxCarBackSides", "Cover", say, sizeof say);
+        check(strcmp(say, "Box car back sides") == 0, "a name starting small");
+        {
+            char tall[SCAN_NAME];
+            scan_mesh_words("WoodenCrateStackBTallB", "Cover", tall, sizeof tall);
+            const char* two[2] = { tall, tall };
+            tile_names_counted(two, 2, 2, say, sizeof say);
+            check(strcmp(say, "2 Tall wooden crate stacks") == 0,
+                  "two of them counted on the thing, not on its size");
+        }
         scan_mesh_words("A_02", "Cover", say, sizeof say);
         check(strcmp(say, "Cover") == 0, "nothing left: the fallback");
         check(scan_mesh_is_dressing("GraffitiDecalsA") && scan_mesh_is_dressing("PosterBuyTacos") &&

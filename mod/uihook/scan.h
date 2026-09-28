@@ -82,7 +82,8 @@ const char* scan_category_name(ScanCategory c);
 
 // A static mesh's name as words for the scanner and the blast list:
 // "FlatBed" -> "Flat bed", "SedanA_Damaged" -> "Sedan",
-// "WoodenCrateStackBShortA" -> "Wooden crate stack short",
+// "WoodenCrateStackBShortA" -> "Short wooden crate stack" (size and state
+// words first, so a count reads "2 Tall wooden crate stacks"),
 // "INT_PROP_Mop_and_Bucket" -> "Mop and bucket". Split at underscores, at
 // capitals and at digits; lone letters (variants), numbers and sizes, and the
 // maps' prefixes, texture suffixes and state words go. `fallback` when
