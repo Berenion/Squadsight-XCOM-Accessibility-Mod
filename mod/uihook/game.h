@@ -51,13 +51,24 @@ int unit_is_live(void* obj);
 // Children walked at most, per class, when a walk has no other end.
 #define MAX_FIELDS   64
 
+//
+// And the class that declares the field, once a walk has found it (refactor
+// step 5): `Location` is Actor's and `m_kPawn` XGUnitNativeBase's, so every
+// pawn and unit class has them at one offset. A class not yet in `on` is
+// settled by climbing its SuperStruct chain to a known declarer -- pointer
+// comparisons -- and a mission with more than eight pawn classes no longer
+// walks the property chain by name each time one is evicted. Several
+// declarers, since one name can be declared on unrelated classes.
 #define FIELD_HITS   8
 #define FIELD_MISSES 4
+#define FIELD_OWNERS 4
 typedef struct {
-    void*    on[FIELD_HITS];        // classes the offset was found on
-    uint32_t off[FIELD_HITS];       // and where, for each
-    void*    absent[FIELD_MISSES];  // classes proved not to have the field
-    uint8_t  next_on, next_absent;  // the next entry to replace
+    void*       on[FIELD_HITS];        // classes the offset was found on
+    uint32_t    off[FIELD_HITS];       // and where, for each
+    void*       absent[FIELD_MISSES];  // classes proved not to have the field
+    const void* owner[FIELD_OWNERS];   // classes that declare it
+    uint32_t    owner_off[FIELD_OWNERS];
+    uint8_t     next_on, next_absent, next_owner;  // the next entry to replace
 } FieldSlot;
 
 // A pointer to `size` readable bytes of obj's field `name`, in *out; 0 when
@@ -65,9 +76,11 @@ typedef struct {
 // Class" once per class that lacks it.
 int field_ptr(void* obj, const char* name, FieldSlot* slot, size_t size, const void** out);
 
-// How many lookups missed every slot and walked the class chain, for the
+// How many lookups missed every slot and walked the class chain, and how
+// many were settled instead by climbing to a known declaring class, for the
 // perf line.
 extern unsigned g_field_walks;
+extern unsigned g_field_climbs;
 
 // ---- the game's natives ----------------------------------------------------
 //

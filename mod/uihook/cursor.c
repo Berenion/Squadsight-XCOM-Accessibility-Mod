@@ -89,8 +89,9 @@ static int find_super_offset(const void* cls)
     return 0;
 }
 
-// A named property, searched up the class chain.
-static const void* field_find(const void* cls, const char* want)
+// A named property, searched up the class chain. *owner, when asked for, is
+// the class in the chain that declares it.
+static const void* field_find_in(const void* cls, const char* want, const void** owner)
 {
     for (int depth = 0; cls && depth < 24; depth++) {
         if (!readable((const uint8_t*)cls + USTRUCT_CHILDREN, sizeof(void*)))
@@ -105,8 +106,10 @@ static const void* field_find(const void* cls, const char* want)
             if (!readable(field, 0x68)) break;
             char name[128];
             if (object_name((void*)field, name, sizeof name) &&
-                strcmp(name, want) == 0)
+                strcmp(name, want) == 0) {
+                if (owner) *owner = cls;
                 return field;
+            }
             field = *(const void* const*)((const uint8_t*)field + UFIELD_NEXT);
         }
 
@@ -114,6 +117,11 @@ static const void* field_find(const void* cls, const char* want)
         cls = *(const void* const*)((const uint8_t*)cls + g_super_off);
     }
     return NULL;
+}
+
+static const void* field_find(const void* cls, const char* want)
+{
+    return field_find_in(cls, want, NULL);
 }
 
 static int field_offset(const void* cls, const char* want, uint32_t* out)
@@ -183,6 +191,31 @@ int object_field_offset(const void* obj, const char* name, uint32_t* out)
     if (!cls || !readable(cls, 0x60)) return 0;
     if (!find_super_offset(cls)) return 0;
     return field_offset(cls, name, out);
+}
+
+int object_field_owner(const void* obj, const char* name, uint32_t* out, const void** owner)
+{
+    uint32_t class_off = props_class_offset();
+    if (!obj || !class_off) return 0;
+    if (!readable((const uint8_t*)obj + class_off, sizeof(void*))) return 0;
+    const void* cls = *(const void* const*)((const uint8_t*)obj + class_off);
+    if (!cls || !readable(cls, 0x60)) return 0;
+    if (!find_super_offset(cls)) return 0;
+    const void* field = field_find_in(cls, name, owner);
+    if (!field) return 0;
+    *out = *(const uint32_t*)((const uint8_t*)field + UPROPERTY_OFFSET);
+    return 1;
+}
+
+int class_derives(const void* cls, const void* base)
+{
+    if (!cls || !base || !g_super_off) return 0;
+    for (int depth = 0; cls && depth < 32; depth++) {
+        if (cls == base) return 1;
+        if (!readable((const uint8_t*)cls + g_super_off, sizeof(void*))) return 0;
+        cls = *(const void* const*)((const uint8_t*)cls + g_super_off);
+    }
+    return 0;
 }
 
 uint32_t object_super_offset(void) { return g_super_off; }

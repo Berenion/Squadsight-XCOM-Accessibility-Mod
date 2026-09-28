@@ -271,12 +271,13 @@ void perf_note(long long walls_ticks, long long hearts_ticks)
     if (hearts_ticks > hearts_max) hearts_max = hearts_ticks;
     if (now - since < PERF_MS) return;
     double ms = 1000.0 / (double)freq.QuadPart;
-    static unsigned walks_seen;
+    static unsigned walks_seen, climbs_seen;
     logf_("perf: %.1f frames a second; worst frame's walls %.2f ms, hearts %.2f ms; "
-          "%u field walks\n",
+          "%u field walks, %u climbs\n",
           frames * 1000.0 / (double)(now - since), walls_max * ms, hearts_max * ms,
-          g_field_walks - walks_seen);
+          g_field_walks - walks_seen, g_field_climbs - climbs_seen);
     walks_seen = g_field_walks;
+    climbs_seen = g_field_climbs;
     since = now;
     frames = 0;
     walls_max = hearts_max = 0;

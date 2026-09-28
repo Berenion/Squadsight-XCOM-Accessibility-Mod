@@ -104,6 +104,7 @@ void* tile_vfn(void* obj, int slot)
 // How many lookups missed every slot and walked the class chain; the perf
 // line reports it, since a walk is the expensive part of a field read.
 unsigned g_field_walks;
+unsigned g_field_climbs;
 
 // An object's field, by name: the offset is looked up again whenever the
 // object's class is not one this slot has already decided. An offset belongs
@@ -122,20 +123,39 @@ int field_ptr(void* obj, const char* name, FieldSlot* slot,
     for (int i = 0; i < FIELD_HITS && hit < 0; i++)
         if (slot->on[i] == cls) hit = i;
     if (hit < 0) {
-        uint32_t off;
-        g_field_walks++;
-        if (!object_field_offset(obj, name, &off)) {
-            slot->absent[slot->next_absent] = cls;
-            slot->next_absent = (uint8_t)((slot->next_absent + 1) % FIELD_MISSES);
-            // A class that cannot be read is not a missing field, it is a
-            // dead object, and the answer is to stop holding the pointer --
-            // which is whoever is holding it to say, not this. Saying it here
-            // filled a log with "on an unreadable class" and named neither
-            // the object nor anything that could be done about it.
-            char cls_name[128];
-            if (object_class_name(obj, cls_name, sizeof cls_name))
-                logf_("field: no %s on %s\n", name, cls_name);
-            return 0;
+        uint32_t off = 0;
+        int known = 0;
+        // Below a class already known to declare it: the same offset, found
+        // by climbing SuperStruct rather than reading every member's name.
+        for (int i = 0; i < FIELD_OWNERS && !known; i++)
+            if (slot->owner[i] && class_derives(cls, slot->owner[i])) {
+                off = slot->owner_off[i];
+                known = 1;
+            }
+        if (known) {
+            g_field_climbs++;
+        } else {
+            const void* owner = NULL;
+            g_field_walks++;
+            if (!object_field_owner(obj, name, &off, &owner)) {
+                slot->absent[slot->next_absent] = cls;
+                slot->next_absent = (uint8_t)((slot->next_absent + 1) % FIELD_MISSES);
+                // A class that cannot be read is not a missing field, it is a
+                // dead object, and the answer is to stop holding the pointer --
+                // which is whoever is holding it to say, not this. Saying it
+                // here filled a log with "on an unreadable class" and named
+                // neither the object nor anything that could be done about it.
+                char cls_name[128];
+                if (object_class_name(obj, cls_name, sizeof cls_name))
+                    logf_("field: no %s on %s\n", name, cls_name);
+                return 0;
+            }
+            if (owner) {
+                int o = slot->next_owner;
+                slot->owner[o] = owner;
+                slot->owner_off[o] = off;
+                slot->next_owner = (uint8_t)((o + 1) % FIELD_OWNERS);
+            }
         }
         hit = slot->next_on;
         slot->on[hit] = cls;

@@ -61,6 +61,14 @@ int cursor_position(float* x, float* y, float* z);
 // property -- which also makes it a test of what kind of object this is.
 int object_field_offset(const void* obj, const char* name, uint32_t* out);
 
+// The same, and the class in the chain that declares the field (*owner):
+// every class below that one has the field at the same offset.
+int object_field_owner(const void* obj, const char* name, uint32_t* out, const void** owner);
+
+// Whether class `cls` is `base` or below it: a climb up SuperStruct comparing
+// pointers, no names read. 0 before the SuperStruct offset is known.
+int class_derives(const void* cls, const void* base);
+
 // The UProperty itself, for a field that needs its type to be read -- a bool
 // is one bit of a dword (props_read_bool). NULL when there is no such field.
 const void* object_field_prop(const void* obj, const char* name);
