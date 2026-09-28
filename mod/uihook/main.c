@@ -6157,12 +6157,15 @@ void combat_poll(void)
         const UnitName* u = g_hurt;
         void* flag = g_hurt_flag;
         g_hurt = NULL;
-        char name[64];
-        strncpy_s(name, sizeof name, u->name, _TRUNCATE);
+        // The label, number and all ("Thin Man 4 down."): the 18:05 log said
+        // "Thin Man 4, 5 damage." and then a bare "Thin Man down.".
+        char name[96];
+        if (u->name[0]) unit_label(u, name, sizeof name);
+        else name[0] = 0;
         int gone = 0;
         GUARDED("combat: gone", gone = unit_gone(u, flag));
         if (gone && name[0]) {
-            char say[96];
+            char say[128];
             _snprintf_s(say, sizeof say, _TRUNCATE, "%s down.", name);
             logf_("combat: no redraw after the hit, and %s is gone -> \"%s\"\n", name, say);
             announce_as(SET_COMBAT, say);
@@ -6938,7 +6941,9 @@ static void* sight_squad(void)
             g_sight_squad = p;
         }
     }
-    if (g_sight_squad && !unit_is_live(g_sight_squad)) {
+    // By class, not liveness alone: after a load the old player's memory can
+    // be another live object (a SpotLightComponent in the 18:05 log).
+    if (g_sight_squad && !squad_is_human(g_sight_squad)) {
         sight_reset();
         known_reset();
         g_sight_squad = NULL;

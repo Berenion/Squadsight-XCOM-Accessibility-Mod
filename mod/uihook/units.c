@@ -328,19 +328,17 @@ void known_reset(void)
     for (int i = 0; i < g_nunits; i++) g_units[i].number = 0;
 }
 
-// Whether `squad` is a human player; asked by class, remembered per pointer.
-static int squad_is_human(void* squad)
+// Whether `squad` is a human player, asked by class every time. Remembered
+// per pointer, it outlived the player: the 2026-09-28 (18:05) log loaded a
+// save mid-mission, the old XGPlayer's memory came back as a live
+// SpotLightComponent, and "field: no m_iTurn on SpotLightComponent" was read
+// from it as the squad -- unit_is_live alone cannot tell, since the new
+// object is live.
+int squad_is_human(void* squad)
 {
-    static void* last;
-    static int   human;
-    if (!squad) return 0;
-    if (squad != last) {
-        char cls[64];
-        human = unit_is_live(squad) && object_class_name(squad, cls, sizeof cls) &&
-                (strcmp(cls, "XGPlayer") == 0 || strcmp(cls, "XGPlayer_MP") == 0);
-        last = squad;
-    }
-    return human;
+    char cls[64];
+    return squad && unit_is_live(squad) && object_class_name(squad, cls, sizeof cls) &&
+           (strcmp(cls, "XGPlayer") == 0 || strcmp(cls, "XGPlayer_MP") == 0);
 }
 
 // The table for this squad: a different human player is a new mission or a
@@ -430,7 +428,7 @@ int known_lost(void* squad, const SeenSet* now, KnownLost* out, int max)
     // The table is the human squad's; in the aliens' turn the cursor's player
     // is theirs, and the last human one still owns it.
     if (!squad_is_human(squad)) squad = g_known_squad;
-    if (!squad || squad != g_known_squad || !unit_is_live(squad)) return 0;
+    if (!squad || squad != g_known_squad || !squad_is_human(squad)) return 0;
     int turn = squad_turn(squad);
     int k = 0;
     for (int i = 0; i < g_nknown && k < max; i++) {

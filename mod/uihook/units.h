@@ -154,6 +154,10 @@ int  squad_sees(const SquadSight* v, void* unit, const float* loc,
 // (a load frees it, and the next may be made at the same address).
 void known_reset(void);
 
+// Whether `squad` is live and a human player (XGPlayer, XGPlayer_MP), asked
+// by class: after a load the old player's address can hold another object.
+int squad_is_human(void* squad);
+
 // Called from sight_poll with who the squad sees now and where (the pawns'
 // Locations), so the places follow what was seen.
 void known_seen(void* squad, void* const* units, const float (*locs)[3], int n);
