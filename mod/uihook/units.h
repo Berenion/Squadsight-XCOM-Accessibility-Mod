@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include "game.h"
+#include "cursor.h"
 
 // Who is where on the tactical map, and whom the squad may be told about.
 //
@@ -9,7 +10,7 @@
 // per flag) and read from the game when asked. units.c has the reasoning;
 // this is what the readouts use.
 
-// ---- the table ------------------------------------------------------------------
+// ---- the table -------------------------------------------------------------
 #define UNIT_MAX 64
 
 // The flag also draws a cover shield and hit points, which is what the shot
@@ -56,7 +57,7 @@ void unit_label(const UnitName* u, char* out, size_t out_sz);
 void unit_label_state(const UnitName* u, void* unit, int enemy,
                       char* out, size_t out_sz);
 
-// ---- asking the game about a unit ------------------------------------------------
+// ---- asking the game about a unit ------------------------------------------
 #define TEAM_NEUTRAL 1          // Object.ETeam.eTeam_Neutral -- a civilian
 
 // A flag's unit, alive and in sight (IsAliveAndVisible), with its pawn,
@@ -85,7 +86,7 @@ int   unit_gone(const UnitName* u, void* flag);
 // unit's m_arrVisibleEnemies.
 extern FieldSlot g_pawn_loc, g_visen;
 
-// ---- what the squad sees ---------------------------------------------------------
+// ---- what the squad sees ---------------------------------------------------
 //
 // Whether a readout that names units may name this one. Kept in one place
 // because it was kept in three -- the scanner, who is on a tile, and the blast
@@ -125,3 +126,24 @@ int  civilian_seen(void* squad, const SeenSet* civilians, void* unit,
 void squad_sight_take(void* squad, SquadSight* v);
 int  squad_sees(const SquadSight* v, void* unit, const float* loc,
                 int friendly, const char* name);
+
+// ---- the soldier being moved -----------------------------------------------
+void* soldier_unit(void);               // the cursor's chained unit, if live
+// The soldier's tile, and the pawn's height (NAVH_LIFT above the feet).
+int   soldier_tile(const CursorGrid* g, int* tx, int* ty, float* z);
+int   soldier_out_of_moves(void);       // XGUnit.m_iMoves <= 0
+
+// ---- units with no flag ----------------------------------------------------
+// A civilian with no flag over them (flagless_units), whom the unit
+// table, built from the flags, never holds.
+typedef struct {
+    void* unit;
+    void* pawn;
+    float loc[3];
+    char  name[64];
+} FlaglessUnit;
+#define COLUMN_FLAGLESS 32
+
+// Whether `unit` (an XGUnit from the object walk) is a living neutral with no
+// flag, and if so, who and where. Sight is not asked.
+int flagless_unit(void* unit, FlaglessUnit* out);

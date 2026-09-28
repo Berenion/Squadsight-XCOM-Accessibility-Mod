@@ -296,7 +296,7 @@ int unit_gone(const UnitName* u, void* flag)
     return visible && !visible(unit, NULL);
 }
 
-// ---- what the squad sees: the one rule --------------------------------------
+// ---- what the squad sees: the one rule -------------------------------------
 //
 // The rule and why it is one are in units.h.
 
@@ -346,4 +346,123 @@ void unit_label_state(const UnitName* u, void* unit, int enemy,
     size_t used = strlen(out);
     if (state[0] && used < out_sz)
         _snprintf_s(out + used, out_sz - used, _TRUNCATE, "%s", state);
+}
+
+// ---- the soldier being moved -----------------------------------------------
+
+// The soldier being moved: the active unit, the one the cursor is chained to
+// and the target strip is drawn for.
+static FieldSlot g_active_unit;
+
+void* soldier_unit(void)
+{
+    void* pawn = NULL;
+    const void* v;
+    if (!cursor_chained_pawn(&pawn) || !pawn ||
+        !field_ptr(pawn, "m_kGameUnit", &g_active_unit, sizeof(void*), &v))
+        return NULL;
+    void* unit = *(void* const*)v;
+    return unit && unit_is_live(unit) ? unit : NULL;
+}
+
+// The soldier's own tile, from the pawn the cursor is chained to. `z` gets the
+// pawn's height, which stands in for a cursor's: both are compared with the
+// floor through NAVH_LIFT.
+//
+// Needed because the cursor is not the soldier. In mouse mode it follows the
+// mouse every frame, and when the soldier changes the camera pans while the
+// mouse stays put, so the cursor lands wherever the mouse now points -- in one
+// run, three soldiers in a row began at the map's northern edge, rows 54 to
+// 60 of 61, where no path went anywhere.
+static FieldSlot g_soldier_loc;
+
+int soldier_tile(const CursorGrid* g, int* tx, int* ty, float* z)
+{
+    void* pawn = NULL;
+    const void* v;
+    if (!cursor_chained_pawn(&pawn) || !pawn ||
+        !field_ptr(pawn, "Location", &g_soldier_loc, 3 * sizeof(float), &v))
+        return 0;
+    const float* loc = (const float*)v;
+    *tx = cursor_tile_axis(loc[0], g->min_x, CURSOR_TILE);
+    *ty = cursor_tile_axis(loc[1], g->min_y, CURSOR_TILE);
+    *z = loc[2];
+    return 1;
+}
+
+// Whether the soldier being moved has no moves left (XGUnit.m_iMoves, what
+// GetMoves returns), and so no path action for the cursor to drive.
+static FieldSlot g_unit_moves;
+int soldier_out_of_moves(void)
+{
+    void* unit = soldier_unit();
+    const void* v;
+    if (!unit || !field_ptr(unit, "m_iMoves", &g_unit_moves, sizeof(int32_t), &v)) return 0;
+    return *(const int32_t*)v <= 0;
+}
+
+// ---- units with no flag ----------------------------------------------------
+
+// Civilians with no flag over them, which scan_add_units cannot see.
+//
+// The unit table is built from UIUnitFlag.SetNames, and not every unit has a
+// flag: UIUnitFlagManager.OnInit gives one to every XGUnit NOT on the neutral
+// team, and a civilian gets one only when spawned with bAddFlag (the terror
+// civilians) or when XGBattle.SwapTeams moves them to a side. A mission's
+// survivor is neither until rescued -- the 2026-09-27 (23:33) log has no
+// "SetNames Survivor" until the escort, and "No civilians" at every press
+// before it. So the units come from the object walk too, and a neutral one
+// with no flag is listed from it (flagless_units, main.c) through this. Whether
+// the squad sees them is the caller's to ask (squad_sees), after whatever
+// cheaper test it has -- a tile, a blast.
+//
+// Named as UIUnitFlag.OnInit would name them: a civilian character's
+// strLastName (and nickname), else the unit's behavior says what it is.
+static FieldSlot g_fl_char, g_fl_last, g_fl_nick, g_fl_behavior;
+
+static void flagless_name(void* unit, char* out, size_t out_sz)
+{
+    const void* v;
+    out[0] = 0;
+    if (field_ptr(unit, "m_kCharacter", &g_fl_char, sizeof(void*), &v)) {
+        void* ch = *(void* const*)v;
+        char last[64] = "", nick[64] = "";
+        if (ch && unit_is_live(ch) &&
+            field_ptr(ch, "strLastName", &g_fl_last, sizeof(FString), &v))
+            read_fstring((const FString*)v, last, sizeof last);
+        if (last[0] && field_ptr(ch, "strNickName", &g_fl_nick, sizeof(FString), &v))
+            read_fstring((const FString*)v, nick, sizeof nick);
+        if (last[0]) {
+            _snprintf_s(out, out_sz, _TRUNCATE, nick[0] ? "%s, %s" : "%s", last, nick);
+            return;
+        }
+    }
+    char cls[64];
+    if (field_ptr(unit, "m_kBehavior", &g_fl_behavior, sizeof(void*), &v) &&
+        *(void* const*)v && object_class_name(*(void* const*)v, cls, sizeof cls) &&
+        strcmp(cls, "XGAIBehavior_Survivor") == 0)
+        strcpy_s(out, out_sz, "Survivor");
+    else
+        strcpy_s(out, out_sz, "Civilian");
+}
+
+int flagless_unit(void* unit, FlaglessUnit* out)
+{
+    if (!unit_is_live(unit) || unit_team(unit) != TEAM_NEUTRAL) return 0;
+    if (unit_by_unit(unit)) return 0;       // has a flag: the table's own
+    // IsAlive, not IsAliveAndVisible: whether the squad sees them is
+    // squad_sees' to say, and a survivor may never be "visible" in the
+    // sense the flags use.
+    UnitTestFn alive = (UnitTestFn)tile_vfn(unit, g_unit_slot_alive);
+    if (!alive || !alive(unit, NULL)) return 0;
+    void* pawn = unit_pawn(unit);
+    const void* v;
+    if (!pawn || !unit_is_live(pawn) ||
+        !field_ptr(pawn, "Location", &g_pawn_loc, 3 * sizeof(float), &v))
+        return 0;
+    memcpy(out->loc, v, sizeof out->loc);
+    out->unit = unit;
+    out->pawn = pawn;
+    flagless_name(unit, out->name, sizeof out->name);
+    return 1;
 }

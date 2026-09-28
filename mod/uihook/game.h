@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include "tile.h"
+#include "ue3.h"
 
 // Reading and asking the game from outside: the primitives every feature
 // that touches a game object is built on.
@@ -20,11 +21,15 @@ int readable(const void* p, size_t n);
 // The same, for the few places this DLL writes into the game.
 int writable(const void* p, size_t n);
 
+// An FString, as UTF-8; 0 unless it is plainly text. Num counts the NUL.
+#define FSTRING_MAX 4096
+int read_fstring(const FString* s, char* out, size_t out_sz);
+
 // Whether an object is still one: objects_live, or yes while the object
 // table has not been found (unit_is_live in game.c says why).
 int unit_is_live(void* obj);
 
-// ---- a field, by name ---------------------------------------------------------
+// ---- a field, by name ------------------------------------------------------
 //
 // Where a field lookup's answer is kept, for one call site.
 //
@@ -61,7 +66,7 @@ int field_ptr(void* obj, const char* name, FieldSlot* slot, size_t size, const v
 // perf line.
 extern unsigned g_field_walks;
 
-// ---- the game's natives ---------------------------------------------------------
+// ---- the game's natives ----------------------------------------------------
 //
 // The game's own answers, asked of its C++ directly: see tile.h for why the
 // vtable, and how the slots are found. These are pure queries, called on the
@@ -146,3 +151,25 @@ extern uint8_t* g_image_hi;
 // A virtual function of `obj`, or NULL when the slot is unknown or the entry
 // does not point into the game's image.
 void* tile_vfn(void* obj, int slot);
+
+// A value no measurement will be, so an out-parameter the native never wrote
+// is not mistaken for an answer.
+#define SENTINEL_FLOAT 1.0e9f
+
+// ---- when a call into the game faults --------------------------------------
+//
+// Every call into the game sits in __try, with
+//     __except (fault_note(GetExceptionInformation(), &f)) { fault_log("what", &f, NULL); }
+// What a fault was doing, taken in the exception filter while the record is
+// still available: the code address, as module+offset so it can be found in a
+// disassembly of this DLL, and the address it tried to read or write.
+typedef struct {
+    DWORD     code;
+    void*     at;
+    ULONG_PTR access;     // 0 read, 1 write, 8 execute
+    ULONG_PTR addr;
+    int       has_addr;
+} Fault;
+
+int  fault_note(EXCEPTION_POINTERS* ep, Fault* f);    // the filter: always handles
+void fault_log(const char* prefix, const Fault* f, const char* where);

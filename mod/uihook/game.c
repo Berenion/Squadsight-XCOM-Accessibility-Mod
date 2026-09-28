@@ -2,11 +2,14 @@
 
 #include <windows.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 #include "game.h"
 #include "log.h"
 #include "cursor.h"
 #include "props.h"
 #include "objects.h"
+#include "ue3.h"
 
 // The natives' slots, -1 until tile_arm (main.c) finds them.
 int   g_tile_slot_cover = -1, g_tile_slot_smoke = -1, g_tile_slot_poison = -1;
@@ -156,4 +159,60 @@ int field_ptr(void* obj, const char* name, FieldSlot* slot,
 int unit_is_live(void* obj)
 {
     return !objects_ready() || objects_live(obj);
+}
+
+// Reads an FString.  Num counts the terminating NUL.
+int read_fstring(const FString* s, char* out, size_t out_sz)
+{
+    if (!readable(s, sizeof *s)) return 0;
+    if (s->Num < 2 || s->Num > FSTRING_MAX) return 0;
+    if (s->Max < s->Num) return 0;
+    if (!readable(s->Data, (size_t)s->Num * sizeof(wchar_t))) return 0;
+    if (s->Data[s->Num - 1] != 0) return 0;
+
+    for (int i = 0; i < s->Num - 1; i++) {
+        wchar_t c = s->Data[i];
+        if (c == 0) return 0;
+        if (c < 32 && c != '\n' && c != '\t' && c != '\r') return 0;
+    }
+
+    int n = WideCharToMultiByte(CP_UTF8, 0, s->Data, s->Num - 1,
+                                out, (int)out_sz - 1, NULL, NULL);
+    if (n <= 0) return 0;
+    out[n] = 0;
+    return 1;
+}
+
+int fault_note(EXCEPTION_POINTERS* ep, Fault* f)
+{
+    const EXCEPTION_RECORD* r = ep->ExceptionRecord;
+    f->code = r->ExceptionCode;
+    f->at = r->ExceptionAddress;
+    f->has_addr = r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+                  r->NumberParameters >= 2;
+    f->access = f->has_addr ? r->ExceptionInformation[0] : 0;
+    f->addr = f->has_addr ? r->ExceptionInformation[1] : 0;
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+void fault_log(const char* prefix, const Fault* f, const char* where)
+{
+    char mod[MAX_PATH] = "?";
+    uintptr_t rva = (uintptr_t)f->at;
+    HMODULE m;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)f->at, &m) &&
+        GetModuleFileNameA(m, mod, sizeof mod)) {
+        rva -= (uintptr_t)m;
+        char* slash = strrchr(mod, '\\');
+        if (slash) memmove(mod, slash + 1, strlen(slash + 1) + 1);
+    }
+    char access[48] = "";
+    if (f->has_addr)
+        _snprintf_s(access, sizeof access, _TRUNCATE, ", %s %p",
+                    f->access == 1 ? "writing" : f->access == 8 ? "executing" : "reading",
+                    (void*)f->addr);
+    logf_("%s faulted (0x%08lx) at %s+0x%X%s%s%s\n", prefix, f->code, mod,
+          (unsigned)rva, access, where && *where ? ", in " : "", where ? where : "");
 }
