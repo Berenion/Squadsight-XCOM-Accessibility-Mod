@@ -4944,6 +4944,25 @@ static void capture_body(const char* tag, LONG n, void* stack)
         for (int i = 0; i < p->nstrings; i++)
             logf_("[%ld] %s %s.%s  \"%s\"\n", n, tag, obj_name, fn_name, p->strings[i]);
 
+    // A unit flag's calls belong to the unit table (unit_note, unit_flag_drew,
+    // above) and are never an announcement. RealizeCover sends the shield as
+    // a lone string, "_lowCover", and in the enemy turn an alien the squad had
+    // lost sight of redraws only that as it moves -- nothing came after to
+    // cancel it, so it was said 250 ms later and NVDA read it as "low cover",
+    // "high cover", again and again, with no name and nothing in Insert
+    // (reported after the 2026-09-28 11:26 run, whose log has RealizeCover
+    // alone every few hundred ms: UIUnitFlag_22 at 43200, 43289, 43294).
+    // SetWeapon's lone "14" and SetNames could go the same way. Logged, not said.
+    if (strncmp(obj_name, "UIUnitFlag_", 11) == 0) {
+        static int told;
+        if (!told) {
+            told = 1;
+            logf_("flags: %s.%s and every flag call after it kept for the unit table, "
+                  "never spoken\n", obj_name, fn_name);
+        }
+        return;
+    }
+
     ULONGLONG now = GetTickCount64();
     // Compare against the last call that actually carried text, not the last
     // call of any kind.  Screens interleave their labels with other traffic --
