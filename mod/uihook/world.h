@@ -1,0 +1,27 @@
+#pragma once
+#include <windows.h>
+#include "cursor.h"
+#include "scan.h"
+#include "units.h"
+
+// The level actors: doors, windows, panels, ladders, Meld canisters, the
+// radar array, what explodes, and units with no flag. None of them pass
+// through the UI and no native lists them, so they come from the game's
+// object table -- walked in full once per map, then only caught up on
+// (world.c has the reasons and the costs).
+
+// Brings the actors and their items up to date for the map on grid `g`.
+// 0 when there is nothing to ask.
+int world_refresh(const CursorGrid* g);
+
+// The items the last world_refresh placed: the scanner's entries for them,
+// with tile and floor on that grid.
+const ScanItem* world_items(int* n);
+
+// Whether `actor` is a destructible that blows up (as of the last refresh).
+int world_explodes(const void* actor);
+
+// Civilians with no flag over them: living neutral units from the walk.
+// `refresh` brings the walk up to date first; otherwise it is walked only if
+// it never has been.
+int flagless_units(int refresh, FlaglessUnit* out, int max);

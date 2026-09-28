@@ -601,3 +601,49 @@ void floor_missed(int tx, int ty, float from, int found, float to, int dir,
     logf_("where: F / C at %d, %d %s storey %d (floor number %d); nearest on %d, %d\n",
           tx, ty, found ? "passed" : "found nothing, missing", next, num, nx, ny);
 }
+
+// ---- what a floor is -------------------------------------------------------
+//
+// Not a row of the world grid. XComWorldData steps its Z axis by
+// WORLD_FloorHeight, 64 units, and a map 18 of those tall was announced as
+// having eighteen floors -- on a building with two. A *floor*, as the game and
+// the player mean it, is XCom3DCursor.CURSOR_OUTDOOR_FLOOR_HEIGHT: 192 units,
+// three grid rows. The first run had a soldier on 259.1 and another on 533.4
+// called five floors apart; they are one.
+//
+// The game will answer this itself -- WorldZToCursorFloor is native on the
+// cursor, and takes the whole position, so it can tell an indoor floor from
+// the ground outside it. That is the answer used. The division is only the
+// fallback for a build where the thunk does not have the shape tile_vtable_slot
+// reads, and it is the same division the constant describes.
+#define CURSOR_FLOOR_HEIGHT 192.0f
+
+int floor_of(const float* world)
+{
+    void* cur = cursor_object();
+    CursorFloorFn fn = (CursorFloorFn)tile_vfn(cur, g_cursor_slot_floor);
+    if (fn) return fn(cur, NULL, world[0], world[1], world[2]);
+    CursorGrid g;
+    if (!cursor_grid(&g)) return 0;
+    return cursor_tile_axis(world[2], g.min_z, CURSOR_FLOOR_HEIGHT);
+}
+
+// How many floors the map has. XCom3DCursorForCursorVolumes works m_iMaxFloor
+// out from the cursor volumes the level was built with, so it is the map's own
+// count; the grid's height in floors is the fallback.
+static FieldSlot g_maxfloor;
+
+int floor_count(void)
+{
+    const void* v;
+    void* cur = cursor_object();
+    if (cur && field_ptr(cur, "m_iMaxFloor", &g_maxfloor,
+                         sizeof(int32_t), &v)) {
+        int n = *(const int32_t*)v + 1;         // m_iMaxFloor is the top index
+        if (n > 0 && n < 64) return n;
+    }
+    CursorGrid g;
+    if (!cursor_grid(&g)) return 1;
+    int n = (int)((float)g.num_z * 64.0f / CURSOR_FLOOR_HEIGHT);
+    return n > 0 ? n : 1;
+}

@@ -39,7 +39,3 @@ int  units_in_column(int tx, int ty, ColumnUnit* out, int max);
 // those on that storey. *mine is set when one is the soldier being moved.
 void units_on_tile(int tx, int ty, int have_floor, float floor,
                    char* out, size_t out_sz, int* mine);
-
-// ---- still in main.c -------------------------------------------------------
-// Until the scanner's object walk moves too.
-int flagless_units(int refresh, FlaglessUnit* out, int max);

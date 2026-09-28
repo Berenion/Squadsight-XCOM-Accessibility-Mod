@@ -31,6 +31,11 @@ int  evac_at(int tx, int ty, float floor);
 // The evac zone's tile nearest (ox, oy) with a floor, and that floor.
 int  evac_nearest(int ox, int oy, int* nx, int* ny, float* nz);
 
+// The cursor's floor number at a world position (WorldZToCursorFloor), and
+// how many floors the map has: the scanner's storeys.
+int floor_of(const float* world);
+int floor_count(void);
+
 // The exact floor inside the 64-unit layer from `bottom`, pos[0..1] its
 // place (pos[2] is overwritten); `bottom` when there is none.
 float aim_floor_exact(void* world, float* pos, float bottom);
