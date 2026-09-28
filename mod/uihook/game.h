@@ -174,7 +174,8 @@ void* tile_vfn(void* obj, int slot);
 
 // ---- when a call into the game faults --------------------------------------
 //
-// Every call into the game sits in __try, with
+// Every call into the game sits in __try: GUARDED (below) for one statement,
+// or for a longer body
 //     __except (fault_note(GetExceptionInformation(), &f)) { fault_log("what", &f, NULL); }
 // What a fault was doing, taken in the exception filter while the record is
 // still available: the code address, as module+offset so it can be found in a
@@ -189,3 +190,29 @@ typedef struct {
 
 int  fault_note(EXCEPTION_POINTERS* ep, Fault* f);    // the filter: always handles
 void fault_log(const char* prefix, const Fault* f, const char* where);
+
+// One statement run under that guard (refactor step 7): a fault in it is
+// logged as "<label> faulted ..." and then the rest of the arguments run --
+// the fallback a caller reads afterwards, or state to put back. Nothing after
+// the label when there is nothing to recover. The statement cannot hold a
+// comma outside brackets; a body that long is its own __try.
+#define GUARDED(label, stmt, ...)                                       \
+    do {                                                                \
+        Fault guard_fault_;                                             \
+        __try { stmt; }                                                 \
+        __except (fault_note(GetExceptionInformation(), &guard_fault_)) { \
+            fault_log(label, &guard_fault_, NULL);                      \
+            __VA_ARGS__;                                                \
+        }                                                               \
+    } while (0)
+
+// State set before a call that can fault is cleared here, not before each
+// return: a fault leaves through none of them. Traps in HANDOFF.md: a
+// re-entry flag cleared by hand stayed set after one fault while aiming, and
+// every later capture returned at once -- the HUD, the pause menu and the
+// dialogue box silent for the rest of the session.
+#define CLEARED(stmt, cleanup)                                          \
+    do {                                                                \
+        __try { stmt; }                                                 \
+        __finally { cleanup; }                                          \
+    } while (0)

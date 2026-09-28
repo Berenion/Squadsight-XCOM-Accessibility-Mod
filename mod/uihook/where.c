@@ -502,12 +502,7 @@ void where_say(int tx, int ty, float floor, int force, char* out, size_t out_sz)
     out[0] = 0;
     TileWhere now;
     int ok = 0;
-    Fault f;
-    __try { ok = where_at(tx, ty, floor, &now); }
-    __except (fault_note(GetExceptionInformation(), &f)) {
-        fault_log("where", &f, NULL);
-        ok = 0;
-    }
+    GUARDED("where", ok = where_at(tx, ty, floor, &now), ok = 0);
     if (!ok) return;
     tile_where_text(&g_where_heard, &now, force, out, out_sz);
     g_where_heard = now;

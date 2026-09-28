@@ -419,12 +419,8 @@ static void nav_say_no_path(int tx, int ty)
     }
     if (!g_step_pending) return;    // already said: nothing to ask the game for
     char why[48];
-    Fault f;
-    __try { tile_refusal_probe(tx, ty, navh_ground(), why, sizeof why); }
-    __except (fault_note(GetExceptionInformation(), &f)) {
-        fault_log("nav: refusal", &f, NULL);
-        _snprintf_s(why, sizeof why, _TRUNCATE, "%s", tile_refusal_text(TILE_REFUSE_NO_PATH));
-    }
+    GUARDED("nav: refusal", tile_refusal_probe(tx, ty, navh_ground(), why, sizeof why),
+            _snprintf_s(why, sizeof why, _TRUNCATE, "%s", tile_refusal_text(TILE_REFUSE_NO_PATH)));
     nav_step_say(why);
 }
 
@@ -717,11 +713,9 @@ static void nav_arrive(int tx, int ty)
     if (!mine && !g_step_nunits) {
         char why[48];
         int blocked = 0;
-        __try { blocked = tile_blocked_now(tx, ty, navh_ground(), why, sizeof why); }
-        __except (fault_note(GetExceptionInformation(), &f)) {
-            fault_log("nav: arrival check", &f, NULL);
-            blocked = 0;
-        }
+        GUARDED("nav: arrival check",
+                blocked = tile_blocked_now(tx, ty, navh_ground(), why, sizeof why),
+                blocked = 0);
         if (blocked) {
             navh_decide_none();
             nav_step_say(why);
@@ -1167,22 +1161,16 @@ static void nav_floor(int dir)
     int storey = 0, found = 0;
     char seen[512] = "";
     g_floor_check_at = GetTickCount64() + FLOOR_GAME_CHECK_MS;
-    Fault f;
-    __try { found = floor_next(&g, tx, ty, from, dir, &to, &storey, seen, sizeof seen); }
-    __except (fault_note(GetExceptionInformation(), &f)) {
-        fault_log("nav: floor key", &f, NULL);
-        found = 0;
-    }
+    GUARDED("nav: floor key",
+            found = floor_next(&g, tx, ty, from, dir, &to, &storey, seen, sizeof seen),
+            found = 0);
     if (!found) {
         logf_("nav: %s at %d, %d from %.1f -- no floor that way (%s)\n",
               dir > 0 ? "F" : "C", tx, ty, from, seen);
         char missed[128] = "", say[160];
-        Fault f2;
-        __try { floor_missed(tx, ty, from, 0, from, dir, missed, sizeof missed); }
-        __except (fault_note(GetExceptionInformation(), &f2)) {
-            fault_log("nav: floor missed", &f2, NULL);
-            missed[0] = 0;
-        }
+        GUARDED("nav: floor missed",
+                floor_missed(tx, ty, from, 0, from, dir, missed, sizeof missed),
+                missed[0] = 0);
         _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s",
                     dir > 0 ? "No floor above here." : "No floor below here.",
                     missed[0] ? " " : "", missed);
@@ -1204,12 +1192,9 @@ static void nav_floor(int dir)
         tile_height_step(to - from, g_step_note, sizeof g_step_note);
     {
         char missed[128] = "";
-        Fault f2;
-        __try { floor_missed(tx, ty, from, 1, to, dir, missed, sizeof missed); }
-        __except (fault_note(GetExceptionInformation(), &f2)) {
-            fault_log("nav: floor missed", &f2, NULL);
-            missed[0] = 0;
-        }
+        GUARDED("nav: floor missed",
+                floor_missed(tx, ty, from, 1, to, dir, missed, sizeof missed),
+                missed[0] = 0);
         if (missed[0]) {
             size_t used = strlen(g_step_note);
             _snprintf_s(g_step_note + used, sizeof g_step_note - used, _TRUNCATE, " %s", missed);
@@ -1463,11 +1448,7 @@ static void blast_poll(void)
     if (!g_blast_due || GetTickCount64() < g_blast_due) return;
     g_blast_due = 0;
     if (!g_nav_aim) return;
-    Fault f;
-    __try { blast_say(); }
-    __except (fault_note(GetExceptionInformation(), &f)) {
-        fault_log("blast: read", &f, NULL);
-    }
+    GUARDED("blast: read", blast_say());
 }
 
 // ---- every frame in a mission ----------------------------------------------
@@ -1650,11 +1631,7 @@ static void nav_poll(void)
     for (int k = 0; k < 2; k++) {
         int down = (GetAsyncKeyState(radar_keys[k]) & 0x8000) != 0;
         if (down && !g_radar_down[k]) {
-            Fault f;
-            __try { radar(k == 1); }
-            __except (fault_note(GetExceptionInformation(), &f)) {
-                fault_log("radar", &f, NULL);
-            }
+            GUARDED("radar", radar(k == 1));
         }
         g_radar_down[k] = down;
     }
@@ -1702,11 +1679,7 @@ static void nav_poll(void)
 
     if (g_floor_check_at && GetTickCount64() >= g_floor_check_at) {
         g_floor_check_at = 0;
-        Fault f;
-        __try { floor_game_check(); }
-        __except (fault_note(GetExceptionInformation(), &f)) {
-            fault_log("nav: floor check", &f, NULL);
-        }
+        GUARDED("nav: floor check", floor_game_check());
     }
 
     // Delete: the selected soldier (soldier.h). Its only binding, Camera
@@ -1715,11 +1688,7 @@ static void nav_poll(void)
     static int soldier_key_down;
     int soldier_key = (GetAsyncKeyState(VK_DELETE) & 0x8000) != 0;
     if (soldier_key && !soldier_key_down) {
-        Fault f;
-        __try { soldier_readout(); }
-        __except (fault_note(GetExceptionInformation(), &f)) {
-            fault_log("soldier: readout", &f, NULL);
-        }
+        GUARDED("soldier: readout", soldier_readout());
     }
     soldier_key_down = soldier_key;
 
@@ -1748,34 +1717,10 @@ static void cursor_watch(void* self)
     // a few frames, and a quarter-second poll would drop quick ones.
     if (cursor_resolved()) nav_poll();
     combat_poll();
-    {
-        Fault f;
-        __try { soldier_poll(); }
-        __except (fault_note(GetExceptionInformation(), &f)) {
-            fault_log("soldier: poll", &f, NULL);
-        }
-    }
-    {
-        Fault f;
-        __try { mission_poll(); }
-        __except (fault_note(GetExceptionInformation(), &f)) {
-            fault_log("mission: poll", &f, NULL);
-        }
-    }
-    {
-        Fault f;
-        __try { sight_poll(); }
-        __except (fault_note(GetExceptionInformation(), &f)) {
-            fault_log("sight: poll", &f, NULL);
-        }
-    }
-    {
-        Fault f;
-        __try { info_settle(); }
-        __except (fault_note(GetExceptionInformation(), &f)) {
-            fault_log("info: settle", &f, NULL);
-        }
-    }
+    GUARDED("soldier: poll", soldier_poll());
+    GUARDED("mission: poll", mission_poll());
+    GUARDED("sight: poll", sight_poll());
+    GUARDED("info: settle", info_settle());
 
     ULONGLONG now = GetTickCount64();
     if (now - g_cursor_at < CURSOR_WATCH_MS) return;
@@ -1860,11 +1805,7 @@ ExecFn g_orig_cursormode;
 void __fastcall hook_cursormode(void* self, void* edx,
                                        void* stack, void* result)
 {
-    Fault f;
-    __try { cursor_watch(self); }
-    __except (fault_note(GetExceptionInformation(), &f)) {
-        fault_log("cursor: watch", &f, NULL);
-    }
+    GUARDED("cursor: watch", cursor_watch(self));
     g_orig_cursormode(self, edx, stack, result);
 }
 
@@ -2089,11 +2030,7 @@ static void nav_return_interface(void)
 
 static void nav_return_interface_guarded(void)
 {
-    Fault f;
-    __try { nav_return_interface(); }
-    __except (fault_note(GetExceptionInformation(), &f)) {
-        fault_log("nav: interface", &f, NULL);
-    }
+    GUARDED("nav: interface", nav_return_interface());
 }
 
 static void nav_lend_interface(void* hud)
@@ -2297,10 +2234,7 @@ void __fastcall hook_floorz(void* self, void* edx, void* stack, void* result)
     Fault f;
     int aimed = 0;
     if (g_nav_live) {
-        __try { aimed = nav_aim_pick(stack); }
-        __except (fault_note(GetExceptionInformation(), &f)) {
-            fault_log("nav: aim pick", &f, NULL);
-        }
+        GUARDED("nav: aim pick", aimed = nav_aim_pick(stack));
     }
     g_orig_floorz(self, edx, stack, result);
 
@@ -2432,11 +2366,7 @@ void __fastcall hook_computepath(void* self, void* edx, void* stack, void* resul
 {
     InterlockedIncrement(&g_path_calls);
     g_orig_computepath(self, edx, stack, result);
-    Fault f;
-    __try { nav_path_result(self, stack, result); }
-    __except (fault_note(GetExceptionInformation(), &f)) {
-        fault_log("nav: path result", &f, NULL);
-    }
+    GUARDED("nav: path result", nav_path_result(self, stack, result));
 }
 
 // Whether Flash took a click. InputEvent asks this, through
@@ -2652,11 +2582,7 @@ ExecFn g_orig_getengine;
 void __fastcall hook_getengine(void* self, void* edx, void* stack, void* result)
 {
     if (abar_pick_pending()) {
-        Fault f;
-        __try { abar_menu_pick(stack); }
-        __except (fault_note(GetExceptionInformation(), &f)) {
-            fault_log("abar: pick", &f, NULL);
-        }
+        GUARDED("abar: pick", abar_menu_pick(stack));
     }
     g_orig_getengine(self, edx, stack, result);
 }
@@ -2804,11 +2730,7 @@ ExecFn g_orig_worldinfo;
 void __fastcall hook_worldinfo(void* self, void* edx, void* stack, void* result)
 {
     if (g_nav_live && g_nav_aim) {
-        Fault f;
-        __try { nav_aim_lend(stack); }
-        __except (fault_note(GetExceptionInformation(), &f)) {
-            fault_log("nav: aim lend", &f, NULL);
-        }
+        GUARDED("nav: aim lend", nav_aim_lend(stack));
     }
     g_orig_worldinfo(self, edx, stack, result);
 }
@@ -2837,22 +2759,15 @@ void __fastcall hook_validpos(void* self, void* edx,
                                      void* stack, void* result)
 {
     int placed = 0;
-    Fault f;
     // Reaching here means the pick was accepted, so whatever was lent to make
     // it accepted has done its work and comes straight back out -- before the
     // native runs, and long before anything else on this frame reads it.
     nav_return_interface_guarded();
     if (g_nav_live) {
-        __try { placed = nav_substitute(stack); }
-        __except (fault_note(GetExceptionInformation(), &f)) {
-            fault_log("nav: substitute", &f, NULL);
-        }
+        GUARDED("nav: substitute", placed = nav_substitute(stack));
     }
     g_orig_validpos(self, edx, stack, result);
     if (placed) {
-        __try { nav_placed((const float*)result); }
-        __except (fault_note(GetExceptionInformation(), &f)) {
-            fault_log("nav: placed", &f, NULL);
-        }
+        GUARDED("nav: placed", nav_placed((const float*)result));
     }
 }

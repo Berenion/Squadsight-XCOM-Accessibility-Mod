@@ -519,14 +519,7 @@ int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     // After who stands there and before the cover: where the tile is comes
     // before what it offers. "Evac zone. Low cover. Seen by 1."
     int evac = 0;
-    {
-        Fault f;
-        __try { evac = evac_at(tx, ty, floor); }
-        __except (fault_note(GetExceptionInformation(), &f)) {
-            fault_log("tile: evac", &f, NULL);
-            evac = 0;
-        }
-    }
+    GUARDED("tile: evac", evac = evac_at(tx, ty, floor), evac = 0);
     _snprintf_s(say, say_sz, _TRUNCATE, "%s%s%s%s", who, who[0] ? " " : "",
                 evac ? "Evac zone. " : "", what);
 

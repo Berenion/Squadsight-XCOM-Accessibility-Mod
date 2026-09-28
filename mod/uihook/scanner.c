@@ -307,12 +307,8 @@ static void scan_add_evac(void)
     int nx, ny;
     float nz;
     int found = 0;
-    Fault f;
-    __try { found = evac_nearest(g_scan_from[0], g_scan_from[1], &nx, &ny, &nz); }
-    __except (fault_note(GetExceptionInformation(), &f)) {
-        fault_log("scan: evac", &f, NULL);
-        found = 0;
-    }
+    GUARDED("scan: evac", found = evac_nearest(g_scan_from[0], g_scan_from[1], &nx, &ny, &nz),
+            found = 0);
     if (!found) return;
     float at[3] = { grid_centre_x(&g_scan_grid, nx),
                     grid_centre_y(&g_scan_grid, ny), nz };

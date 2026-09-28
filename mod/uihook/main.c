@@ -5334,8 +5334,7 @@ static void capture(const char* tag, LONG n, void* stack)
     if (tls_busy) return;
     tls_busy = 1;
     tls_where[0] = 0;
-    __try { capture_body(tag, n, stack); }
-    __finally { tls_busy = 0; }
+    CLEARED(capture_body(tag, n, stack), tls_busy = 0);
 }
 
 // Each native gets its own thunk, since each has its own original to call;
@@ -6160,12 +6159,8 @@ void combat_poll(void)
         g_hurt = NULL;
         char name[64];
         strncpy_s(name, sizeof name, u->name, _TRUNCATE);
-        Fault f;
         int gone = 0;
-        __try { gone = unit_gone(u, flag); }
-        __except (fault_note(GetExceptionInformation(), &f)) {
-            fault_log("combat: gone", &f, NULL);
-        }
+        GUARDED("combat: gone", gone = unit_gone(u, flag));
         if (gone && name[0]) {
             char say[96];
             _snprintf_s(say, sizeof say, _TRUNCATE, "%s down.", name);
@@ -6911,14 +6906,9 @@ static int info_poll_body(void)
 
 int info_poll(void)
 {
-    Fault f;
-    __try { return info_poll_body(); }
-    __except (fault_note(GetExceptionInformation(), &f)) {
-        fault_log("info: poll", &f, NULL);
-        info_close();
-        g_info_fresh = 1;
-        return 0;
-    }
+    int got = 0;
+    GUARDED("info: poll", got = info_poll_body(), info_close(); g_info_fresh = 1; got = 0);
+    return got;
 }
 
 // ---- enemies coming into sight (sight.h) ------------------------------------
@@ -7083,32 +7073,10 @@ static DWORD WINAPI review_pump(LPVOID unused)
     while (!g_review_stop) {
         Sleep(REVIEW_POLL_MS);
         if (!game_has_focus()) continue;
-        {
-            Fault f;
-            __try { status_poll(); }
-            __except (fault_note(GetExceptionInformation(), &f)) {
-                fault_log("status: poll", &f, NULL);
-            }
-        }
-        {
-            Fault f;
-            __try { hooks_sweep_retry(); }
-            __except (fault_note(GetExceptionInformation(), &f)) {
-                fault_log("hooks: late UFunction pass", &f, NULL);
-            }
-        }
-        {
-            Fault f;
-            __try { alert_settle(); }
-            __except (fault_note(GetExceptionInformation(), &f)) {
-                fault_log("alert: settle", &f, NULL);
-            }
-        }
-        Fault f;
-        __try { review_poll(); }
-        __except (fault_note(GetExceptionInformation(), &f)) {
-            fault_log("review: poll", &f, NULL);
-        }
+        GUARDED("status: poll", status_poll());
+        GUARDED("hooks: late UFunction pass", hooks_sweep_retry());
+        GUARDED("alert: settle", alert_settle());
+        GUARDED("review: poll", review_poll());
     }
     return 0;
 }
