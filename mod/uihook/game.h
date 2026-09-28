@@ -48,6 +48,9 @@ int unit_is_live(void* obj);
 // SHIVs, each kind of alien), so `Location` was walked for afresh on nearly
 // every unit -- up to 105 ms of a frame, and 20-30 frames a second against 58
 // with the hearts off (2026-09-23, 21:58 log). Oldest out when full.
+// Children walked at most, per class, when a walk has no other end.
+#define MAX_FIELDS   64
+
 #define FIELD_HITS   8
 #define FIELD_MISSES 4
 typedef struct {
