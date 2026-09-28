@@ -1550,6 +1550,1420 @@ static void unlock_note(LONG n, const char* tag, const char* obj_name, const cha
     // The images, and anything else, are not for saying.
 }
 
+// One captured call, as capture_body has read it: the names, the frame, and
+// what its parameters and locals held. Handed to each screen family's
+// handler, which answers 1 when the call is finished with and 0 to let the
+// general path below have it.
+typedef struct {
+    const char* tag;
+    LONG        n;
+    void*       stack;
+    void*       node;
+    void*       object;
+    uint8_t*    locals;
+    const char* obj_name;
+    const char* fn_name;
+    Payload*    p;
+} Call;
+
+// The families a call is routed to, decided once from its object's name so
+// that a call pays only for its own family's tests: a unit flag or the
+// tactical HUD, drawn every frame, used to pass every base screen's test on
+// the way to its own (refactor step 4 in HANDOFF.md). A family's prefixes
+// may catch more than its handler takes -- the handler tests the names
+// again -- but never less.
+typedef enum { FAM_OTHER, FAM_BASE } CallFamily;
+
+static int name_is(const char* name, const char* prefix)
+{
+    return strncmp(name, prefix, strlen(prefix)) == 0;
+}
+
+static CallFamily call_family(const char* o)
+{
+    if (o[0] != 'U' || o[1] != 'I') return FAM_OTHER;
+    // On the letter after "UI", so a name meets only the prefixes that
+    // share it.
+    switch (o[2]) {
+    case 'B':
+        if (name_is(o, "UIBaseFinances") || name_is(o, "UIBuildFacilities") ||
+            name_is(o, "UIBuildItem"))
+            return FAM_BASE;
+        break;
+    case 'C': if (name_is(o, "UICyberneticsLab")) return FAM_BASE; break;
+    case 'F': if (name_is(o, "UIFoundry")) return FAM_BASE; break;
+    case 'G':
+        if (name_is(o, "UIGeneLab") || name_is(o, "UIGreyMarket")) return FAM_BASE;
+        break;
+    case 'H': if (name_is(o, "UIHiring")) return FAM_BASE; break;
+    case 'I':
+        if (name_is(o, "UIInputDialogue") || name_is(o, "UIInterceptionEngagement"))
+            return FAM_BASE;
+        break;
+    case 'M':
+        if (name_is(o, "UIManufacturing") || name_is(o, "UIMedals")) return FAM_BASE;
+        break;
+    case 'O':
+        if (name_is(o, "UIOTS") || name_is(o, "UIObjectivesScreen_")) return FAM_BASE;
+        break;
+    case 'P': if (name_is(o, "UIPsiLabs")) return FAM_BASE; break;
+    case 'S':
+        if (name_is(o, "UISituationRoom") || name_is(o, "UISoldierGeneMods") ||
+            name_is(o, "UIStrategyHUD_") || name_is(o, "UIStrategyComponent_"))
+            return FAM_BASE;
+        break;
+    case 'T': if (name_is(o, "UITellMeMore")) return FAM_BASE; break;
+    case 'W': if (name_is(o, "UIWidgetHelper")) return FAM_BASE; break;
+    }
+    return FAM_OTHER;
+}
+
+// The headquarters' screens: the status panels, Engineering, the
+// interception, the base grid and its queue, the Officer Training School,
+// the Gray Market, medals, a text box, the Database, finances, the labs,
+// gene mods, Build Items, hiring, an order, and the Situation Room.
+static int base_call(const Call* c)
+{
+    const char* tag = c->tag;
+    LONG n = c->n;
+    void* stack = c->stack;
+    void* node = c->node;
+    void* object = c->object;
+    uint8_t* locals = c->locals;
+    const char* obj_name = c->obj_name;
+    const char* fn_name = c->fn_name;
+    Payload* p = c->p;
+
+    // The base's status panels. See hq.h. Kept for Delete; they were never
+    // said, and a lone resource line risked being spoken as an announcement.
+    // UIStrategyHUD_0 itself, not its panels (UIStrategyHUD_FacilityMenu_0
+    // and the rest share the prefix): the name's next character is a digit.
+    if (strncmp(obj_name, "UIStrategyHUD_", 14) == 0 &&
+        obj_name[14] >= '0' && obj_name[14] <= '9') {
+        if (strcmp(fn_name, "ClearResources") == 0) { hq_status_resources_clear(); return 1; }
+        if (strcmp(fn_name, "AS_SetHumanResources") == 0) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            hq_status_human(a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "");
+            logf_("[%ld] %s %s.%s  STAFF \"%s\" \"%s\"\n", n, tag, obj_name, fn_name,
+                  a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "");
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_AddResource") == 0 && p->nstrings) {
+            hq_status_resource(p->strings[0]);
+            return 1;
+        }
+    }
+    if (strncmp(obj_name, "UIStrategyComponent_Clock", 25) == 0 &&
+        strcmp(fn_name, "AS_SetDateTime") == 0) {
+        static FrameArgs a;
+        frame_args(node, locals, &a);
+        hq_status_date(a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
+                       a.ns > 2 ? a.s[2] : "", a.ns > 3 ? a.s[3] : "");
+        // A tick as each day passes (hq_day_passed), so time moving on the
+        // geoscape -- scanning above all -- is heard without asking.
+        if (hq_day_passed(a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "", GetTickCount64())) {
+            logf_("[%ld] %s %s.%s  DAY \"%s %s\"%s\n", n, tag, obj_name, fn_name,
+                  a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
+                  settings_get(SET_DAYS) ? "" : " (tick off)");
+            if (settings_get(SET_DAYS)) audio_cue(HEART_TICK, 1);
+        }
+        return 1;
+    }
+    if (strncmp(obj_name, "UIStrategyComponent_EventList", 29) == 0) {
+        if (strcmp(fn_name, "UpdateData") == 0) { hq_status_events_clear(object); return 1; }
+        if (strcmp(fn_name, "AS_AddEvent") == 0) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            hq_status_event(object, a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
+                            a.ns > 2 ? a.s[2] : "");
+            // Logged, so a run shows which panel drew what and when: the
+            // status reads the list drawn last.
+            logf_("[%ld] %s %s.%s  EVENT \"%s, %s %s\"\n", n, tag, obj_name, fn_name,
+                  a.ns > 0 ? a.s[0] : "", a.ns > 2 ? a.s[2] : "", a.ns > 1 ? a.s[1] : "");
+            return 1;
+        }
+    }
+
+    // ---- Engineering ---------------------------------------------------------
+    //
+    // Its submenu is a facility submenu like any other. What it adds is read
+    // here, from the game's full workflow (UIStrategyHUD_FSM_Engineering,
+    // UIBuildItem, UIManufacturing, UIStrategyHUD_BuildQueue, and
+    // XGEngineeringUI / XGManufacturingUI behind them). See hq.h.
+    if (strncmp(obj_name, "UIStrategyHUD_FSM_Engineering", 29) == 0 ||
+        strncmp(obj_name, "UIBuildItem", 11) == 0 ||
+        strncmp(obj_name, "UIManufacturing", 15) == 0 ||
+        strncmp(obj_name, "UIFoundry", 9) == 0)
+        g_eng_at = GetTickCount64();
+
+    // The interception (UIInterceptionEngagement): a fight played back in
+    // real time from a script the game has already rolled. Nothing in it was
+    // said -- ship 0 is the UFO, 1 the interceptor -- and everything it shows
+    // comes through these calls:
+    //     AS_SetHP(ship, hp, bool initialization, weaponID)
+    //         -- initialization once per ship in OnInit, the full hull; then
+    //            once per hit as the damage lands (Playback)
+    //     AS_SetAimButton(label, state) / AS_SetDodgeButton(label, state) /
+    //     AS_SetTrackButton(label, trackingText, state)
+    //         -- 0 available, 2 none left, 3 not researched
+    //     AS_BeginIntroSequence() -- the link comes up; the fight follows
+    //     AS_SetEnemyEscapeTimer(tenths) -- "CONTACT LOSS IN", each tenth
+    //     AS_DisplayEffectEvent(type, description, bool enabled, data)
+    //         -- 0 aim, 1 dodge, 2 track, on when used and off when spent
+    //     AS_SetAbortLabel("ABORTING...") / ("ABORTED")
+    //     AS_ShowResults(report, battleResult, leaveLabel)
+    // and AS_AttackEvent / AS_MovementEvent for every shot, which the hits
+    // already cover. The keys are input.c's 1 to 4.
+    if (strncmp(obj_name, "UIInterceptionEngagement", 24) == 0) {
+        static int hp[2], hp_max[2], ability[3] = { 3, 3, 3 }, secs_said = -1;
+        static char title[128];
+        static const char* const names[3] = { "Aim", "Dodge", "Track" };
+        char say[FRAME_ARG_TEXT + 256];
+        say[0] = 0;
+        int now = 1;                    // said at once, cutting what was said
+        if (strcmp(fn_name, "AS_SetResultsTitleLabels") == 0) {
+            frame_string(node, locals, 0, title, sizeof title);
+            hp[0] = hp[1] = hp_max[0] = hp_max[1] = 0;
+            ability[0] = ability[1] = ability[2] = 3;
+            secs_said = -1;
+        } else if (strcmp(fn_name, "AS_SetHP") == 0 && p->nnumbers >= 2) {
+            int ship = (int)p->numbers[0], v = (int)p->numbers[1];
+            if (ship < 0 || ship > 1) return 1;
+            if (p->nbools && p->bools[0]) {
+                hp[ship] = hp_max[ship] = v;
+            } else if (v != hp[ship]) {
+                hp[ship] = v;
+                int pct = hp_max[ship] > 0 ? (v * 100 + hp_max[ship] - 1) / hp_max[ship] : 0;
+                if (v <= 0)
+                    strcpy_s(say, sizeof say, ship == 0 ? "UFO down." : "Interceptor shot down.");
+                else if (ship == 0)
+                    _snprintf_s(say, sizeof say, _TRUNCATE, "UFO hit, %d%%.", pct);
+                else
+                    _snprintf_s(say, sizeof say, _TRUNCATE, "We're hit, %d%%.", pct);
+            }
+        } else if ((strcmp(fn_name, "AS_SetAimButton") == 0 ||
+                    strcmp(fn_name, "AS_SetDodgeButton") == 0 ||
+                    strcmp(fn_name, "AS_SetTrackButton") == 0) && p->nnumbers) {
+            int k = fn_name[6] == 'A' ? 0 : fn_name[6] == 'D' ? 1 : 2;
+            ability[k] = (int)p->numbers[0];
+        } else if (strcmp(fn_name, "AS_BeginIntroSequence") == 0) {
+            size_t w = 0;
+            w += _snprintf_s(say, sizeof say, _TRUNCATE, "%s. UFO %d, interceptor %d.",
+                             title[0] ? title : "Interception", hp_max[0], hp_max[1]);
+            int any = 0;
+            for (int k = 0; k < 3; k++) {
+                if (ability[k] != 0) continue;
+                w += _snprintf_s(say + w, sizeof say - w, _TRUNCATE, "%s%d %s",
+                                 any ? ", " : " ", k + 1, names[k]);
+                any = 1;
+            }
+            _snprintf_s(say + w, sizeof say - w, _TRUNCATE, "%s4 Abort.", any ? ", " : " ");
+        } else if (strcmp(fn_name, "AS_SetEnemyEscapeTimer") == 0 && p->nnumbers) {
+            // Whole seconds, rounded up: 4.3 s left is "5" until it is 4.
+            int secs = ((int)p->numbers[0] + 9) / 10;
+            static const int marks[] = { 10, 5, 3, 2, 1 };
+            if (secs_said < 0) {
+                _snprintf_s(say, sizeof say, _TRUNCATE, "Contact loss in %d seconds.", secs);
+                now = 0;
+            } else if (secs > secs_said) {
+                secs_said = secs;       // tracking ended and the clock was reset
+            } else {
+                for (int i = 0; i < 5; i++)
+                    if (secs <= marks[i] && secs_said > marks[i]) {
+                        _snprintf_s(say, sizeof say, _TRUNCATE, "%d.", secs);
+                        break;
+                    }
+            }
+            if (secs_said < 0 || say[0]) secs_said = secs;
+        } else if (strcmp(fn_name, "AS_DisplayEffectEvent") == 0 && p->nnumbers) {
+            int k = (int)p->numbers[0];
+            if (p->nbools && p->bools[0]) {
+                frame_lines(node, locals, "effectDescription", say, sizeof say);
+            } else if (k >= 0 && k < 3) {
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s over.", names[k]);
+            }
+        } else if (strcmp(fn_name, "AS_SetAbortLabel") == 0) {
+            char label[64];
+            frame_string(node, locals, 0, label, sizeof label);
+            if (_strnicmp(label, "ABORTING", 8) == 0) strcpy_s(say, sizeof say, label);
+        } else if (strcmp(fn_name, "AS_ShowResults") == 0) {
+            char report[FRAME_ARG_TEXT], leave[64];
+            frame_lines(node, locals, "report", report, sizeof report);
+            frame_string(node, locals, 1, leave, sizeof leave);
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s", report,
+                        leave[0] ? " Enter: " : "", leave, leave[0] ? "." : "");
+        } else if (strcmp(fn_name, "AS_AttackEvent") == 0 ||
+                   strcmp(fn_name, "AS_MovementEvent") == 0) {
+            return 1;                     // every shot; the hits are said
+        }
+        if (say[0]) {
+            logf_("[%ld] %s %s.%s  INTERCEPT \"%s\"\n", n, tag, obj_name, fn_name, say);
+            if (g_speak && !muted()) {
+                if (now) { speech_cancel_pending(); speech_say_now(say); }
+                else speech_say(say);
+            }
+        } else if (strcmp(fn_name, "AS_SetEnemyEscapeTimer") != 0) {
+            logf_("[%ld] %s %s.%s  INTERCEPT (kept)\n", n, tag, obj_name, fn_name);
+        }
+        return 1;
+    }
+
+    // Build Facilities: the base's grid. See hq.h. The cards are kept, and
+    // the cursor's tile said with the cursor's text. OnInit and GoToView(0)
+    // both draw the cursor on the way in, so a second drawing of the same
+    // tile and text straight after the first is not said again.
+    if (strncmp(obj_name, "UIBuildFacilities", 17) == 0) {
+        static FrameArgs a;
+        float fx, fy;
+        int at = frame_float(node, locals, "xloc", &fx) && frame_float(node, locals, "yloc", &fy);
+        if (strcmp(fn_name, "AS_UpdateFacilityCard") == 0 && at) {
+            frame_args(node, locals, &a);
+            hq_base_card((int)fx, (int)fy, a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "");
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetCursor") == 0 && at) {
+            static char text[FRAME_ARG_TEXT], say[FRAME_ARG_TEXT + 256], said[sizeof say];
+            static ULONGLONG said_at;
+            frame_lines(node, locals, "DisplayText", text, sizeof text);
+            hq_base_cursor((int)fx, (int)fy, text, say, sizeof say);
+            ULONGLONG t = GetTickCount64();
+            if (strcmp(say, said) == 0 && t - said_at < 500) {
+                logf_("[%ld] %s %s.%s  BASE cursor redrawn\n", n, tag, obj_name, fn_name);
+                said_at = t;
+                return 1;
+            }
+            strncpy_s(said, sizeof said, say, _TRUNCATE);
+            said_at = t;
+            logf_("[%ld] %s %s.%s  BASE cursor -> \"%s\"\n", n, tag, obj_name, fn_name, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return 1;
+        }
+    }
+
+    // The build queue, drawn beside Engineering and the Foundry. UpdateData
+    // clears it (Invoke "clear", the only call in that frame) and adds one
+    // order per AS_AddProjectToQueue, with no index; the selection is
+    // Invoke("setSelected", [string index]) from RealizeSelected. Left to the
+    // general path, the four column headings of AS_SetQueueTitle were a list,
+    // every order replaced the one before, the order's state (3 or 4) was
+    // taken for its slot, and a lone "NO CURRENT PROJECTS" was said out of
+    // nowhere at the base.
+    if (strncmp(obj_name, "UIStrategyHUD_BuildQueue", 24) == 0) {
+        if (strcmp(fn_name, "UpdateData") == 0) {
+            focus_begin(object);
+            hq_queue_clear();
+            logf_("[%ld] %s %s.%s  QUEUE cleared\n", n, tag, obj_name, fn_name);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_AddProjectToQueue") == 0) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            char row[FOCUS_MAX_LABEL];
+            hq_queue_row(a.ns > 0 ? a.s[0] : "", a.ns > 2 ? a.s[2] : "",
+                         a.ns > 3 ? a.s[3] : "", row, sizeof row);
+            focus_add(object, row);
+            hq_queue_add(row);
+            logf_("[%ld] %s %s.%s  QUEUE %d = \"%s\"\n", n, tag, obj_name, fn_name,
+                  focus_count(object) - 1, row);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetQueueTitle") == 0) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            hq_queue_title(a.ns > 0 ? a.s[0] : "");
+            logf_("[%ld] %s %s.%s  QUEUE title \"%s\"\n", n, tag, obj_name, fn_name,
+                  a.ns > 0 ? a.s[0] : "");
+            return 1;
+        }
+        // What the queue offers, into 0's list. Y (303) on the Engineering
+        // submenu starts Review an order when there is one
+        // (UIStrategyHUD_FSM_Engineering, case 303), and 6 sends Y there.
+        // With a gamepad the game names it with its glyph; in mouse mode it
+        // says "CLICK TO EDIT" with none, or "QUEUE LOCKED" while it cannot
+        // be edited (an order open, the Foundry, the queue already active).
+        // Only the English lock is told apart: elsewhere a locked queue is
+        // listed too, and 6 on it does nothing.
+        if (strcmp(fn_name, "AS_SetHelp") == 0) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            const char* label = a.ns > 0 ? a.s[0] : "";
+            const char* icon  = a.ns > 1 ? a.s[1] : "";
+            if (!*label || _stricmp(label, "QUEUE LOCKED") == 0)
+                help_set(object, 0, "", "", 0);
+            else
+                help_set(object, 0, *icon ? label : "Review an order", "Icon_Y_TRIANGLE", 0);
+            logf_("[%ld] %s %s.%s  QUEUE help \"%s\" on %s\n", n, tag, obj_name, fn_name,
+                  label, *icon ? icon : "(no icon)");
+            return 1;
+        }
+        // Review an order: the queue takes the arrows until Enter opens the
+        // order or Escape gives them back. It starts with nothing selected
+        // (DeactivateEditing left -1), so the first Down lands on the first
+        // order and the first Up on the last.
+        if (strcmp(fn_name, "ActivateEditing") == 0) {
+            g_queue_editing = 1;
+            char say[128];
+            _snprintf_s(say, sizeof say, _TRUNCATE, "Review an order, %d in the queue",
+                        focus_count(object));
+            logf_("[%ld] %s %s.%s  QUEUE reviewing \"%s\"\n", n, tag, obj_name, fn_name, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return 1;
+        }
+        if (strcmp(fn_name, "DeactivateEditing") == 0 || strcmp(fn_name, "OnAccept") == 0) {
+            g_queue_editing = 0;
+            logf_("[%ld] %s %s.%s  QUEUE reviewing ends\n", n, tag, obj_name, fn_name);
+            return 1;
+        }
+        // Every redraw selects the first order when there is one; only a
+        // move while reviewing is news.
+        if (strcmp(fn_name, "RealizeSelected") == 0) {
+            int idx;
+            if (!g_queue_editing || !string_index(p, &idx) || idx < 0) {
+                logf_("[%ld] %s %s.%s  QUEUE selection (not reviewing)\n",
+                      n, tag, obj_name, fn_name);
+                return 1;
+            }
+            focus_announce(n, tag, obj_name, fn_name, object, idx);
+            return 1;
+        }
+    }
+
+    // The Officer Training School (UIOTS). DrawTable sends AS_Clear, then per
+    // upgrade
+    //     AS_AddOption(int i, tactic, cost, bool disabled)
+    // and selects one; each selection (RealizeSelected) is
+    //     AS_SetListSelection(string i)   -- the index as a STRING
+    //     AS_SetHelp(why it is locked, or "")
+    //     AS_SetPurchaseButtonText        -- mouse mode only
+    //     AS_UpdateInfo(image label, description)
+    // An upgrade (XGOTSUI.BuildTableItem) is bought -- disabled, cost
+    // "PURCHASED" -- locked by a rank not reached -- disabled, the help says
+    // which -- or dear: not disabled, only its cost drawn red, and Enter
+    // still opens the confirm dialogue before the bad sound. On the general
+    // path the list was slots, the moves said nothing and the panel read the
+    // image label: "_squadSizeI. Squad size increased to 5 soldiers."
+    // Up/Down wrap, Enter buys (a dialogue confirms), Escape leaves; after a
+    // purchase the table is drawn again.
+    if (strncmp(obj_name, "UIOTS", 5) == 0) {
+        #define OTS_ROWS 16
+        static char s_title[96], s_help[512];
+        static char s_row[OTS_ROWS][FOCUS_MAX_LABEL];
+        static int  s_n, s_sel, s_fresh;
+        if (strcmp(fn_name, "AS_SetTitles") == 0) {
+            frame_string(node, locals, 0, s_title, sizeof s_title);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_Clear") == 0) {
+            s_n = 0;
+            s_fresh = 1;
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_AddOption") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (i < 0 || i >= OTS_ROWS) return 1;
+            static FrameArgs a;
+            static char raw[FRAME_ARG_TEXT];
+            frame_args(node, locals, &a);
+            // The cost as drawn: red is XGOTSUI's state 3, not enough money.
+            int dear = frame_local_raw(node, locals, "sRequirement", raw, sizeof raw) &&
+                       font_hue(raw) == HUE_BAD;
+            int disabled = p->nbools && p->bools[0];
+            char cost[64];
+            size_t w = 0;
+            const char* c = a.ns > 1 ? a.s[1] : "";
+            for (; *c && w + 1 < sizeof cost; c++) {          // the section sign, C2 A7
+                if ((unsigned char)c[0] == 0xC2 && (unsigned char)c[1] == 0xA7) { c++; continue; }
+                cost[w++] = *c;
+            }
+            cost[w] = 0;
+            int bought = disabled && cost[0] && !(cost[0] >= '0' && cost[0] <= '9');
+            _snprintf_s(s_row[i], FOCUS_MAX_LABEL, _TRUNCATE, "%s, %s%s%s", a.s[0],
+                        bought ? "purchased" : cost, !bought && cost[0] ? " credits" : "",
+                        bought ? "" : disabled ? ", locked"
+                                   : dear ? ", not enough credits" : "");
+            if (i >= s_n) s_n = i + 1;
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetListSelection") == 0) {
+            char id[16];
+            frame_string(node, locals, 0, id, sizeof id);
+            s_sel = atoi(id);
+            s_help[0] = 0;
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetHelp") == 0) {
+            frame_string(node, locals, 0, s_help, sizeof s_help);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetPurchaseButtonText") == 0) return 1;
+        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
+            char desc[1024];
+            frame_string(node, locals, 1, desc, sizeof desc);
+            char say[2048];
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s.%s%s %s%s",
+                        s_fresh && s_title[0] ? s_title : "", s_fresh && s_title[0] ? ". " : "",
+                        s_sel >= 0 && s_sel < s_n ? s_row[s_sel] : "?",
+                        s_help[0] ? " " : "", s_help, desc,
+                        s_fresh ? " Enter purchases." : "");
+            s_fresh = 0;
+            logf_("[%ld] %s %s.%s  OTS %d \"%s\"\n", n, tag, obj_name, fn_name, s_sel, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return 1;
+        }
+    }
+
+    // The Gray Market (UIGreyMarket). Every change redraws all of it
+    // (UpdateData):
+    //     AS_SetTitle; AS_SetHeader(i, text) x4 -- "In Storage", "", "Sell",
+    //         and the sale's total ("§0")
+    //     AS_AddItem(int i, storage, name, price, sell, total, int, bool canSell)
+    //         per item; storage is what stays after the sale, "-" for none;
+    //         sell "-" until one is marked, total "" until then
+    //     AS_SetListSelection(int i)
+    //     AS_UpdateInfo(Desc, image): "NAME\nNOT RESEARCHED\nCannot sell this
+    //         item\nsummary", the middle two only when they apply
+    // Up/Down move (OnHighlightUp/Down), Right marks one more to sell
+    // (OnSellItem), Left takes one back (OnReturnItem), Enter completes the
+    // sale at once -- no dialogue -- and Escape leaves, handing everything
+    // back. A refused change plays the bad sound and draws nothing. On the
+    // general path the rows were slots and every move said "ITEM n
+    // unresolved". So each draw is said by what changed: the item on a move;
+    // the count and the total on Right or Left, which change the item's stock
+    // with its count; the sale on Enter, which empties the total and leaves
+    // the stock as it was.
+    if (strncmp(obj_name, "UIGreyMarket", 12) == 0) {
+        #define GREY_ROWS 48
+        typedef struct { char name[96], store[16], price[32], sell[16], total[32]; int can; } GreyRow;
+        static GreyRow s_row[GREY_ROWS];
+        static GreyRow s_prev;                  // the selected row as last said
+        static char s_title[96], s_head_total[32], s_prev_total[32];
+        static int  s_n, s_sel = -1;
+        static void* s_obj;                     // a new screen is a new visit
+        if (object != s_obj) {
+            s_obj = object;
+            s_n = 0;
+            s_sel = -1;
+            memset(&s_prev, 0, sizeof s_prev);
+            s_prev_total[0] = 0;
+        }
+        if (strcmp(fn_name, "AS_SetTitle") == 0) {
+            frame_string(node, locals, 0, s_title, sizeof s_title);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetHeader") == 0 && p->nnumbers) {
+            if ((int)p->numbers[0] == 3) {
+                char t[64];
+                frame_string(node, locals, 0, t, sizeof t);
+                money_text(t, s_head_total, sizeof s_head_total);
+            }
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_AddItem") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (i < 0 || i >= GREY_ROWS) return 1;
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            GreyRow* r = &s_row[i];
+            strncpy_s(r->store, sizeof r->store, a.ns > 0 ? a.s[0] : "", _TRUNCATE);
+            strncpy_s(r->name, sizeof r->name, a.ns > 1 ? a.s[1] : "", _TRUNCATE);
+            money_text(a.ns > 2 ? a.s[2] : "", r->price, sizeof r->price);
+            strncpy_s(r->sell, sizeof r->sell, a.ns > 3 ? a.s[3] : "", _TRUNCATE);
+            money_text(a.ns > 4 ? a.s[4] : "", r->total, sizeof r->total);
+            r->can = a.nb > 0 ? a.b[a.nb - 1] : 1;
+            if (i >= s_n) s_n = i + 1;
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetListSelection") == 0 && p->nnumbers) {
+            s_sel = (int)p->numbers[0];
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
+            // The description a line at a time; its first line is the name,
+            // which the item already says.
+            static char raw[FRAME_ARG_TEXT];
+            char info[1024] = "";
+            if (!frame_local_raw(node, locals, "Desc", raw, sizeof raw))
+                frame_string(node, locals, 0, raw, sizeof raw);
+            const GreyRow* r = s_sel >= 0 && s_sel < s_n ? &s_row[s_sel] : NULL;
+            int line = 0;
+            for (char* part = raw; part && *part; line++) {
+                char* nl = strchr(part, '\n');
+                if (nl) *nl = 0;
+                strip_markup(part);
+                size_t pl = strlen(part);
+                if ((line > 0 || !r) && pl) {
+                    size_t u = strlen(info);
+                    _snprintf_s(info + u, sizeof info - u, _TRUNCATE, "%s%s%s", u ? " " : "",
+                                part, strchr(".!?", part[pl - 1]) ? "" : ".");
+                }
+                part = nl ? nl + 1 : NULL;
+            }
+
+            int marked = r && r->sell[0] && strcmp(r->sell, "-") != 0;
+            char item[512] = "";
+            if (r)
+                _snprintf_s(item, sizeof item, _TRUNCATE, "%s, %s in storage%s%s%s%s%s%s%s.",
+                            r->name, strcmp(r->store, "-") == 0 ? "none" : r->store,
+                            r->can && r->price[0] ? ", " : "", r->can ? r->price : "",
+                            r->can && r->price[0] ? " each" : "",
+                            marked ? ", selling " : "", marked ? r->sell : "",
+                            marked ? " for " : "", marked ? r->total : "");
+
+            int fresh = !s_prev.name[0];
+            int same = r && strcmp(r->name, s_prev.name) == 0;
+            int counted = same && strcmp(r->sell, s_prev.sell) != 0 &&
+                          strcmp(r->store, s_prev.store) != 0;
+            int sold = !counted && s_prev_total[0] && strcmp(s_prev_total, s_head_total) != 0 &&
+                       (!s_head_total[0] || strncmp(s_head_total, "0 ", 2) == 0);
+            char say[2048] = "";
+            if (fresh)
+                _snprintf_s(say, sizeof say, _TRUNCATE,
+                            "%s%s%s %s Right sells one more, Left takes one back, "
+                            "Enter completes the sale.",
+                            s_title, s_title[0] ? ". " : "", item, info);
+            else if (sold)
+                _snprintf_s(say, sizeof say, _TRUNCATE, "Sold for %s. %s", s_prev_total, item);
+            else if (counted && marked)
+                _snprintf_s(say, sizeof say, _TRUNCATE, "Selling %s, %s. Total %s.",
+                            r->sell, r->total, s_head_total);
+            else if (counted)
+                _snprintf_s(say, sizeof say, _TRUNCATE, "None selling. Total %s.",
+                            s_head_total[0] ? s_head_total : "0 credits");
+            else if (!same)
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s %s", item, info);
+            if (r) s_prev = *r;
+            else memset(&s_prev, 0, sizeof s_prev);
+            if (!s_prev.name[0]) strcpy_s(s_prev.name, sizeof s_prev.name, "-");
+            strncpy_s(s_prev_total, sizeof s_prev_total, s_head_total, _TRUNCATE);
+            logf_("[%ld] %s %s.%s  GREY %d \"%s\"\n", n, tag, obj_name, fn_name, s_sel, say);
+            if (say[0]) {
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_now(say);
+            }
+            return 1;
+        }
+    }
+
+    // Medals (UIMedals, Barracks -> Medals). One screen, several views, each
+    // opened with AS_SetDisplayMode(view) (GoToView):
+    //   0  the medals: AS_SetTitle("CURRENT MEDALS"), then per medal
+    //      AS_SetInfo(i, name, status, bool locked, icon) -- a locked one is
+    //      only "LOCKED". No selection is sent until a move.
+    //   1  one medal: AS_SetEditingTitle("EDIT MEDAL", name, "Awards
+    //      remaining: 1"), AS_SetEditingButton(i, text, bool enabled) x3 --
+    //      RENAME MEDAL, ASSIGN POWER (or POWER ASSIGNED), AWARD MEDAL --
+    //      AS_SetEditingHelp (the power, or why it cannot be awarded yet),
+    //      AS_SetFocus(i).
+    //   2  its power: AS_SetTitle, AS_SetPowerInfo(i, description, image) x2,
+    //      AS_SetPowerButton x2 (both "ASSIGN THIS POWER"), AS_SetFocus(i).
+    //   3  the soldier list to award it (UISoldierList_AssignMedal), 4 its
+    //      name (UIInputDialogue) -- screens of their own.
+    // Up/Down move in 0 and 1, Left/Right in 2; Enter opens, picks, assigns
+    // (a warning dialogue first); Escape goes back a view. Every move is
+    // AS_SetFocus(i) as a bare number, which nothing resolved.
+    if (strncmp(obj_name, "UIMedals", 8) == 0) {
+        #define MEDAL_ROWS 12
+        static int  s_view, s_fresh;
+        static char s_title[96], s_row[MEDAL_ROWS][FOCUS_MAX_LABEL];
+        static int  s_nrow;
+        static char s_edit[3][96], s_btn[3][FOCUS_MAX_LABEL], s_help[512];
+        static int  s_btn_on[3];
+        static char s_power[2][512];
+        static int  s_sel0;                     // the medal selected, kept across views
+        static void* s_obj;
+        if (object != s_obj) { s_obj = object; s_sel0 = 0; }
+        if (strcmp(fn_name, "AS_SetDisplayMode") == 0 && p->nnumbers) {
+            s_view = (int)p->numbers[0];
+            s_fresh = 1;
+            if (s_view == 0) s_nrow = 0;
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetTitle") == 0) {
+            frame_string(node, locals, 0, s_title, sizeof s_title);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetInfo") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (i < 0 || i >= MEDAL_ROWS) return 1;
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            int locked = a.nb > 0 && a.b[0];
+            if (!locked && a.ns > 2) medal_learn(a.s[2], a.s[0]);
+            if (locked)
+                strcpy_s(s_row[i], FOCUS_MAX_LABEL, "Locked");
+            else
+                _snprintf_s(s_row[i], FOCUS_MAX_LABEL, _TRUNCATE, "%s%s%s", a.s[0],
+                            a.ns > 1 && a.s[1][0] ? ", " : "", a.ns > 1 ? a.s[1] : "");
+            if (i >= s_nrow) s_nrow = i + 1;
+            // Nothing follows the last medal and nothing is selected, so the
+            // arrival is said once the rows stop: each one puts it back.
+            if (s_view == 0 && s_fresh && i >= s_sel0) {
+                char say[FOCUS_MAX_LABEL + 256];
+                _snprintf_s(say, sizeof say, _TRUNCATE,
+                            "%s%s%s. Up and Down choose, Enter opens a medal.",
+                            s_title, s_title[0] ? ". " : "", s_row[s_sel0]);
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_after(say, SETTLE_MS);
+            }
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetEditingTitle") == 0) {
+            for (int i = 0; i < 3; i++) frame_string(node, locals, i, s_edit[i], sizeof s_edit[i]);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetEditingButton") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (i < 0 || i >= 3) return 1;
+            frame_string(node, locals, 0, s_btn[i], sizeof s_btn[i]);
+            s_btn_on[i] = !p->nbools || p->bools[0];
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetEditingHelp") == 0) {
+            frame_string(node, locals, 0, s_help, sizeof s_help);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetPowerInfo") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (i < 0 || i >= 2) return 1;
+            frame_string(node, locals, 0, s_power[i], sizeof s_power[i]);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetEditingImage") == 0 || strcmp(fn_name, "AS_SetPowerButton") == 0)
+            return 1;
+        if (strcmp(fn_name, "AS_SetFocus") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            char say[2048] = "";
+            if (s_view == 0 && i >= 0 && i < s_nrow) {
+                s_sel0 = i;
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s.", s_row[i]);
+            } else if (s_view == 1 && i >= 0 && i < 3) {
+                char btn[FOCUS_MAX_LABEL + 16];
+                _snprintf_s(btn, sizeof btn, _TRUNCATE, "%s%s.", s_btn[i],
+                            s_btn_on[i] ? "" : ", unavailable");
+                if (s_fresh)
+                    _snprintf_s(say, sizeof say, _TRUNCATE,
+                                "%s. %s. %s. %s%s%s Up and Down choose, Enter picks.",
+                                s_edit[0], s_edit[1], s_edit[2], s_help, s_help[0] ? " " : "",
+                                btn);
+                else
+                    strcpy_s(say, sizeof say, btn);
+            } else if (s_view == 2 && i >= 0 && i < 2) {
+                if (s_fresh)
+                    _snprintf_s(say, sizeof say, _TRUNCATE,
+                                "%s. Left and Right choose, Enter assigns. Power 1: %s Power 2: "
+                                "%s On power %d.",
+                                s_title, s_power[0], s_power[1], i + 1);
+                else
+                    _snprintf_s(say, sizeof say, _TRUNCATE, "Power %d: %s", i + 1, s_power[i]);
+            }
+            s_fresh = 0;
+            logf_("[%ld] %s %s.%s  MEDALS view %d, %d \"%s\"\n", n, tag, obj_name, fn_name,
+                  s_view, i, say);
+            if (say[0]) {
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_now(say);
+            }
+            return 1;
+        }
+    }
+
+    // A text box (UIInputDialogue): a medal's name, a soldier's. OnInit sends
+    // SetData(title, maxChars, the text as it stands) and nothing else; the
+    // typing goes to Flash's own text field, and the game reads it back only
+    // on Enter (GetInputText). So what is asked, and what it holds now.
+    if (strncmp(obj_name, "UIInputDialogue", 15) == 0 && strcmp(fn_name, "SetData") == 0) {
+        char title[256], text[256], say[640];
+        frame_string(node, locals, 0, title, sizeof title);
+        frame_string(node, locals, 1, text, sizeof text);
+        _snprintf_s(say, sizeof say, _TRUNCATE,
+                    "%s %s%s%s Type, then Enter accepts, Escape cancels.", title,
+                    text[0] ? "Now: " : "", text, text[0] ? "." : "");
+        logf_("[%ld] %s %s.%s  INPUT \"%s\"\n", n, tag, obj_name, fn_name, say);
+        speech_cancel_pending();
+        if (g_speak && !muted()) speech_say_now(say);
+        return 1;
+    }
+
+    // The XCOM Database (UITellMeMore, the pause menu's "XCOM Database"). A
+    // list of sections, each followed by its topics while it is open:
+    //     AS_SetTitle("XCOM Database"), AS_SetAudioButtonText, AS_ClearList,
+    //     Invoke("clear") -- logged under UpdateLayout --, then
+    //     AS_AddOption(i, label, 0) per row: a section drawn in
+    //         GetHTMLColoredText's state 2 (green), a topic in 0
+    //     and a selection (RealizeSelected):
+    //     AS_SetAudioButtonText("Play Audio" / "Stop Audio" on a topic,
+    //         "Expand Menu" / "Collapse Menu" on a section)
+    //     AS_UpdateInfo(topic, text, image) -- empty on a section
+    //     Invoke("setFocus", "i") -- the index as a string, logged under
+    //         RealizeSelected
+    // Up/Down wrap, Enter opens or closes a section (the list is drawn again)
+    // or plays a topic's narration, Escape leaves. It opens on the section of
+    // the facility it was called from. On the general path the audio
+    // button's one string was taken for a list and replaced the topics, so
+    // every move said "FOCUS n unresolved" or the button's label.
+    if (strncmp(obj_name, "UITellMeMore", 12) == 0) {
+        #define TMM_ROWS 256
+        static char s_title[96], s_btn[64], s_topic[256], s_text[4096];
+        static char s_row[TMM_ROWS][96];
+        static unsigned char s_head[TMM_ROWS];
+        static int  s_n, s_fresh;
+        static void* s_obj;
+        if (object != s_obj) { s_obj = object; s_fresh = 1; s_n = 0; }
+        if (strcmp(fn_name, "AS_SetTitle") == 0) {
+            frame_string(node, locals, 0, s_title, sizeof s_title);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetAudioButtonText") == 0) {
+            frame_string(node, locals, 0, s_btn, sizeof s_btn);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetBackButtonText") == 0) return 1;
+        if (strcmp(fn_name, "AS_ClearList") == 0 || strcmp(fn_name, "UpdateLayout") == 0) {
+            s_n = 0;
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_AddOption") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (i < 0 || i >= TMM_ROWS) return 1;
+            static char raw[FRAME_ARG_TEXT];
+            frame_string(node, locals, 0, s_row[i], sizeof s_row[i]);
+            s_head[i] = frame_local_raw(node, locals, "sLabel", raw, sizeof raw) &&
+                        font_hue(raw) == 0x5CD16C;
+            if (i >= s_n) s_n = i + 1;
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
+            frame_string(node, locals, 0, s_topic, sizeof s_topic);
+            frame_string(node, locals, 1, s_text, sizeof s_text);
+            return 1;
+        }
+        if (strcmp(fn_name, "RealizeSelected") == 0) {
+            int i;
+            if (!string_index(p, &i) || i < 0 || i >= s_n) return 1;
+            // "Expand Menu" means the section is shut.
+            int shut = strstr(s_btn, "Expand") != NULL;
+            static char say[4096 + 512];
+            if (s_head[i])
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s, %s.%s", s_fresh ? s_title : "",
+                            s_fresh && s_title[0] ? ". " : "", s_row[i],
+                            shut ? "closed" : "open",
+                            s_fresh ? " Up and Down choose, Enter opens or closes a section, "
+                                      "and on a topic plays its narration." : "");
+            else
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s. %s%s", s_fresh ? s_title : "",
+                            s_fresh && s_title[0] ? ". " : "",
+                            s_topic[0] ? s_topic : s_row[i], s_text,
+                            s_fresh ? " Up and Down choose, Enter plays the narration." : "");
+            s_fresh = 0;
+            logf_("[%ld] %s %s.%s  TMM %d \"%.200s\"\n", n, tag, obj_name, fn_name, i, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return 1;
+        }
+    }
+
+    // The finance statement (UIBaseFinances, Situation Room -> View XCOM
+    // Finances). UpdateData draws it whole, twice on arrival:
+    //     AS_SetTitle("CASH FLOW STATEMENT")
+    //     AS_SetNet("NET MONTHLY INCOME: +§265")
+    //     AS_SetSection(0, "GROSS MONTHLY INCOME", "+§375", "", "")
+    //     AS_SetSection(i, heading, total, labels, values) per section, the
+    //         items as "2x Interceptor\n1x Skyranger\n" beside "-§40\n-§20\n"
+    // and takes no arrows. Nothing was said (log of 2026-09-25). Each line is
+    // kept -- a section with its items paired to their costs -- the whole
+    // statement is said once the calls stop, and the arrows walk it
+    // (fin_walk).
+    if (strncmp(obj_name, "UIBaseFinances", 14) == 0) {
+        static char s_netline[256];
+        static void* s_obj;                 // a new visit is said again
+        if (object != s_obj) { s_obj = object; g_fin_said[0] = 0; }
+        char t[512];
+        if (strcmp(fn_name, "AS_SetTitle") == 0) {
+            frame_string(node, locals, 0, t, sizeof t);
+            g_fin_n = 0;
+            g_fin_at = -1;
+            if (t[0]) _snprintf_s(g_fin[g_fin_n++], sizeof g_fin[0], _TRUNCATE, "%s.", t);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetNet") == 0) {
+            frame_string(node, locals, 0, t, sizeof t);
+            hire_text(t, s_netline, sizeof s_netline);
+            if (s_netline[0] && g_fin_n < FIN_LINES)
+                _snprintf_s(g_fin[g_fin_n++], sizeof g_fin[0], _TRUNCATE, "%s.", s_netline);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetSection") == 0) {
+            char head[128], total[128], sum[128];
+            frame_string(node, locals, 0, head, sizeof head);
+            frame_string(node, locals, 1, t, sizeof t);
+            hire_text(t, total, sizeof total);
+            if (!head[0] || g_fin_n >= FIN_LINES) return 1;      // an empty section
+            static char labels[FRAME_ARG_TEXT], values[FRAME_ARG_TEXT];
+            if (!frame_local_raw(node, locals, "Label", labels, sizeof labels)) labels[0] = 0;
+            if (!frame_local_raw(node, locals, "Value", values, sizeof values)) values[0] = 0;
+            char* line = g_fin[g_fin_n++];
+            size_t used = (size_t)_snprintf_s(line, sizeof g_fin[0], _TRUNCATE, "%s: %s.", head,
+                                              total);
+            char* lctx = NULL;
+            char* vctx = NULL;
+            char* l = strtok_s(labels, "\n", &lctx);
+            char* v = strtok_s(values, "\n", &vctx);
+            for (; l && used < sizeof g_fin[0]; l = strtok_s(NULL, "\n", &lctx),
+                                                v = v ? strtok_s(NULL, "\n", &vctx) : NULL) {
+                strip_markup(l);
+                sum[0] = 0;
+                if (v) { strip_markup(v); hire_text(v, sum, sizeof sum); }
+                int w = _snprintf_s(line + used, sizeof g_fin[0] - used, _TRUNCATE, " %s%s%s.",
+                                    l, sum[0] ? ": " : "", sum);
+                if (w < 0) break;
+                used += (size_t)w;
+            }
+            // Said once the draw stops: each section puts it back.
+            static char say[FIN_LINES * 128];
+            say[0] = 0;
+            size_t u = 0;
+            for (int i = 0; i < g_fin_n; i++) {
+                int w = _snprintf_s(say + u, sizeof say - u, _TRUNCATE, "%s%s", u ? " " : "",
+                                    g_fin[i]);
+                if (w < 0) break;
+                u += (size_t)w;
+            }
+            if (strcmp(say, g_fin_said) != 0) {
+                strncpy_s(g_fin_said, sizeof g_fin_said, say, _TRUNCATE);
+                if (u < sizeof say)
+                    _snprintf_s(say + u, sizeof say - u, _TRUNCATE,
+                                " Up and Down read it a line at a time. Escape: back.");
+                logf_("[%ld] %s %s.%s  FINANCES \"%s\"\n", n, tag, obj_name, fn_name, say);
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_after(say, SETTLE_MS);
+            }
+            return 1;
+        }
+    }
+
+    // The labs with soldier slots. See slots_select.
+    if (strncmp(obj_name, "UIGeneLab", 9) == 0 || strncmp(obj_name, "UIPsiLabs", 9) == 0 ||
+        strncmp(obj_name, "UICyberneticsLab", 16) == 0) {
+        if (strcmp(fn_name, "AS_SetTitleLabels") == 0) {
+            frame_string(node, locals, 0, g_slots_title, sizeof g_slots_title);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_ClearSoldiers") == 0) {
+            g_slots_obj = object;
+            g_slots_n = 0;
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_AddSlot") == 0) {
+            if (g_slots_n >= SLOT_ROWS) return 1;
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            for (int i = 0; i < a.ns; i++) strip_markup(a.s[i]);
+            const char* name = a.ns > 0 ? a.s[0] : "";
+            const char* status = a.ns > 1 ? a.s[1] : "";
+            const char* button = a.ns > 2 ? a.s[2] : "";
+            int off = a.nb > 0 && a.b[0];
+            _snprintf_s(g_slots_row[g_slots_n], FOCUS_MAX_LABEL, _TRUNCATE, "%s%s%s.%s%s%s",
+                        strcmp(name, "(EMPTY)") == 0 ? "Empty" : name, status[0] ? ", " : "",
+                        status, button[0] ? " Enter: " : "", button,
+                        button[0] ? (off ? ", unavailable." : ".") : "");
+            g_slots_button[g_slots_n] = button[0] != 0;
+            g_slots_n++;
+            return 1;
+        }
+        // The end of every draw. The game's own choice when it made one;
+        // otherwise the first slot with a button, as the game does without a
+        // mouse. The arrival names the lab.
+        if (strcmp(fn_name, "AS_SetSelected") == 0) {
+            int i;
+            if (!string_index(p, &i) || i < 0 || i >= g_slots_n) {
+                i = 0;
+                for (int k = 0; k < g_slots_n; k++) if (g_slots_button[k]) { i = k; break; }
+            }
+            char lead[160];
+            _snprintf_s(lead, sizeof lead, _TRUNCATE, "%s%s", g_slots_title,
+                        g_slots_title[0] ? ". Up and Down choose a slot. " : "");
+            slots_select(n, i, lead);
+            return 1;
+        }
+    }
+
+    // A soldier's gene mods (UISoldierGeneMods), from the Genetics Lab or, to
+    // look only, from the soldier's own screen. Five rows, the body parts
+    // (AS_SetRowData(i, "BRAIN", locked)), two mods each; the arrows move the
+    // selection natively, and each move (RealizeSelected) sends
+    //     AS_SetSelectedIcon(row, col), AS_SetDescription(name, text),
+    //     AS_SetImplantButtonHelp("SELECT" / "REMOVE" / "INSUFFICIENT
+    //         RESOURCES", icon) -- empty for a locked or installed mod --
+    //     AS_SetRequirements(meld, cash) -- empty the same way, and last.
+    // Enter ticks or unticks the mod; Y opens the confirm dialogue, and Y
+    // cannot be pressed in the headquarters, so 1 stands in for it (input.c).
+    if (strncmp(obj_name, "UISoldierGeneMods", 17) == 0) {
+        static char s_title[64], s_rowname[5][48], s_name[96], s_desc[1024], s_button[96];
+        static int  s_row = -1, s_col = -1, s_said_row = -1, s_said_col = -1, s_fresh;
+        static char s_said_button[96];
+        if (strcmp(fn_name, "AS_InitializeTree") == 0) {
+            frame_string(node, locals, 0, s_title, sizeof s_title);
+            s_fresh = 1;
+            s_said_row = s_said_col = -1;
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetRowData") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (i >= 0 && i < 5) frame_string(node, locals, 0, s_rowname[i], sizeof s_rowname[i]);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetSelectedIcon") == 0 && p->nnumbers >= 2) {
+            s_row = (int)p->numbers[0];
+            s_col = (int)p->numbers[1];
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetDescription") == 0) {
+            frame_string(node, locals, 0, s_name, sizeof s_name);
+            frame_string(node, locals, 1, s_desc, sizeof s_desc);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetImplantButtonHelp") == 0) {
+            frame_string(node, locals, 0, s_button, sizeof s_button);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetRequirements") == 0) {
+            char meld[64], cash[64], cost[160] = "";
+            frame_string(node, locals, 0, meld, sizeof meld);
+            frame_string(node, locals, 1, cash, sizeof cash);
+            // The Meld is an injected icon and then the number, and the
+            // stripped text came back empty ("Costs  Meld", 2026-09-27): the
+            // number is taken from the raw text, its last run of digits.
+            if (!meld[0]) {
+                static char raw[FRAME_ARG_TEXT];
+                static int raw_logged;
+                if (frame_local_raw(node, locals, "meldLabel", raw, sizeof raw)) {
+                    if (!raw_logged) {
+                        raw_logged = 1;
+                        logf_("[%ld] GENEMODS meld raw \"%.200s\"\n", n, raw);
+                    }
+                    const char* end = NULL;
+                    for (const char* c = raw; *c; c++)
+                        if (*c >= '0' && *c <= '9' && !(c[1] >= '0' && c[1] <= '9')) end = c;
+                    if (end) {
+                        const char* start = end;
+                        while (start > raw && start[-1] >= '0' && start[-1] <= '9') start--;
+                        size_t len = (size_t)(end - start + 1);
+                        if (len < sizeof meld) { memcpy(meld, start, len); meld[len] = 0; }
+                    }
+                }
+            }
+            if (meld[0] || cash[0]) {
+                char c[64];
+                hire_text(cash, c, sizeof c);
+                _snprintf_s(cost, sizeof cost, _TRUNCATE, " Costs %s Meld, %s.", meld, c);
+            }
+            const char* state = strstr(s_button, "REMOVE") ? "Chosen."
+                              : strstr(s_button, "INSUFFICIENT") ? "Not enough resources."
+                              : s_button[0] ? "Not chosen." : "";
+            char say[2048];
+            if (s_row == s_said_row && s_col == s_said_col && !s_fresh) {
+                // Enter on the same mod: only whether it is now chosen.
+                if (strcmp(s_button, s_said_button) == 0) return 1;
+                strcpy_s(say, sizeof say, state);
+            } else {
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s, mod %d of 2. %s%s%s%s%s",
+                            s_fresh ? s_title : "", s_fresh && s_title[0] ? ". " : "",
+                            s_row != s_said_row && s_row >= 0 && s_row < 5 ? s_rowname[s_row] : "",
+                            s_row != s_said_row ? ". " : "", s_name, s_col + 1,
+                            state, state[0] ? " " : "", s_desc, cost,
+                            s_fresh ? " Up and Down choose the body part, Left and Right the "
+                                      "mod, Enter chooses it, 1 confirms." : "");
+            }
+            s_fresh = 0;
+            s_said_row = s_row;
+            s_said_col = s_col;
+            strcpy_s(s_said_button, sizeof s_said_button, s_button);
+            logf_("[%ld] %s %s.%s  GENEMODS %d, %d \"%s\"\n", n, tag, obj_name, fn_name, s_row,
+                  s_col, say);
+            if (say[0]) {
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_now(say);
+            }
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetCalloutImage") == 0 || strcmp(fn_name, "AS_SetIcon") == 0)
+            return 1;
+    }
+
+    // Build Items. UpdateLayout sends the heading and column labels
+    // (AS_SetLabels(title, "ITEM", "BUILT")), the tabs' states, clears the
+    // list (Invoke "clear") and fills it in one Invoke("BatchAddOptions",
+    // [label, quantity, ...]); RealizeSelected then sends the item's panel
+    // (AS_UpdateInfo) and the selection as text (AS_SetFocus("3")). Left
+    // and right change tab, which runs all of that and then RealizeSelected
+    // once more.
+    if (strncmp(obj_name, "UIBuildItem", 11) == 0) {
+        static char s_qty_label[64];
+        g_builditem_at = GetTickCount64();
+        if (strcmp(fn_name, "AS_SetLabels") == 0) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            if (a.ns > 0 && a.s[0][0]) focus_set_title(object, a.s[0]);
+            strncpy_s(s_qty_label, sizeof s_qty_label, a.ns > 2 ? a.s[2] : "", _TRUNCATE);
+            logf_("[%ld] %s %s.%s  BUILD title \"%s\", count \"%s\"\n", n, tag, obj_name,
+                  fn_name, a.ns > 0 ? a.s[0] : "", s_qty_label);
+            return 1;
+        }
+        // The tab's index, which the general path took for a move to the
+        // item at that index.
+        if (strcmp(fn_name, "AS_SetTabState") == 0 ||
+            strcmp(fn_name, "AS_SetSelectedCategory") == 0)
+            return 1;
+        if (strcmp(fn_name, "AS_SetConfirmButton") == 0) {
+            if (p->nstrings) help_set(object, 0, p->strings[0], "Icon_A_X", 0);
+            return 1;
+        }
+        if (strcmp(fn_name, "UpdateLayout") == 0) {
+            AbarValue* v;
+            int nv = asvalues_from_frame(stack, &v);
+            focus_begin(object);
+            if (nv <= 0) {
+                logf_("[%ld] %s %s.%s  BUILD cleared\n", n, tag, obj_name, fn_name);
+                return 1;
+            }
+            int k = 0;
+            for (int i = 0; i + 1 < nv; i++) {
+                if (v[i].type != ABAR_STRING || v[i + 1].type != ABAR_NUMBER) continue;
+                char row[FOCUS_MAX_LABEL];
+                hq_build_row(v[i].s, (int)v[i + 1].n, s_qty_label, row, sizeof row);
+                focus_set(object, k, row);
+                logf_("[%ld] %s %s.%s  BUILD %d = \"%s\"\n", n, tag, obj_name, fn_name, k, row);
+                k++;
+                i++;
+            }
+            return 1;
+        }
+        // EU sends the rows one at a time instead, after the same clear:
+        // AS_AddOption(int iIndex, string sLabel, bool IsDisabled, int
+        // iQuantity), the label coloured the same way.
+        if (strcmp(fn_name, "AS_AddOption") == 0 && p->nnumbers >= 2) {
+            static char raw[FRAME_ARG_TEXT];
+            char row[FOCUS_MAX_LABEL];
+            frame_local_raw(node, locals, "sLabel", raw, sizeof raw);
+            hq_build_row(raw, (int)p->numbers[1], s_qty_label, row, sizeof row);
+            focus_set(object, (int)p->numbers[0], row);
+            logf_("[%ld] %s %s.%s  BUILD %d = \"%s\"\n", n, tag, obj_name, fn_name,
+                  (int)p->numbers[0], row);
+            return 1;
+        }
+        // The item's panel: its name (the label already says it), the cost
+        // from the raw text so a requirement short is marked, and the
+        // description.
+        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
+            static char raw[FRAME_ARG_TEXT], cost[FRAME_ARG_TEXT];
+            static FrameArgs a;
+            static char detail[FOCUS_MAX_DETAIL];
+            frame_local_raw(node, locals, "infoText", raw, sizeof raw);
+            hq_cost_text(raw, cost, sizeof cost);
+            frame_args(node, locals, &a);
+            const char* parts[2];
+            int np = 0;
+            if (cost[0]) parts[np++] = cost;
+            if (a.ns > 2 && a.s[2][0]) parts[np++] = a.s[2];
+            focus_join_detail(parts, np, detail, sizeof detail);
+            focus_set_detail(object, detail);
+            logf_("[%ld] %s %s.%s  PANEL \"%s\"\n", n, tag, obj_name, fn_name, detail);
+            if (object == g_focus_obj && !g_focus_had_panel && detail[0] &&
+                GetTickCount64() - g_focus_at < LIST_WINDOW_MS) {
+                g_focus_had_panel = 1;
+                if (g_speak && !muted()) speech_say(detail);
+            }
+            return 1;
+        }
+        // A tab change selects twice, the second time with the same item and
+        // the same panel; said again, it cut the first off, heading and all.
+        if (strcmp(fn_name, "AS_SetFocus") == 0) {
+            static void*     s_obj;
+            static int       s_idx = -1;
+            static char      s_said[FOCUS_MAX_LABEL + FOCUS_MAX_DETAIL];
+            static ULONGLONG s_at;
+            int idx;
+            if (!string_index(p, &idx) || idx < 0) return 1;
+            static char label[FOCUS_MAX_LABEL], detail[FOCUS_MAX_DETAIL];
+            static char key[FOCUS_MAX_LABEL + FOCUS_MAX_DETAIL];
+            ULONGLONG d_at, t = GetTickCount64();
+            if (!focus_label_at(object, idx, label, sizeof label)) label[0] = 0;
+            if (!focus_detail(object, detail, sizeof detail, &d_at)) detail[0] = 0;
+            _snprintf_s(key, sizeof key, _TRUNCATE, "%s|%s", label, detail);
+            if (object == s_obj && idx == s_idx && t - s_at < 1500 &&
+                strcmp(key, s_said) == 0) {
+                focus_set_detail(object, "");
+                logf_("[%ld] %s %s.%s  FOCUS %d (said, same again)\n",
+                      n, tag, obj_name, fn_name, idx);
+                return 1;
+            }
+            s_obj = object;
+            s_idx = idx;
+            s_at = t;
+            strncpy_s(s_said, sizeof s_said, key, _TRUNCATE);
+            focus_announce(n, tag, obj_name, fn_name, object, idx);
+            return 1;
+        }
+    }
+
+    // Hiring: soldiers (UIHiring_Barracks, Barracks -> Hire Soldiers) and
+    // interceptors (UIHiring_Hangar, an empty hangar slot). Every change
+    // redraws it all (UpdateData):
+    //     AS_UpdateInfo("Hiring Cost:<br>§10<br>", "Barracks Capacity:<br>13/70")
+    //     AS_SetTitle("HIRE SOLDIERS"); AS_SetIcon
+    //     the count, a spinner on the screen's UIWidgetHelper:
+    //         SetSpinnerValue("1"), SetSpinnerArrows
+    // Up and Down go to the spinner first and raise or lower the count
+    // (OnIncreaseQuantity / OnDecreaseQuantity); Enter hires, Escape cancels.
+    // On the general path only the first "1" was said, and the count went to
+    // 8 and the cost to §80 without a word (log of 2026-09-25). As for an
+    // order (below), a helper call within a moment of a hiring draw is the
+    // hiring's; the draw is said at its spinner value, whole on arrival and
+    // then when the count changes.
+    if (strncmp(obj_name, "UIWidgetHelper", 14) == 0 && g_hire.at &&
+        GetTickCount64() - g_hire.at < ENG_SAME_DRAW_MS) {
+        if (strstr(fn_name, "SpinnerValue") && p->nstrings) {
+            char count[32];
+            strncpy_s(count, sizeof count, p->strings[0], _TRUNCATE);
+            char say[1024] = "";
+            if (g_hire.fresh)
+                _snprintf_s(say, sizeof say, _TRUNCATE,
+                            "%s%s%s. %s %s Up and Down change the number, Enter: %s, "
+                            "Escape: cancel.",
+                            g_hire.title, g_hire.title[0] ? ". " : "", count, g_hire.cost,
+                            g_hire.cap, g_hire.confirm[0] ? g_hire.confirm : "confirm");
+            else if (strcmp(count, g_hire.count) != 0)
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s. %s %s", count, g_hire.cost,
+                            g_hire.cap);
+            g_hire.fresh = 0;
+            strncpy_s(g_hire.count, sizeof g_hire.count, count, _TRUNCATE);
+            logf_("[%ld] %s %s.%s  HIRE \"%s\"\n", n, tag, obj_name, fn_name, say);
+            if (say[0]) {
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_now(say);
+            }
+            return 1;
+        }
+        // The arrows and the helper's own focus: nothing to say apart.
+        if (strstr(fn_name, "Spinner") || strcmp(fn_name, "RealizeSelected") == 0) return 1;
+    }
+    if (strncmp(obj_name, "UIHiring", 8) == 0) {
+        g_hire.at = GetTickCount64();
+        if (object != g_hire.obj) {
+            memset(&g_hire, 0, sizeof g_hire);
+            g_hire.obj = object;
+            g_hire.fresh = 1;
+            g_hire.at = GetTickCount64();
+        }
+        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
+            char t[256];
+            frame_string(node, locals, 0, t, sizeof t);
+            hire_text(t, g_hire.cost, sizeof g_hire.cost);
+            frame_string(node, locals, 1, t, sizeof t);
+            hire_text(t, g_hire.cap, sizeof g_hire.cap);
+            // The cost ends in a <br>, and so a stop; the capacity does not.
+            size_t cl = strlen(g_hire.cap);
+            if (cl && !strchr(".!?", g_hire.cap[cl - 1]))
+                strncat_s(g_hire.cap, sizeof g_hire.cap, ".", _TRUNCATE);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetTitle") == 0) {
+            frame_string(node, locals, 0, g_hire.title, sizeof g_hire.title);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetMouseConfirmText") == 0) {
+            frame_string(node, locals, 0, g_hire.confirm, sizeof g_hire.confirm);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetIcon") == 0) return 1;
+    }
+
+    // An order (UIManufacturing): a new one from Build Items, or one already
+    // in the queue from Review an order. The screen is not a list. Every
+    // redraw -- arriving, the quantity changing, rush toggled -- goes
+    // UpdateData (the buttons through SetHelp), RefreshDisplay (AS_SetTitle,
+    // AS_SetEngineerLine, the quantity spinner through the widget helper,
+    // AS_SetQuantityLine for an order already placed), then AS_UpdateInfo
+    // (the duration and cost, the notes). So the order is gathered and said
+    // at AS_UpdateInfo: whole on arrival, then only what changed.
+    //
+    // The quantity is a spinner on a UIWidgetHelper, which by name belongs
+    // to no screen. Its calls come in the same redraw as the order's, so a
+    // helper call within a moment of one is the order's. Up and down move
+    // it (the spinner is vertical), and so do left and right.
+    if (strncmp(obj_name, "UIWidgetHelper", 14) == 0 && g_man_at &&
+        GetTickCount64() - g_man_at < ENG_SAME_DRAW_MS) {
+        if (strstr(fn_name, "SpinnerValue") && p->nstrings) {
+            strncpy_s(g_man.qty, sizeof g_man.qty, p->strings[0], _TRUNCATE);
+            logf_("[%ld] %s %s.%s  ORDER quantity \"%s\"\n", n, tag, obj_name, fn_name,
+                  g_man.qty);
+        }
+        return 1;
+    }
+    if (strncmp(obj_name, "UIManufacturing", 15) == 0) {
+        g_man_at = GetTickCount64();
+        if (object != g_man.obj) {
+            memset(&g_man, 0, sizeof g_man);
+            g_man.obj = object;
+        }
+        static FrameArgs a;
+        if (strcmp(fn_name, "AS_SetTitle") == 0) {
+            frame_args(node, locals, &a);
+            strncpy_s(g_man.title, sizeof g_man.title, a.ns > 0 ? a.s[0] : "", _TRUNCATE);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetEngineerLine") == 0) {
+            frame_args(node, locals, &a);
+            _snprintf_s(g_man.eng, sizeof g_man.eng, _TRUNCATE, "%s %s",
+                        a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "");
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetQuantityLine") == 0) {
+            frame_args(node, locals, &a);
+            strncpy_s(g_man.qty_label, sizeof g_man.qty_label, a.ns > 0 ? a.s[0] : "", _TRUNCATE);
+            strncpy_s(g_man.qty, sizeof g_man.qty, a.ns > 1 ? a.s[1] : "", _TRUNCATE);
+            return 1;
+        }
+        // Rush construction's button says whether it is on ("Rush
+        // Construction YES"), so it is kept as part of the order; the call
+        // goes on to the help bar below.
+        if (strcmp(fn_name, "AS_SetHelp") == 0 && p->nnumbers && (int)p->numbers[0] == 2) {
+            frame_args(node, locals, &a);
+            strncpy_s(g_man.rush, sizeof g_man.rush, a.ns > 0 ? a.s[0] : "", _TRUNCATE);
+        }
+        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
+            static char raw[FRAME_ARG_TEXT], info[FRAME_ARG_TEXT], notes[FRAME_ARG_TEXT];
+            static char say[FOCUS_MAX_DETAIL];
+            frame_local_raw(node, locals, "infoText", raw, sizeof raw);
+            hq_cost_text(raw, info, sizeof info);
+            frame_args(node, locals, &a);
+            strncpy_s(notes, sizeof notes, a.ns > 1 ? a.s[1] : "", _TRUNCATE);
+            char qty[96];
+            if (g_man.qty[0])
+                _snprintf_s(qty, sizeof qty, _TRUNCATE, "%s %s",
+                            g_man.qty_label[0] ? g_man.qty_label : "QUANTITY:", g_man.qty);
+            else
+                qty[0] = 0;
+            const char* parts[6];
+            int np = 0;
+            int first = !g_man.said;
+            if (first && g_man.title[0]) parts[np++] = g_man.title;
+            if (!first && g_man.rush[0] && strcmp(g_man.rush, g_man.said_rush) != 0)
+                parts[np++] = g_man.rush;
+            if (qty[0] && (first || strcmp(qty, g_man.said_qty) != 0)) parts[np++] = qty;
+            if (g_man.eng[0] && (first || strcmp(g_man.eng, g_man.said_eng) != 0))
+                parts[np++] = g_man.eng;
+            if (info[0] && (first || strcmp(info, g_man.said_info) != 0)) parts[np++] = info;
+            if (notes[0] && (first || strcmp(notes, g_man.said_notes) != 0)) parts[np++] = notes;
+            focus_join_detail(parts, np, say, sizeof say);
+            g_man.said = 1;
+            strncpy_s(g_man.said_rush, sizeof g_man.said_rush, g_man.rush, _TRUNCATE);
+            strncpy_s(g_man.said_qty, sizeof g_man.said_qty, qty, _TRUNCATE);
+            strncpy_s(g_man.said_eng, sizeof g_man.said_eng, g_man.eng, _TRUNCATE);
+            strncpy_s(g_man.said_info, sizeof g_man.said_info, info, _TRUNCATE);
+            strncpy_s(g_man.said_notes, sizeof g_man.said_notes, notes, _TRUNCATE);
+            logf_("[%ld] %s %s.%s  ORDER %s\"%s\"\n", n, tag, obj_name, fn_name,
+                  first ? "" : "change ", say);
+            if (say[0]) {
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_now(say);
+            }
+            return 1;
+        }
+    }
+
+    // A country chosen on the room's map (Launch Satellite, covert ops). See
+    // hq.h. The HUD beside the map is the only place the country is named;
+    // what it draws is kept, and said when the map's selection moves.
+    if (strncmp(obj_name, "UISituationRoomHUD_", 19) == 0) {
+        static FrameArgs a;
+        static char body[FRAME_ARG_TEXT];
+        if (strcmp(fn_name, "AS_SetCountryInfo") == 0) {
+            frame_args(node, locals, &a);
+            frame_lines(node, locals, "bodyText", body, sizeof body);
+            hq_sat_country(a.ns > 0 ? a.s[0] : "", body, p->nnumbers ? (int)p->numbers[0] : 0);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetContinentInfo") == 0) {
+            frame_args(node, locals, &a);
+            frame_lines(node, locals, "bodyText", body, sizeof body);
+            hq_sat_continent(a.ns > 0 ? a.s[0] : "", body);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetLaunchButton") == 0 ||
+            strcmp(fn_name, "AS_SetAccuseButton") == 0) {
+            frame_args(node, locals, &a);
+            hq_sat_button(fn_name[5] == 'A', a.ns > 1 ? a.s[1] : "", a.nb > 0 && a.b[0]);
+            return 1;
+        }
+    }
+    if (strncmp(obj_name, "UISituationRoom_", 16) == 0 &&
+        obj_name[16] >= '0' && obj_name[16] <= '9') {
+        g_sitroom_at = GetTickCount64();
+        if (strcmp(fn_name, "AS_SetSatellites") == 0 && p->nnumbers >= 3) {
+            hq_sat_count((int)p->numbers[0], (int)p->numbers[1], (int)p->numbers[2]);
+            return 1;
+        }
+        if (strcmp(fn_name, "RealizeSelected") == 0) {
+            int idx = p->nnumbers ? (int)p->numbers[0] : -1;
+            if (idx < 0) {
+                hq_sat_reset();
+                logf_("[%ld] %s %s.%s  MAP left\n", n, tag, obj_name, fn_name);
+                return 1;
+            }
+            static char say[2 * HQ_SIT_TEXT];
+            if (!hq_sat_say(say, sizeof say)) {
+                logf_("[%ld] %s %s.%s  MAP %d, no country drawn\n", n, tag, obj_name, fn_name,
+                      idx);
+                return 1;
+            }
+            logf_("[%ld] %s %s.%s  MAP %d -> \"%s\"\n", n, tag, obj_name, fn_name, idx, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return 1;
+        }
+    }
+
+    // The Situation Room's display. See hq.h. Kept for Delete; nothing else
+    // is changed, so the countries are still filed as the slots the satellite
+    // view's SetSelected moves over. The ticker and the objectives are read
+    // from the frame whole: the payload keeps 256 characters, and the ticker
+    // is every headline in one string.
+    if ((strncmp(obj_name, "UISituationRoom_", 16) == 0 &&
+         obj_name[16] >= '0' && obj_name[16] <= '9') ||
+        strncmp(obj_name, "UIObjectivesScreen_", 19) == 0) {
+        g_sitroom_at = GetTickCount64();
+        if (strcmp(fn_name, "AS_SetCountryInfo") == 0 && p->nnumbers >= 2) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            hq_sit_country((int)p->numbers[0], a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
+                           (int)p->numbers[1], a.nb > 0 ? a.b[0] : 1);
+        } else if (strcmp(fn_name, "AS_SetTickerText") == 0) {
+            static char title[64], text[MAX_STR];
+            frame_string(node, locals, 0, title, sizeof title);
+            frame_string(node, locals, 1, text, sizeof text);
+            hq_sit_news(title, text);
+        } else if (strcmp(fn_name, "AS_SetDoomLevel") == 0 && p->nnumbers >= 1) {
+            hq_sit_doom((int)p->numbers[0]);
+        } else if (strcmp(fn_name, "AS_SetSmallBody") == 0 ||
+                   strcmp(fn_name, "AS_SetLargeBody") == 0) {
+            static char body[MAX_STR];
+            frame_string(node, locals, 0, body, sizeof body);
+            if (fn_name[6] == 'S') hq_sit_objectives(body, NULL);
+            else                   hq_sit_objectives(NULL, body);
+        }
+    }
+    // Back at the facility row: out of the room, whatever drew last.
+    if (strncmp(obj_name, "UIStrategyHUD_FacilityMenu", 26) == 0 &&
+        strcmp(fn_name, "OnReceiveFocus") == 0)
+        g_sitroom_left_at = g_eng_left_at = GetTickCount64();
+    return 0;
+}
+
 static void capture_body(const char* tag, LONG n, void* stack)
 {
     if (!readable(stack, 0x20)) {
@@ -1679,1333 +3093,20 @@ static void capture_body(const char* tag, LONG n, void* stack)
     else if (strncmp(obj_name, "UITacticalHUD", 13) == 0)
         g_seen_tactical_at = GetTickCount64();
 
-    // The base's status panels. See hq.h. Kept for Delete; they were never
-    // said, and a lone resource line risked being spoken as an announcement.
-    // UIStrategyHUD_0 itself, not its panels (UIStrategyHUD_FacilityMenu_0
-    // and the rest share the prefix): the name's next character is a digit.
-    if (strncmp(obj_name, "UIStrategyHUD_", 14) == 0 &&
-        obj_name[14] >= '0' && obj_name[14] <= '9') {
-        if (strcmp(fn_name, "ClearResources") == 0) { hq_status_resources_clear(); return; }
-        if (strcmp(fn_name, "AS_SetHumanResources") == 0) {
-            static FrameArgs a;
-            frame_args(node, locals, &a);
-            hq_status_human(a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "");
-            logf_("[%ld] %s %s.%s  STAFF \"%s\" \"%s\"\n", n, tag, obj_name, fn_name,
-                  a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "");
-            return;
+    Call call = { tag, n, stack, node, object, locals, obj_name, fn_name, p };
+    switch (call_family(obj_name)) {
+    case FAM_BASE: {
+        // Once a run, so a log shows the route taken.
+        static int logged;
+        if (!logged) {
+            logged = 1;
+            logf_("[%ld] capture: base screens routed from %s.%s\n", n, obj_name, fn_name);
         }
-        if (strcmp(fn_name, "AS_AddResource") == 0 && p->nstrings) {
-            hq_status_resource(p->strings[0]);
-            return;
-        }
+        if (base_call(&call)) return;
+        break;
     }
-    if (strncmp(obj_name, "UIStrategyComponent_Clock", 25) == 0 &&
-        strcmp(fn_name, "AS_SetDateTime") == 0) {
-        static FrameArgs a;
-        frame_args(node, locals, &a);
-        hq_status_date(a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
-                       a.ns > 2 ? a.s[2] : "", a.ns > 3 ? a.s[3] : "");
-        // A tick as each day passes (hq_day_passed), so time moving on the
-        // geoscape -- scanning above all -- is heard without asking.
-        if (hq_day_passed(a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "", GetTickCount64())) {
-            logf_("[%ld] %s %s.%s  DAY \"%s %s\"%s\n", n, tag, obj_name, fn_name,
-                  a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
-                  settings_get(SET_DAYS) ? "" : " (tick off)");
-            if (settings_get(SET_DAYS)) audio_cue(HEART_TICK, 1);
-        }
-        return;
+    default: break;
     }
-    if (strncmp(obj_name, "UIStrategyComponent_EventList", 29) == 0) {
-        if (strcmp(fn_name, "UpdateData") == 0) { hq_status_events_clear(object); return; }
-        if (strcmp(fn_name, "AS_AddEvent") == 0) {
-            static FrameArgs a;
-            frame_args(node, locals, &a);
-            hq_status_event(object, a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
-                            a.ns > 2 ? a.s[2] : "");
-            // Logged, so a run shows which panel drew what and when: the
-            // status reads the list drawn last.
-            logf_("[%ld] %s %s.%s  EVENT \"%s, %s %s\"\n", n, tag, obj_name, fn_name,
-                  a.ns > 0 ? a.s[0] : "", a.ns > 2 ? a.s[2] : "", a.ns > 1 ? a.s[1] : "");
-            return;
-        }
-    }
-
-    // ---- Engineering ---------------------------------------------------------
-    //
-    // Its submenu is a facility submenu like any other. What it adds is read
-    // here, from the game's full workflow (UIStrategyHUD_FSM_Engineering,
-    // UIBuildItem, UIManufacturing, UIStrategyHUD_BuildQueue, and
-    // XGEngineeringUI / XGManufacturingUI behind them). See hq.h.
-    if (strncmp(obj_name, "UIStrategyHUD_FSM_Engineering", 29) == 0 ||
-        strncmp(obj_name, "UIBuildItem", 11) == 0 ||
-        strncmp(obj_name, "UIManufacturing", 15) == 0 ||
-        strncmp(obj_name, "UIFoundry", 9) == 0)
-        g_eng_at = GetTickCount64();
-
-    // The interception (UIInterceptionEngagement): a fight played back in
-    // real time from a script the game has already rolled. Nothing in it was
-    // said -- ship 0 is the UFO, 1 the interceptor -- and everything it shows
-    // comes through these calls:
-    //     AS_SetHP(ship, hp, bool initialization, weaponID)
-    //         -- initialization once per ship in OnInit, the full hull; then
-    //            once per hit as the damage lands (Playback)
-    //     AS_SetAimButton(label, state) / AS_SetDodgeButton(label, state) /
-    //     AS_SetTrackButton(label, trackingText, state)
-    //         -- 0 available, 2 none left, 3 not researched
-    //     AS_BeginIntroSequence() -- the link comes up; the fight follows
-    //     AS_SetEnemyEscapeTimer(tenths) -- "CONTACT LOSS IN", each tenth
-    //     AS_DisplayEffectEvent(type, description, bool enabled, data)
-    //         -- 0 aim, 1 dodge, 2 track, on when used and off when spent
-    //     AS_SetAbortLabel("ABORTING...") / ("ABORTED")
-    //     AS_ShowResults(report, battleResult, leaveLabel)
-    // and AS_AttackEvent / AS_MovementEvent for every shot, which the hits
-    // already cover. The keys are input.c's 1 to 4.
-    if (strncmp(obj_name, "UIInterceptionEngagement", 24) == 0) {
-        static int hp[2], hp_max[2], ability[3] = { 3, 3, 3 }, secs_said = -1;
-        static char title[128];
-        static const char* const names[3] = { "Aim", "Dodge", "Track" };
-        char say[FRAME_ARG_TEXT + 256];
-        say[0] = 0;
-        int now = 1;                    // said at once, cutting what was said
-        if (strcmp(fn_name, "AS_SetResultsTitleLabels") == 0) {
-            frame_string(node, locals, 0, title, sizeof title);
-            hp[0] = hp[1] = hp_max[0] = hp_max[1] = 0;
-            ability[0] = ability[1] = ability[2] = 3;
-            secs_said = -1;
-        } else if (strcmp(fn_name, "AS_SetHP") == 0 && p->nnumbers >= 2) {
-            int ship = (int)p->numbers[0], v = (int)p->numbers[1];
-            if (ship < 0 || ship > 1) return;
-            if (p->nbools && p->bools[0]) {
-                hp[ship] = hp_max[ship] = v;
-            } else if (v != hp[ship]) {
-                hp[ship] = v;
-                int pct = hp_max[ship] > 0 ? (v * 100 + hp_max[ship] - 1) / hp_max[ship] : 0;
-                if (v <= 0)
-                    strcpy_s(say, sizeof say, ship == 0 ? "UFO down." : "Interceptor shot down.");
-                else if (ship == 0)
-                    _snprintf_s(say, sizeof say, _TRUNCATE, "UFO hit, %d%%.", pct);
-                else
-                    _snprintf_s(say, sizeof say, _TRUNCATE, "We're hit, %d%%.", pct);
-            }
-        } else if ((strcmp(fn_name, "AS_SetAimButton") == 0 ||
-                    strcmp(fn_name, "AS_SetDodgeButton") == 0 ||
-                    strcmp(fn_name, "AS_SetTrackButton") == 0) && p->nnumbers) {
-            int k = fn_name[6] == 'A' ? 0 : fn_name[6] == 'D' ? 1 : 2;
-            ability[k] = (int)p->numbers[0];
-        } else if (strcmp(fn_name, "AS_BeginIntroSequence") == 0) {
-            size_t w = 0;
-            w += _snprintf_s(say, sizeof say, _TRUNCATE, "%s. UFO %d, interceptor %d.",
-                             title[0] ? title : "Interception", hp_max[0], hp_max[1]);
-            int any = 0;
-            for (int k = 0; k < 3; k++) {
-                if (ability[k] != 0) continue;
-                w += _snprintf_s(say + w, sizeof say - w, _TRUNCATE, "%s%d %s",
-                                 any ? ", " : " ", k + 1, names[k]);
-                any = 1;
-            }
-            _snprintf_s(say + w, sizeof say - w, _TRUNCATE, "%s4 Abort.", any ? ", " : " ");
-        } else if (strcmp(fn_name, "AS_SetEnemyEscapeTimer") == 0 && p->nnumbers) {
-            // Whole seconds, rounded up: 4.3 s left is "5" until it is 4.
-            int secs = ((int)p->numbers[0] + 9) / 10;
-            static const int marks[] = { 10, 5, 3, 2, 1 };
-            if (secs_said < 0) {
-                _snprintf_s(say, sizeof say, _TRUNCATE, "Contact loss in %d seconds.", secs);
-                now = 0;
-            } else if (secs > secs_said) {
-                secs_said = secs;       // tracking ended and the clock was reset
-            } else {
-                for (int i = 0; i < 5; i++)
-                    if (secs <= marks[i] && secs_said > marks[i]) {
-                        _snprintf_s(say, sizeof say, _TRUNCATE, "%d.", secs);
-                        break;
-                    }
-            }
-            if (secs_said < 0 || say[0]) secs_said = secs;
-        } else if (strcmp(fn_name, "AS_DisplayEffectEvent") == 0 && p->nnumbers) {
-            int k = (int)p->numbers[0];
-            if (p->nbools && p->bools[0]) {
-                frame_lines(node, locals, "effectDescription", say, sizeof say);
-            } else if (k >= 0 && k < 3) {
-                _snprintf_s(say, sizeof say, _TRUNCATE, "%s over.", names[k]);
-            }
-        } else if (strcmp(fn_name, "AS_SetAbortLabel") == 0) {
-            char label[64];
-            frame_string(node, locals, 0, label, sizeof label);
-            if (_strnicmp(label, "ABORTING", 8) == 0) strcpy_s(say, sizeof say, label);
-        } else if (strcmp(fn_name, "AS_ShowResults") == 0) {
-            char report[FRAME_ARG_TEXT], leave[64];
-            frame_lines(node, locals, "report", report, sizeof report);
-            frame_string(node, locals, 1, leave, sizeof leave);
-            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s", report,
-                        leave[0] ? " Enter: " : "", leave, leave[0] ? "." : "");
-        } else if (strcmp(fn_name, "AS_AttackEvent") == 0 ||
-                   strcmp(fn_name, "AS_MovementEvent") == 0) {
-            return;                     // every shot; the hits are said
-        }
-        if (say[0]) {
-            logf_("[%ld] %s %s.%s  INTERCEPT \"%s\"\n", n, tag, obj_name, fn_name, say);
-            if (g_speak && !muted()) {
-                if (now) { speech_cancel_pending(); speech_say_now(say); }
-                else speech_say(say);
-            }
-        } else if (strcmp(fn_name, "AS_SetEnemyEscapeTimer") != 0) {
-            logf_("[%ld] %s %s.%s  INTERCEPT (kept)\n", n, tag, obj_name, fn_name);
-        }
-        return;
-    }
-
-    // Build Facilities: the base's grid. See hq.h. The cards are kept, and
-    // the cursor's tile said with the cursor's text. OnInit and GoToView(0)
-    // both draw the cursor on the way in, so a second drawing of the same
-    // tile and text straight after the first is not said again.
-    if (strncmp(obj_name, "UIBuildFacilities", 17) == 0) {
-        static FrameArgs a;
-        float fx, fy;
-        int at = frame_float(node, locals, "xloc", &fx) && frame_float(node, locals, "yloc", &fy);
-        if (strcmp(fn_name, "AS_UpdateFacilityCard") == 0 && at) {
-            frame_args(node, locals, &a);
-            hq_base_card((int)fx, (int)fy, a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "");
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetCursor") == 0 && at) {
-            static char text[FRAME_ARG_TEXT], say[FRAME_ARG_TEXT + 256], said[sizeof say];
-            static ULONGLONG said_at;
-            frame_lines(node, locals, "DisplayText", text, sizeof text);
-            hq_base_cursor((int)fx, (int)fy, text, say, sizeof say);
-            ULONGLONG t = GetTickCount64();
-            if (strcmp(say, said) == 0 && t - said_at < 500) {
-                logf_("[%ld] %s %s.%s  BASE cursor redrawn\n", n, tag, obj_name, fn_name);
-                said_at = t;
-                return;
-            }
-            strncpy_s(said, sizeof said, say, _TRUNCATE);
-            said_at = t;
-            logf_("[%ld] %s %s.%s  BASE cursor -> \"%s\"\n", n, tag, obj_name, fn_name, say);
-            speech_cancel_pending();
-            if (g_speak && !muted()) speech_say_now(say);
-            return;
-        }
-    }
-
-    // The build queue, drawn beside Engineering and the Foundry. UpdateData
-    // clears it (Invoke "clear", the only call in that frame) and adds one
-    // order per AS_AddProjectToQueue, with no index; the selection is
-    // Invoke("setSelected", [string index]) from RealizeSelected. Left to the
-    // general path, the four column headings of AS_SetQueueTitle were a list,
-    // every order replaced the one before, the order's state (3 or 4) was
-    // taken for its slot, and a lone "NO CURRENT PROJECTS" was said out of
-    // nowhere at the base.
-    if (strncmp(obj_name, "UIStrategyHUD_BuildQueue", 24) == 0) {
-        if (strcmp(fn_name, "UpdateData") == 0) {
-            focus_begin(object);
-            hq_queue_clear();
-            logf_("[%ld] %s %s.%s  QUEUE cleared\n", n, tag, obj_name, fn_name);
-            return;
-        }
-        if (strcmp(fn_name, "AS_AddProjectToQueue") == 0) {
-            static FrameArgs a;
-            frame_args(node, locals, &a);
-            char row[FOCUS_MAX_LABEL];
-            hq_queue_row(a.ns > 0 ? a.s[0] : "", a.ns > 2 ? a.s[2] : "",
-                         a.ns > 3 ? a.s[3] : "", row, sizeof row);
-            focus_add(object, row);
-            hq_queue_add(row);
-            logf_("[%ld] %s %s.%s  QUEUE %d = \"%s\"\n", n, tag, obj_name, fn_name,
-                  focus_count(object) - 1, row);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetQueueTitle") == 0) {
-            static FrameArgs a;
-            frame_args(node, locals, &a);
-            hq_queue_title(a.ns > 0 ? a.s[0] : "");
-            logf_("[%ld] %s %s.%s  QUEUE title \"%s\"\n", n, tag, obj_name, fn_name,
-                  a.ns > 0 ? a.s[0] : "");
-            return;
-        }
-        // What the queue offers, into 0's list. Y (303) on the Engineering
-        // submenu starts Review an order when there is one
-        // (UIStrategyHUD_FSM_Engineering, case 303), and 6 sends Y there.
-        // With a gamepad the game names it with its glyph; in mouse mode it
-        // says "CLICK TO EDIT" with none, or "QUEUE LOCKED" while it cannot
-        // be edited (an order open, the Foundry, the queue already active).
-        // Only the English lock is told apart: elsewhere a locked queue is
-        // listed too, and 6 on it does nothing.
-        if (strcmp(fn_name, "AS_SetHelp") == 0) {
-            static FrameArgs a;
-            frame_args(node, locals, &a);
-            const char* label = a.ns > 0 ? a.s[0] : "";
-            const char* icon  = a.ns > 1 ? a.s[1] : "";
-            if (!*label || _stricmp(label, "QUEUE LOCKED") == 0)
-                help_set(object, 0, "", "", 0);
-            else
-                help_set(object, 0, *icon ? label : "Review an order", "Icon_Y_TRIANGLE", 0);
-            logf_("[%ld] %s %s.%s  QUEUE help \"%s\" on %s\n", n, tag, obj_name, fn_name,
-                  label, *icon ? icon : "(no icon)");
-            return;
-        }
-        // Review an order: the queue takes the arrows until Enter opens the
-        // order or Escape gives them back. It starts with nothing selected
-        // (DeactivateEditing left -1), so the first Down lands on the first
-        // order and the first Up on the last.
-        if (strcmp(fn_name, "ActivateEditing") == 0) {
-            g_queue_editing = 1;
-            char say[128];
-            _snprintf_s(say, sizeof say, _TRUNCATE, "Review an order, %d in the queue",
-                        focus_count(object));
-            logf_("[%ld] %s %s.%s  QUEUE reviewing \"%s\"\n", n, tag, obj_name, fn_name, say);
-            speech_cancel_pending();
-            if (g_speak && !muted()) speech_say_now(say);
-            return;
-        }
-        if (strcmp(fn_name, "DeactivateEditing") == 0 || strcmp(fn_name, "OnAccept") == 0) {
-            g_queue_editing = 0;
-            logf_("[%ld] %s %s.%s  QUEUE reviewing ends\n", n, tag, obj_name, fn_name);
-            return;
-        }
-        // Every redraw selects the first order when there is one; only a
-        // move while reviewing is news.
-        if (strcmp(fn_name, "RealizeSelected") == 0) {
-            int idx;
-            if (!g_queue_editing || !string_index(p, &idx) || idx < 0) {
-                logf_("[%ld] %s %s.%s  QUEUE selection (not reviewing)\n",
-                      n, tag, obj_name, fn_name);
-                return;
-            }
-            focus_announce(n, tag, obj_name, fn_name, object, idx);
-            return;
-        }
-    }
-
-    // The Officer Training School (UIOTS). DrawTable sends AS_Clear, then per
-    // upgrade
-    //     AS_AddOption(int i, tactic, cost, bool disabled)
-    // and selects one; each selection (RealizeSelected) is
-    //     AS_SetListSelection(string i)   -- the index as a STRING
-    //     AS_SetHelp(why it is locked, or "")
-    //     AS_SetPurchaseButtonText        -- mouse mode only
-    //     AS_UpdateInfo(image label, description)
-    // An upgrade (XGOTSUI.BuildTableItem) is bought -- disabled, cost
-    // "PURCHASED" -- locked by a rank not reached -- disabled, the help says
-    // which -- or dear: not disabled, only its cost drawn red, and Enter
-    // still opens the confirm dialogue before the bad sound. On the general
-    // path the list was slots, the moves said nothing and the panel read the
-    // image label: "_squadSizeI. Squad size increased to 5 soldiers."
-    // Up/Down wrap, Enter buys (a dialogue confirms), Escape leaves; after a
-    // purchase the table is drawn again.
-    if (strncmp(obj_name, "UIOTS", 5) == 0) {
-        #define OTS_ROWS 16
-        static char s_title[96], s_help[512];
-        static char s_row[OTS_ROWS][FOCUS_MAX_LABEL];
-        static int  s_n, s_sel, s_fresh;
-        if (strcmp(fn_name, "AS_SetTitles") == 0) {
-            frame_string(node, locals, 0, s_title, sizeof s_title);
-            return;
-        }
-        if (strcmp(fn_name, "AS_Clear") == 0) {
-            s_n = 0;
-            s_fresh = 1;
-            return;
-        }
-        if (strcmp(fn_name, "AS_AddOption") == 0 && p->nnumbers) {
-            int i = (int)p->numbers[0];
-            if (i < 0 || i >= OTS_ROWS) return;
-            static FrameArgs a;
-            static char raw[FRAME_ARG_TEXT];
-            frame_args(node, locals, &a);
-            // The cost as drawn: red is XGOTSUI's state 3, not enough money.
-            int dear = frame_local_raw(node, locals, "sRequirement", raw, sizeof raw) &&
-                       font_hue(raw) == HUE_BAD;
-            int disabled = p->nbools && p->bools[0];
-            char cost[64];
-            size_t w = 0;
-            const char* c = a.ns > 1 ? a.s[1] : "";
-            for (; *c && w + 1 < sizeof cost; c++) {          // the section sign, C2 A7
-                if ((unsigned char)c[0] == 0xC2 && (unsigned char)c[1] == 0xA7) { c++; continue; }
-                cost[w++] = *c;
-            }
-            cost[w] = 0;
-            int bought = disabled && cost[0] && !(cost[0] >= '0' && cost[0] <= '9');
-            _snprintf_s(s_row[i], FOCUS_MAX_LABEL, _TRUNCATE, "%s, %s%s%s", a.s[0],
-                        bought ? "purchased" : cost, !bought && cost[0] ? " credits" : "",
-                        bought ? "" : disabled ? ", locked"
-                                   : dear ? ", not enough credits" : "");
-            if (i >= s_n) s_n = i + 1;
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetListSelection") == 0) {
-            char id[16];
-            frame_string(node, locals, 0, id, sizeof id);
-            s_sel = atoi(id);
-            s_help[0] = 0;
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetHelp") == 0) {
-            frame_string(node, locals, 0, s_help, sizeof s_help);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetPurchaseButtonText") == 0) return;
-        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
-            char desc[1024];
-            frame_string(node, locals, 1, desc, sizeof desc);
-            char say[2048];
-            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s.%s%s %s%s",
-                        s_fresh && s_title[0] ? s_title : "", s_fresh && s_title[0] ? ". " : "",
-                        s_sel >= 0 && s_sel < s_n ? s_row[s_sel] : "?",
-                        s_help[0] ? " " : "", s_help, desc,
-                        s_fresh ? " Enter purchases." : "");
-            s_fresh = 0;
-            logf_("[%ld] %s %s.%s  OTS %d \"%s\"\n", n, tag, obj_name, fn_name, s_sel, say);
-            speech_cancel_pending();
-            if (g_speak && !muted()) speech_say_now(say);
-            return;
-        }
-    }
-
-    // The Gray Market (UIGreyMarket). Every change redraws all of it
-    // (UpdateData):
-    //     AS_SetTitle; AS_SetHeader(i, text) x4 -- "In Storage", "", "Sell",
-    //         and the sale's total ("§0")
-    //     AS_AddItem(int i, storage, name, price, sell, total, int, bool canSell)
-    //         per item; storage is what stays after the sale, "-" for none;
-    //         sell "-" until one is marked, total "" until then
-    //     AS_SetListSelection(int i)
-    //     AS_UpdateInfo(Desc, image): "NAME\nNOT RESEARCHED\nCannot sell this
-    //         item\nsummary", the middle two only when they apply
-    // Up/Down move (OnHighlightUp/Down), Right marks one more to sell
-    // (OnSellItem), Left takes one back (OnReturnItem), Enter completes the
-    // sale at once -- no dialogue -- and Escape leaves, handing everything
-    // back. A refused change plays the bad sound and draws nothing. On the
-    // general path the rows were slots and every move said "ITEM n
-    // unresolved". So each draw is said by what changed: the item on a move;
-    // the count and the total on Right or Left, which change the item's stock
-    // with its count; the sale on Enter, which empties the total and leaves
-    // the stock as it was.
-    if (strncmp(obj_name, "UIGreyMarket", 12) == 0) {
-        #define GREY_ROWS 48
-        typedef struct { char name[96], store[16], price[32], sell[16], total[32]; int can; } GreyRow;
-        static GreyRow s_row[GREY_ROWS];
-        static GreyRow s_prev;                  // the selected row as last said
-        static char s_title[96], s_head_total[32], s_prev_total[32];
-        static int  s_n, s_sel = -1;
-        static void* s_obj;                     // a new screen is a new visit
-        if (object != s_obj) {
-            s_obj = object;
-            s_n = 0;
-            s_sel = -1;
-            memset(&s_prev, 0, sizeof s_prev);
-            s_prev_total[0] = 0;
-        }
-        if (strcmp(fn_name, "AS_SetTitle") == 0) {
-            frame_string(node, locals, 0, s_title, sizeof s_title);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetHeader") == 0 && p->nnumbers) {
-            if ((int)p->numbers[0] == 3) {
-                char t[64];
-                frame_string(node, locals, 0, t, sizeof t);
-                money_text(t, s_head_total, sizeof s_head_total);
-            }
-            return;
-        }
-        if (strcmp(fn_name, "AS_AddItem") == 0 && p->nnumbers) {
-            int i = (int)p->numbers[0];
-            if (i < 0 || i >= GREY_ROWS) return;
-            static FrameArgs a;
-            frame_args(node, locals, &a);
-            GreyRow* r = &s_row[i];
-            strncpy_s(r->store, sizeof r->store, a.ns > 0 ? a.s[0] : "", _TRUNCATE);
-            strncpy_s(r->name, sizeof r->name, a.ns > 1 ? a.s[1] : "", _TRUNCATE);
-            money_text(a.ns > 2 ? a.s[2] : "", r->price, sizeof r->price);
-            strncpy_s(r->sell, sizeof r->sell, a.ns > 3 ? a.s[3] : "", _TRUNCATE);
-            money_text(a.ns > 4 ? a.s[4] : "", r->total, sizeof r->total);
-            r->can = a.nb > 0 ? a.b[a.nb - 1] : 1;
-            if (i >= s_n) s_n = i + 1;
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetListSelection") == 0 && p->nnumbers) {
-            s_sel = (int)p->numbers[0];
-            return;
-        }
-        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
-            // The description a line at a time; its first line is the name,
-            // which the item already says.
-            static char raw[FRAME_ARG_TEXT];
-            char info[1024] = "";
-            if (!frame_local_raw(node, locals, "Desc", raw, sizeof raw))
-                frame_string(node, locals, 0, raw, sizeof raw);
-            const GreyRow* r = s_sel >= 0 && s_sel < s_n ? &s_row[s_sel] : NULL;
-            int line = 0;
-            for (char* part = raw; part && *part; line++) {
-                char* nl = strchr(part, '\n');
-                if (nl) *nl = 0;
-                strip_markup(part);
-                size_t pl = strlen(part);
-                if ((line > 0 || !r) && pl) {
-                    size_t u = strlen(info);
-                    _snprintf_s(info + u, sizeof info - u, _TRUNCATE, "%s%s%s", u ? " " : "",
-                                part, strchr(".!?", part[pl - 1]) ? "" : ".");
-                }
-                part = nl ? nl + 1 : NULL;
-            }
-
-            int marked = r && r->sell[0] && strcmp(r->sell, "-") != 0;
-            char item[512] = "";
-            if (r)
-                _snprintf_s(item, sizeof item, _TRUNCATE, "%s, %s in storage%s%s%s%s%s%s%s.",
-                            r->name, strcmp(r->store, "-") == 0 ? "none" : r->store,
-                            r->can && r->price[0] ? ", " : "", r->can ? r->price : "",
-                            r->can && r->price[0] ? " each" : "",
-                            marked ? ", selling " : "", marked ? r->sell : "",
-                            marked ? " for " : "", marked ? r->total : "");
-
-            int fresh = !s_prev.name[0];
-            int same = r && strcmp(r->name, s_prev.name) == 0;
-            int counted = same && strcmp(r->sell, s_prev.sell) != 0 &&
-                          strcmp(r->store, s_prev.store) != 0;
-            int sold = !counted && s_prev_total[0] && strcmp(s_prev_total, s_head_total) != 0 &&
-                       (!s_head_total[0] || strncmp(s_head_total, "0 ", 2) == 0);
-            char say[2048] = "";
-            if (fresh)
-                _snprintf_s(say, sizeof say, _TRUNCATE,
-                            "%s%s%s %s Right sells one more, Left takes one back, "
-                            "Enter completes the sale.",
-                            s_title, s_title[0] ? ". " : "", item, info);
-            else if (sold)
-                _snprintf_s(say, sizeof say, _TRUNCATE, "Sold for %s. %s", s_prev_total, item);
-            else if (counted && marked)
-                _snprintf_s(say, sizeof say, _TRUNCATE, "Selling %s, %s. Total %s.",
-                            r->sell, r->total, s_head_total);
-            else if (counted)
-                _snprintf_s(say, sizeof say, _TRUNCATE, "None selling. Total %s.",
-                            s_head_total[0] ? s_head_total : "0 credits");
-            else if (!same)
-                _snprintf_s(say, sizeof say, _TRUNCATE, "%s %s", item, info);
-            if (r) s_prev = *r;
-            else memset(&s_prev, 0, sizeof s_prev);
-            if (!s_prev.name[0]) strcpy_s(s_prev.name, sizeof s_prev.name, "-");
-            strncpy_s(s_prev_total, sizeof s_prev_total, s_head_total, _TRUNCATE);
-            logf_("[%ld] %s %s.%s  GREY %d \"%s\"\n", n, tag, obj_name, fn_name, s_sel, say);
-            if (say[0]) {
-                speech_cancel_pending();
-                if (g_speak && !muted()) speech_say_now(say);
-            }
-            return;
-        }
-    }
-
-    // Medals (UIMedals, Barracks -> Medals). One screen, several views, each
-    // opened with AS_SetDisplayMode(view) (GoToView):
-    //   0  the medals: AS_SetTitle("CURRENT MEDALS"), then per medal
-    //      AS_SetInfo(i, name, status, bool locked, icon) -- a locked one is
-    //      only "LOCKED". No selection is sent until a move.
-    //   1  one medal: AS_SetEditingTitle("EDIT MEDAL", name, "Awards
-    //      remaining: 1"), AS_SetEditingButton(i, text, bool enabled) x3 --
-    //      RENAME MEDAL, ASSIGN POWER (or POWER ASSIGNED), AWARD MEDAL --
-    //      AS_SetEditingHelp (the power, or why it cannot be awarded yet),
-    //      AS_SetFocus(i).
-    //   2  its power: AS_SetTitle, AS_SetPowerInfo(i, description, image) x2,
-    //      AS_SetPowerButton x2 (both "ASSIGN THIS POWER"), AS_SetFocus(i).
-    //   3  the soldier list to award it (UISoldierList_AssignMedal), 4 its
-    //      name (UIInputDialogue) -- screens of their own.
-    // Up/Down move in 0 and 1, Left/Right in 2; Enter opens, picks, assigns
-    // (a warning dialogue first); Escape goes back a view. Every move is
-    // AS_SetFocus(i) as a bare number, which nothing resolved.
-    if (strncmp(obj_name, "UIMedals", 8) == 0) {
-        #define MEDAL_ROWS 12
-        static int  s_view, s_fresh;
-        static char s_title[96], s_row[MEDAL_ROWS][FOCUS_MAX_LABEL];
-        static int  s_nrow;
-        static char s_edit[3][96], s_btn[3][FOCUS_MAX_LABEL], s_help[512];
-        static int  s_btn_on[3];
-        static char s_power[2][512];
-        static int  s_sel0;                     // the medal selected, kept across views
-        static void* s_obj;
-        if (object != s_obj) { s_obj = object; s_sel0 = 0; }
-        if (strcmp(fn_name, "AS_SetDisplayMode") == 0 && p->nnumbers) {
-            s_view = (int)p->numbers[0];
-            s_fresh = 1;
-            if (s_view == 0) s_nrow = 0;
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetTitle") == 0) {
-            frame_string(node, locals, 0, s_title, sizeof s_title);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetInfo") == 0 && p->nnumbers) {
-            int i = (int)p->numbers[0];
-            if (i < 0 || i >= MEDAL_ROWS) return;
-            static FrameArgs a;
-            frame_args(node, locals, &a);
-            int locked = a.nb > 0 && a.b[0];
-            if (!locked && a.ns > 2) medal_learn(a.s[2], a.s[0]);
-            if (locked)
-                strcpy_s(s_row[i], FOCUS_MAX_LABEL, "Locked");
-            else
-                _snprintf_s(s_row[i], FOCUS_MAX_LABEL, _TRUNCATE, "%s%s%s", a.s[0],
-                            a.ns > 1 && a.s[1][0] ? ", " : "", a.ns > 1 ? a.s[1] : "");
-            if (i >= s_nrow) s_nrow = i + 1;
-            // Nothing follows the last medal and nothing is selected, so the
-            // arrival is said once the rows stop: each one puts it back.
-            if (s_view == 0 && s_fresh && i >= s_sel0) {
-                char say[FOCUS_MAX_LABEL + 256];
-                _snprintf_s(say, sizeof say, _TRUNCATE,
-                            "%s%s%s. Up and Down choose, Enter opens a medal.",
-                            s_title, s_title[0] ? ". " : "", s_row[s_sel0]);
-                speech_cancel_pending();
-                if (g_speak && !muted()) speech_say_after(say, SETTLE_MS);
-            }
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetEditingTitle") == 0) {
-            for (int i = 0; i < 3; i++) frame_string(node, locals, i, s_edit[i], sizeof s_edit[i]);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetEditingButton") == 0 && p->nnumbers) {
-            int i = (int)p->numbers[0];
-            if (i < 0 || i >= 3) return;
-            frame_string(node, locals, 0, s_btn[i], sizeof s_btn[i]);
-            s_btn_on[i] = !p->nbools || p->bools[0];
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetEditingHelp") == 0) {
-            frame_string(node, locals, 0, s_help, sizeof s_help);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetPowerInfo") == 0 && p->nnumbers) {
-            int i = (int)p->numbers[0];
-            if (i < 0 || i >= 2) return;
-            frame_string(node, locals, 0, s_power[i], sizeof s_power[i]);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetEditingImage") == 0 || strcmp(fn_name, "AS_SetPowerButton") == 0)
-            return;
-        if (strcmp(fn_name, "AS_SetFocus") == 0 && p->nnumbers) {
-            int i = (int)p->numbers[0];
-            char say[2048] = "";
-            if (s_view == 0 && i >= 0 && i < s_nrow) {
-                s_sel0 = i;
-                _snprintf_s(say, sizeof say, _TRUNCATE, "%s.", s_row[i]);
-            } else if (s_view == 1 && i >= 0 && i < 3) {
-                char btn[FOCUS_MAX_LABEL + 16];
-                _snprintf_s(btn, sizeof btn, _TRUNCATE, "%s%s.", s_btn[i],
-                            s_btn_on[i] ? "" : ", unavailable");
-                if (s_fresh)
-                    _snprintf_s(say, sizeof say, _TRUNCATE,
-                                "%s. %s. %s. %s%s%s Up and Down choose, Enter picks.",
-                                s_edit[0], s_edit[1], s_edit[2], s_help, s_help[0] ? " " : "",
-                                btn);
-                else
-                    strcpy_s(say, sizeof say, btn);
-            } else if (s_view == 2 && i >= 0 && i < 2) {
-                if (s_fresh)
-                    _snprintf_s(say, sizeof say, _TRUNCATE,
-                                "%s. Left and Right choose, Enter assigns. Power 1: %s Power 2: "
-                                "%s On power %d.",
-                                s_title, s_power[0], s_power[1], i + 1);
-                else
-                    _snprintf_s(say, sizeof say, _TRUNCATE, "Power %d: %s", i + 1, s_power[i]);
-            }
-            s_fresh = 0;
-            logf_("[%ld] %s %s.%s  MEDALS view %d, %d \"%s\"\n", n, tag, obj_name, fn_name,
-                  s_view, i, say);
-            if (say[0]) {
-                speech_cancel_pending();
-                if (g_speak && !muted()) speech_say_now(say);
-            }
-            return;
-        }
-    }
-
-    // A text box (UIInputDialogue): a medal's name, a soldier's. OnInit sends
-    // SetData(title, maxChars, the text as it stands) and nothing else; the
-    // typing goes to Flash's own text field, and the game reads it back only
-    // on Enter (GetInputText). So what is asked, and what it holds now.
-    if (strncmp(obj_name, "UIInputDialogue", 15) == 0 && strcmp(fn_name, "SetData") == 0) {
-        char title[256], text[256], say[640];
-        frame_string(node, locals, 0, title, sizeof title);
-        frame_string(node, locals, 1, text, sizeof text);
-        _snprintf_s(say, sizeof say, _TRUNCATE,
-                    "%s %s%s%s Type, then Enter accepts, Escape cancels.", title,
-                    text[0] ? "Now: " : "", text, text[0] ? "." : "");
-        logf_("[%ld] %s %s.%s  INPUT \"%s\"\n", n, tag, obj_name, fn_name, say);
-        speech_cancel_pending();
-        if (g_speak && !muted()) speech_say_now(say);
-        return;
-    }
-
-    // The XCOM Database (UITellMeMore, the pause menu's "XCOM Database"). A
-    // list of sections, each followed by its topics while it is open:
-    //     AS_SetTitle("XCOM Database"), AS_SetAudioButtonText, AS_ClearList,
-    //     Invoke("clear") -- logged under UpdateLayout --, then
-    //     AS_AddOption(i, label, 0) per row: a section drawn in
-    //         GetHTMLColoredText's state 2 (green), a topic in 0
-    //     and a selection (RealizeSelected):
-    //     AS_SetAudioButtonText("Play Audio" / "Stop Audio" on a topic,
-    //         "Expand Menu" / "Collapse Menu" on a section)
-    //     AS_UpdateInfo(topic, text, image) -- empty on a section
-    //     Invoke("setFocus", "i") -- the index as a string, logged under
-    //         RealizeSelected
-    // Up/Down wrap, Enter opens or closes a section (the list is drawn again)
-    // or plays a topic's narration, Escape leaves. It opens on the section of
-    // the facility it was called from. On the general path the audio
-    // button's one string was taken for a list and replaced the topics, so
-    // every move said "FOCUS n unresolved" or the button's label.
-    if (strncmp(obj_name, "UITellMeMore", 12) == 0) {
-        #define TMM_ROWS 256
-        static char s_title[96], s_btn[64], s_topic[256], s_text[4096];
-        static char s_row[TMM_ROWS][96];
-        static unsigned char s_head[TMM_ROWS];
-        static int  s_n, s_fresh;
-        static void* s_obj;
-        if (object != s_obj) { s_obj = object; s_fresh = 1; s_n = 0; }
-        if (strcmp(fn_name, "AS_SetTitle") == 0) {
-            frame_string(node, locals, 0, s_title, sizeof s_title);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetAudioButtonText") == 0) {
-            frame_string(node, locals, 0, s_btn, sizeof s_btn);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetBackButtonText") == 0) return;
-        if (strcmp(fn_name, "AS_ClearList") == 0 || strcmp(fn_name, "UpdateLayout") == 0) {
-            s_n = 0;
-            return;
-        }
-        if (strcmp(fn_name, "AS_AddOption") == 0 && p->nnumbers) {
-            int i = (int)p->numbers[0];
-            if (i < 0 || i >= TMM_ROWS) return;
-            static char raw[FRAME_ARG_TEXT];
-            frame_string(node, locals, 0, s_row[i], sizeof s_row[i]);
-            s_head[i] = frame_local_raw(node, locals, "sLabel", raw, sizeof raw) &&
-                        font_hue(raw) == 0x5CD16C;
-            if (i >= s_n) s_n = i + 1;
-            return;
-        }
-        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
-            frame_string(node, locals, 0, s_topic, sizeof s_topic);
-            frame_string(node, locals, 1, s_text, sizeof s_text);
-            return;
-        }
-        if (strcmp(fn_name, "RealizeSelected") == 0) {
-            int i;
-            if (!string_index(p, &i) || i < 0 || i >= s_n) return;
-            // "Expand Menu" means the section is shut.
-            int shut = strstr(s_btn, "Expand") != NULL;
-            static char say[4096 + 512];
-            if (s_head[i])
-                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s, %s.%s", s_fresh ? s_title : "",
-                            s_fresh && s_title[0] ? ". " : "", s_row[i],
-                            shut ? "closed" : "open",
-                            s_fresh ? " Up and Down choose, Enter opens or closes a section, "
-                                      "and on a topic plays its narration." : "");
-            else
-                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s. %s%s", s_fresh ? s_title : "",
-                            s_fresh && s_title[0] ? ". " : "",
-                            s_topic[0] ? s_topic : s_row[i], s_text,
-                            s_fresh ? " Up and Down choose, Enter plays the narration." : "");
-            s_fresh = 0;
-            logf_("[%ld] %s %s.%s  TMM %d \"%.200s\"\n", n, tag, obj_name, fn_name, i, say);
-            speech_cancel_pending();
-            if (g_speak && !muted()) speech_say_now(say);
-            return;
-        }
-    }
-
-    // The finance statement (UIBaseFinances, Situation Room -> View XCOM
-    // Finances). UpdateData draws it whole, twice on arrival:
-    //     AS_SetTitle("CASH FLOW STATEMENT")
-    //     AS_SetNet("NET MONTHLY INCOME: +§265")
-    //     AS_SetSection(0, "GROSS MONTHLY INCOME", "+§375", "", "")
-    //     AS_SetSection(i, heading, total, labels, values) per section, the
-    //         items as "2x Interceptor\n1x Skyranger\n" beside "-§40\n-§20\n"
-    // and takes no arrows. Nothing was said (log of 2026-09-25). Each line is
-    // kept -- a section with its items paired to their costs -- the whole
-    // statement is said once the calls stop, and the arrows walk it
-    // (fin_walk).
-    if (strncmp(obj_name, "UIBaseFinances", 14) == 0) {
-        static char s_netline[256];
-        static void* s_obj;                 // a new visit is said again
-        if (object != s_obj) { s_obj = object; g_fin_said[0] = 0; }
-        char t[512];
-        if (strcmp(fn_name, "AS_SetTitle") == 0) {
-            frame_string(node, locals, 0, t, sizeof t);
-            g_fin_n = 0;
-            g_fin_at = -1;
-            if (t[0]) _snprintf_s(g_fin[g_fin_n++], sizeof g_fin[0], _TRUNCATE, "%s.", t);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetNet") == 0) {
-            frame_string(node, locals, 0, t, sizeof t);
-            hire_text(t, s_netline, sizeof s_netline);
-            if (s_netline[0] && g_fin_n < FIN_LINES)
-                _snprintf_s(g_fin[g_fin_n++], sizeof g_fin[0], _TRUNCATE, "%s.", s_netline);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetSection") == 0) {
-            char head[128], total[128], sum[128];
-            frame_string(node, locals, 0, head, sizeof head);
-            frame_string(node, locals, 1, t, sizeof t);
-            hire_text(t, total, sizeof total);
-            if (!head[0] || g_fin_n >= FIN_LINES) return;      // an empty section
-            static char labels[FRAME_ARG_TEXT], values[FRAME_ARG_TEXT];
-            if (!frame_local_raw(node, locals, "Label", labels, sizeof labels)) labels[0] = 0;
-            if (!frame_local_raw(node, locals, "Value", values, sizeof values)) values[0] = 0;
-            char* line = g_fin[g_fin_n++];
-            size_t used = (size_t)_snprintf_s(line, sizeof g_fin[0], _TRUNCATE, "%s: %s.", head,
-                                              total);
-            char* lctx = NULL;
-            char* vctx = NULL;
-            char* l = strtok_s(labels, "\n", &lctx);
-            char* v = strtok_s(values, "\n", &vctx);
-            for (; l && used < sizeof g_fin[0]; l = strtok_s(NULL, "\n", &lctx),
-                                                v = v ? strtok_s(NULL, "\n", &vctx) : NULL) {
-                strip_markup(l);
-                sum[0] = 0;
-                if (v) { strip_markup(v); hire_text(v, sum, sizeof sum); }
-                int w = _snprintf_s(line + used, sizeof g_fin[0] - used, _TRUNCATE, " %s%s%s.",
-                                    l, sum[0] ? ": " : "", sum);
-                if (w < 0) break;
-                used += (size_t)w;
-            }
-            // Said once the draw stops: each section puts it back.
-            static char say[FIN_LINES * 128];
-            say[0] = 0;
-            size_t u = 0;
-            for (int i = 0; i < g_fin_n; i++) {
-                int w = _snprintf_s(say + u, sizeof say - u, _TRUNCATE, "%s%s", u ? " " : "",
-                                    g_fin[i]);
-                if (w < 0) break;
-                u += (size_t)w;
-            }
-            if (strcmp(say, g_fin_said) != 0) {
-                strncpy_s(g_fin_said, sizeof g_fin_said, say, _TRUNCATE);
-                if (u < sizeof say)
-                    _snprintf_s(say + u, sizeof say - u, _TRUNCATE,
-                                " Up and Down read it a line at a time. Escape: back.");
-                logf_("[%ld] %s %s.%s  FINANCES \"%s\"\n", n, tag, obj_name, fn_name, say);
-                speech_cancel_pending();
-                if (g_speak && !muted()) speech_say_after(say, SETTLE_MS);
-            }
-            return;
-        }
-    }
-
-    // The labs with soldier slots. See slots_select.
-    if (strncmp(obj_name, "UIGeneLab", 9) == 0 || strncmp(obj_name, "UIPsiLabs", 9) == 0 ||
-        strncmp(obj_name, "UICyberneticsLab", 16) == 0) {
-        if (strcmp(fn_name, "AS_SetTitleLabels") == 0) {
-            frame_string(node, locals, 0, g_slots_title, sizeof g_slots_title);
-            return;
-        }
-        if (strcmp(fn_name, "AS_ClearSoldiers") == 0) {
-            g_slots_obj = object;
-            g_slots_n = 0;
-            return;
-        }
-        if (strcmp(fn_name, "AS_AddSlot") == 0) {
-            if (g_slots_n >= SLOT_ROWS) return;
-            static FrameArgs a;
-            frame_args(node, locals, &a);
-            for (int i = 0; i < a.ns; i++) strip_markup(a.s[i]);
-            const char* name = a.ns > 0 ? a.s[0] : "";
-            const char* status = a.ns > 1 ? a.s[1] : "";
-            const char* button = a.ns > 2 ? a.s[2] : "";
-            int off = a.nb > 0 && a.b[0];
-            _snprintf_s(g_slots_row[g_slots_n], FOCUS_MAX_LABEL, _TRUNCATE, "%s%s%s.%s%s%s",
-                        strcmp(name, "(EMPTY)") == 0 ? "Empty" : name, status[0] ? ", " : "",
-                        status, button[0] ? " Enter: " : "", button,
-                        button[0] ? (off ? ", unavailable." : ".") : "");
-            g_slots_button[g_slots_n] = button[0] != 0;
-            g_slots_n++;
-            return;
-        }
-        // The end of every draw. The game's own choice when it made one;
-        // otherwise the first slot with a button, as the game does without a
-        // mouse. The arrival names the lab.
-        if (strcmp(fn_name, "AS_SetSelected") == 0) {
-            int i;
-            if (!string_index(p, &i) || i < 0 || i >= g_slots_n) {
-                i = 0;
-                for (int k = 0; k < g_slots_n; k++) if (g_slots_button[k]) { i = k; break; }
-            }
-            char lead[160];
-            _snprintf_s(lead, sizeof lead, _TRUNCATE, "%s%s", g_slots_title,
-                        g_slots_title[0] ? ". Up and Down choose a slot. " : "");
-            slots_select(n, i, lead);
-            return;
-        }
-    }
-
-    // A soldier's gene mods (UISoldierGeneMods), from the Genetics Lab or, to
-    // look only, from the soldier's own screen. Five rows, the body parts
-    // (AS_SetRowData(i, "BRAIN", locked)), two mods each; the arrows move the
-    // selection natively, and each move (RealizeSelected) sends
-    //     AS_SetSelectedIcon(row, col), AS_SetDescription(name, text),
-    //     AS_SetImplantButtonHelp("SELECT" / "REMOVE" / "INSUFFICIENT
-    //         RESOURCES", icon) -- empty for a locked or installed mod --
-    //     AS_SetRequirements(meld, cash) -- empty the same way, and last.
-    // Enter ticks or unticks the mod; Y opens the confirm dialogue, and Y
-    // cannot be pressed in the headquarters, so 1 stands in for it (input.c).
-    if (strncmp(obj_name, "UISoldierGeneMods", 17) == 0) {
-        static char s_title[64], s_rowname[5][48], s_name[96], s_desc[1024], s_button[96];
-        static int  s_row = -1, s_col = -1, s_said_row = -1, s_said_col = -1, s_fresh;
-        static char s_said_button[96];
-        if (strcmp(fn_name, "AS_InitializeTree") == 0) {
-            frame_string(node, locals, 0, s_title, sizeof s_title);
-            s_fresh = 1;
-            s_said_row = s_said_col = -1;
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetRowData") == 0 && p->nnumbers) {
-            int i = (int)p->numbers[0];
-            if (i >= 0 && i < 5) frame_string(node, locals, 0, s_rowname[i], sizeof s_rowname[i]);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetSelectedIcon") == 0 && p->nnumbers >= 2) {
-            s_row = (int)p->numbers[0];
-            s_col = (int)p->numbers[1];
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetDescription") == 0) {
-            frame_string(node, locals, 0, s_name, sizeof s_name);
-            frame_string(node, locals, 1, s_desc, sizeof s_desc);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetImplantButtonHelp") == 0) {
-            frame_string(node, locals, 0, s_button, sizeof s_button);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetRequirements") == 0) {
-            char meld[64], cash[64], cost[160] = "";
-            frame_string(node, locals, 0, meld, sizeof meld);
-            frame_string(node, locals, 1, cash, sizeof cash);
-            // The Meld is an injected icon and then the number, and the
-            // stripped text came back empty ("Costs  Meld", 2026-09-27): the
-            // number is taken from the raw text, its last run of digits.
-            if (!meld[0]) {
-                static char raw[FRAME_ARG_TEXT];
-                static int raw_logged;
-                if (frame_local_raw(node, locals, "meldLabel", raw, sizeof raw)) {
-                    if (!raw_logged) {
-                        raw_logged = 1;
-                        logf_("[%ld] GENEMODS meld raw \"%.200s\"\n", n, raw);
-                    }
-                    const char* end = NULL;
-                    for (const char* c = raw; *c; c++)
-                        if (*c >= '0' && *c <= '9' && !(c[1] >= '0' && c[1] <= '9')) end = c;
-                    if (end) {
-                        const char* start = end;
-                        while (start > raw && start[-1] >= '0' && start[-1] <= '9') start--;
-                        size_t len = (size_t)(end - start + 1);
-                        if (len < sizeof meld) { memcpy(meld, start, len); meld[len] = 0; }
-                    }
-                }
-            }
-            if (meld[0] || cash[0]) {
-                char c[64];
-                hire_text(cash, c, sizeof c);
-                _snprintf_s(cost, sizeof cost, _TRUNCATE, " Costs %s Meld, %s.", meld, c);
-            }
-            const char* state = strstr(s_button, "REMOVE") ? "Chosen."
-                              : strstr(s_button, "INSUFFICIENT") ? "Not enough resources."
-                              : s_button[0] ? "Not chosen." : "";
-            char say[2048];
-            if (s_row == s_said_row && s_col == s_said_col && !s_fresh) {
-                // Enter on the same mod: only whether it is now chosen.
-                if (strcmp(s_button, s_said_button) == 0) return;
-                strcpy_s(say, sizeof say, state);
-            } else {
-                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s, mod %d of 2. %s%s%s%s%s",
-                            s_fresh ? s_title : "", s_fresh && s_title[0] ? ". " : "",
-                            s_row != s_said_row && s_row >= 0 && s_row < 5 ? s_rowname[s_row] : "",
-                            s_row != s_said_row ? ". " : "", s_name, s_col + 1,
-                            state, state[0] ? " " : "", s_desc, cost,
-                            s_fresh ? " Up and Down choose the body part, Left and Right the "
-                                      "mod, Enter chooses it, 1 confirms." : "");
-            }
-            s_fresh = 0;
-            s_said_row = s_row;
-            s_said_col = s_col;
-            strcpy_s(s_said_button, sizeof s_said_button, s_button);
-            logf_("[%ld] %s %s.%s  GENEMODS %d, %d \"%s\"\n", n, tag, obj_name, fn_name, s_row,
-                  s_col, say);
-            if (say[0]) {
-                speech_cancel_pending();
-                if (g_speak && !muted()) speech_say_now(say);
-            }
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetCalloutImage") == 0 || strcmp(fn_name, "AS_SetIcon") == 0)
-            return;
-    }
-
-    // Build Items. UpdateLayout sends the heading and column labels
-    // (AS_SetLabels(title, "ITEM", "BUILT")), the tabs' states, clears the
-    // list (Invoke "clear") and fills it in one Invoke("BatchAddOptions",
-    // [label, quantity, ...]); RealizeSelected then sends the item's panel
-    // (AS_UpdateInfo) and the selection as text (AS_SetFocus("3")). Left
-    // and right change tab, which runs all of that and then RealizeSelected
-    // once more.
-    if (strncmp(obj_name, "UIBuildItem", 11) == 0) {
-        static char s_qty_label[64];
-        g_builditem_at = GetTickCount64();
-        if (strcmp(fn_name, "AS_SetLabels") == 0) {
-            static FrameArgs a;
-            frame_args(node, locals, &a);
-            if (a.ns > 0 && a.s[0][0]) focus_set_title(object, a.s[0]);
-            strncpy_s(s_qty_label, sizeof s_qty_label, a.ns > 2 ? a.s[2] : "", _TRUNCATE);
-            logf_("[%ld] %s %s.%s  BUILD title \"%s\", count \"%s\"\n", n, tag, obj_name,
-                  fn_name, a.ns > 0 ? a.s[0] : "", s_qty_label);
-            return;
-        }
-        // The tab's index, which the general path took for a move to the
-        // item at that index.
-        if (strcmp(fn_name, "AS_SetTabState") == 0 ||
-            strcmp(fn_name, "AS_SetSelectedCategory") == 0)
-            return;
-        if (strcmp(fn_name, "AS_SetConfirmButton") == 0) {
-            if (p->nstrings) help_set(object, 0, p->strings[0], "Icon_A_X", 0);
-            return;
-        }
-        if (strcmp(fn_name, "UpdateLayout") == 0) {
-            AbarValue* v;
-            int nv = asvalues_from_frame(stack, &v);
-            focus_begin(object);
-            if (nv <= 0) {
-                logf_("[%ld] %s %s.%s  BUILD cleared\n", n, tag, obj_name, fn_name);
-                return;
-            }
-            int k = 0;
-            for (int i = 0; i + 1 < nv; i++) {
-                if (v[i].type != ABAR_STRING || v[i + 1].type != ABAR_NUMBER) continue;
-                char row[FOCUS_MAX_LABEL];
-                hq_build_row(v[i].s, (int)v[i + 1].n, s_qty_label, row, sizeof row);
-                focus_set(object, k, row);
-                logf_("[%ld] %s %s.%s  BUILD %d = \"%s\"\n", n, tag, obj_name, fn_name, k, row);
-                k++;
-                i++;
-            }
-            return;
-        }
-        // EU sends the rows one at a time instead, after the same clear:
-        // AS_AddOption(int iIndex, string sLabel, bool IsDisabled, int
-        // iQuantity), the label coloured the same way.
-        if (strcmp(fn_name, "AS_AddOption") == 0 && p->nnumbers >= 2) {
-            static char raw[FRAME_ARG_TEXT];
-            char row[FOCUS_MAX_LABEL];
-            frame_local_raw(node, locals, "sLabel", raw, sizeof raw);
-            hq_build_row(raw, (int)p->numbers[1], s_qty_label, row, sizeof row);
-            focus_set(object, (int)p->numbers[0], row);
-            logf_("[%ld] %s %s.%s  BUILD %d = \"%s\"\n", n, tag, obj_name, fn_name,
-                  (int)p->numbers[0], row);
-            return;
-        }
-        // The item's panel: its name (the label already says it), the cost
-        // from the raw text so a requirement short is marked, and the
-        // description.
-        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
-            static char raw[FRAME_ARG_TEXT], cost[FRAME_ARG_TEXT];
-            static FrameArgs a;
-            static char detail[FOCUS_MAX_DETAIL];
-            frame_local_raw(node, locals, "infoText", raw, sizeof raw);
-            hq_cost_text(raw, cost, sizeof cost);
-            frame_args(node, locals, &a);
-            const char* parts[2];
-            int np = 0;
-            if (cost[0]) parts[np++] = cost;
-            if (a.ns > 2 && a.s[2][0]) parts[np++] = a.s[2];
-            focus_join_detail(parts, np, detail, sizeof detail);
-            focus_set_detail(object, detail);
-            logf_("[%ld] %s %s.%s  PANEL \"%s\"\n", n, tag, obj_name, fn_name, detail);
-            if (object == g_focus_obj && !g_focus_had_panel && detail[0] &&
-                GetTickCount64() - g_focus_at < LIST_WINDOW_MS) {
-                g_focus_had_panel = 1;
-                if (g_speak && !muted()) speech_say(detail);
-            }
-            return;
-        }
-        // A tab change selects twice, the second time with the same item and
-        // the same panel; said again, it cut the first off, heading and all.
-        if (strcmp(fn_name, "AS_SetFocus") == 0) {
-            static void*     s_obj;
-            static int       s_idx = -1;
-            static char      s_said[FOCUS_MAX_LABEL + FOCUS_MAX_DETAIL];
-            static ULONGLONG s_at;
-            int idx;
-            if (!string_index(p, &idx) || idx < 0) return;
-            static char label[FOCUS_MAX_LABEL], detail[FOCUS_MAX_DETAIL];
-            static char key[FOCUS_MAX_LABEL + FOCUS_MAX_DETAIL];
-            ULONGLONG d_at, t = GetTickCount64();
-            if (!focus_label_at(object, idx, label, sizeof label)) label[0] = 0;
-            if (!focus_detail(object, detail, sizeof detail, &d_at)) detail[0] = 0;
-            _snprintf_s(key, sizeof key, _TRUNCATE, "%s|%s", label, detail);
-            if (object == s_obj && idx == s_idx && t - s_at < 1500 &&
-                strcmp(key, s_said) == 0) {
-                focus_set_detail(object, "");
-                logf_("[%ld] %s %s.%s  FOCUS %d (said, same again)\n",
-                      n, tag, obj_name, fn_name, idx);
-                return;
-            }
-            s_obj = object;
-            s_idx = idx;
-            s_at = t;
-            strncpy_s(s_said, sizeof s_said, key, _TRUNCATE);
-            focus_announce(n, tag, obj_name, fn_name, object, idx);
-            return;
-        }
-    }
-
-    // Hiring: soldiers (UIHiring_Barracks, Barracks -> Hire Soldiers) and
-    // interceptors (UIHiring_Hangar, an empty hangar slot). Every change
-    // redraws it all (UpdateData):
-    //     AS_UpdateInfo("Hiring Cost:<br>§10<br>", "Barracks Capacity:<br>13/70")
-    //     AS_SetTitle("HIRE SOLDIERS"); AS_SetIcon
-    //     the count, a spinner on the screen's UIWidgetHelper:
-    //         SetSpinnerValue("1"), SetSpinnerArrows
-    // Up and Down go to the spinner first and raise or lower the count
-    // (OnIncreaseQuantity / OnDecreaseQuantity); Enter hires, Escape cancels.
-    // On the general path only the first "1" was said, and the count went to
-    // 8 and the cost to §80 without a word (log of 2026-09-25). As for an
-    // order (below), a helper call within a moment of a hiring draw is the
-    // hiring's; the draw is said at its spinner value, whole on arrival and
-    // then when the count changes.
-    if (strncmp(obj_name, "UIWidgetHelper", 14) == 0 && g_hire.at &&
-        GetTickCount64() - g_hire.at < ENG_SAME_DRAW_MS) {
-        if (strstr(fn_name, "SpinnerValue") && p->nstrings) {
-            char count[32];
-            strncpy_s(count, sizeof count, p->strings[0], _TRUNCATE);
-            char say[1024] = "";
-            if (g_hire.fresh)
-                _snprintf_s(say, sizeof say, _TRUNCATE,
-                            "%s%s%s. %s %s Up and Down change the number, Enter: %s, "
-                            "Escape: cancel.",
-                            g_hire.title, g_hire.title[0] ? ". " : "", count, g_hire.cost,
-                            g_hire.cap, g_hire.confirm[0] ? g_hire.confirm : "confirm");
-            else if (strcmp(count, g_hire.count) != 0)
-                _snprintf_s(say, sizeof say, _TRUNCATE, "%s. %s %s", count, g_hire.cost,
-                            g_hire.cap);
-            g_hire.fresh = 0;
-            strncpy_s(g_hire.count, sizeof g_hire.count, count, _TRUNCATE);
-            logf_("[%ld] %s %s.%s  HIRE \"%s\"\n", n, tag, obj_name, fn_name, say);
-            if (say[0]) {
-                speech_cancel_pending();
-                if (g_speak && !muted()) speech_say_now(say);
-            }
-            return;
-        }
-        // The arrows and the helper's own focus: nothing to say apart.
-        if (strstr(fn_name, "Spinner") || strcmp(fn_name, "RealizeSelected") == 0) return;
-    }
-    if (strncmp(obj_name, "UIHiring", 8) == 0) {
-        g_hire.at = GetTickCount64();
-        if (object != g_hire.obj) {
-            memset(&g_hire, 0, sizeof g_hire);
-            g_hire.obj = object;
-            g_hire.fresh = 1;
-            g_hire.at = GetTickCount64();
-        }
-        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
-            char t[256];
-            frame_string(node, locals, 0, t, sizeof t);
-            hire_text(t, g_hire.cost, sizeof g_hire.cost);
-            frame_string(node, locals, 1, t, sizeof t);
-            hire_text(t, g_hire.cap, sizeof g_hire.cap);
-            // The cost ends in a <br>, and so a stop; the capacity does not.
-            size_t cl = strlen(g_hire.cap);
-            if (cl && !strchr(".!?", g_hire.cap[cl - 1]))
-                strncat_s(g_hire.cap, sizeof g_hire.cap, ".", _TRUNCATE);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetTitle") == 0) {
-            frame_string(node, locals, 0, g_hire.title, sizeof g_hire.title);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetMouseConfirmText") == 0) {
-            frame_string(node, locals, 0, g_hire.confirm, sizeof g_hire.confirm);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetIcon") == 0) return;
-    }
-
-    // An order (UIManufacturing): a new one from Build Items, or one already
-    // in the queue from Review an order. The screen is not a list. Every
-    // redraw -- arriving, the quantity changing, rush toggled -- goes
-    // UpdateData (the buttons through SetHelp), RefreshDisplay (AS_SetTitle,
-    // AS_SetEngineerLine, the quantity spinner through the widget helper,
-    // AS_SetQuantityLine for an order already placed), then AS_UpdateInfo
-    // (the duration and cost, the notes). So the order is gathered and said
-    // at AS_UpdateInfo: whole on arrival, then only what changed.
-    //
-    // The quantity is a spinner on a UIWidgetHelper, which by name belongs
-    // to no screen. Its calls come in the same redraw as the order's, so a
-    // helper call within a moment of one is the order's. Up and down move
-    // it (the spinner is vertical), and so do left and right.
-    if (strncmp(obj_name, "UIWidgetHelper", 14) == 0 && g_man_at &&
-        GetTickCount64() - g_man_at < ENG_SAME_DRAW_MS) {
-        if (strstr(fn_name, "SpinnerValue") && p->nstrings) {
-            strncpy_s(g_man.qty, sizeof g_man.qty, p->strings[0], _TRUNCATE);
-            logf_("[%ld] %s %s.%s  ORDER quantity \"%s\"\n", n, tag, obj_name, fn_name,
-                  g_man.qty);
-        }
-        return;
-    }
-    if (strncmp(obj_name, "UIManufacturing", 15) == 0) {
-        g_man_at = GetTickCount64();
-        if (object != g_man.obj) {
-            memset(&g_man, 0, sizeof g_man);
-            g_man.obj = object;
-        }
-        static FrameArgs a;
-        if (strcmp(fn_name, "AS_SetTitle") == 0) {
-            frame_args(node, locals, &a);
-            strncpy_s(g_man.title, sizeof g_man.title, a.ns > 0 ? a.s[0] : "", _TRUNCATE);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetEngineerLine") == 0) {
-            frame_args(node, locals, &a);
-            _snprintf_s(g_man.eng, sizeof g_man.eng, _TRUNCATE, "%s %s",
-                        a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "");
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetQuantityLine") == 0) {
-            frame_args(node, locals, &a);
-            strncpy_s(g_man.qty_label, sizeof g_man.qty_label, a.ns > 0 ? a.s[0] : "", _TRUNCATE);
-            strncpy_s(g_man.qty, sizeof g_man.qty, a.ns > 1 ? a.s[1] : "", _TRUNCATE);
-            return;
-        }
-        // Rush construction's button says whether it is on ("Rush
-        // Construction YES"), so it is kept as part of the order; the call
-        // goes on to the help bar below.
-        if (strcmp(fn_name, "AS_SetHelp") == 0 && p->nnumbers && (int)p->numbers[0] == 2) {
-            frame_args(node, locals, &a);
-            strncpy_s(g_man.rush, sizeof g_man.rush, a.ns > 0 ? a.s[0] : "", _TRUNCATE);
-        }
-        if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
-            static char raw[FRAME_ARG_TEXT], info[FRAME_ARG_TEXT], notes[FRAME_ARG_TEXT];
-            static char say[FOCUS_MAX_DETAIL];
-            frame_local_raw(node, locals, "infoText", raw, sizeof raw);
-            hq_cost_text(raw, info, sizeof info);
-            frame_args(node, locals, &a);
-            strncpy_s(notes, sizeof notes, a.ns > 1 ? a.s[1] : "", _TRUNCATE);
-            char qty[96];
-            if (g_man.qty[0])
-                _snprintf_s(qty, sizeof qty, _TRUNCATE, "%s %s",
-                            g_man.qty_label[0] ? g_man.qty_label : "QUANTITY:", g_man.qty);
-            else
-                qty[0] = 0;
-            const char* parts[6];
-            int np = 0;
-            int first = !g_man.said;
-            if (first && g_man.title[0]) parts[np++] = g_man.title;
-            if (!first && g_man.rush[0] && strcmp(g_man.rush, g_man.said_rush) != 0)
-                parts[np++] = g_man.rush;
-            if (qty[0] && (first || strcmp(qty, g_man.said_qty) != 0)) parts[np++] = qty;
-            if (g_man.eng[0] && (first || strcmp(g_man.eng, g_man.said_eng) != 0))
-                parts[np++] = g_man.eng;
-            if (info[0] && (first || strcmp(info, g_man.said_info) != 0)) parts[np++] = info;
-            if (notes[0] && (first || strcmp(notes, g_man.said_notes) != 0)) parts[np++] = notes;
-            focus_join_detail(parts, np, say, sizeof say);
-            g_man.said = 1;
-            strncpy_s(g_man.said_rush, sizeof g_man.said_rush, g_man.rush, _TRUNCATE);
-            strncpy_s(g_man.said_qty, sizeof g_man.said_qty, qty, _TRUNCATE);
-            strncpy_s(g_man.said_eng, sizeof g_man.said_eng, g_man.eng, _TRUNCATE);
-            strncpy_s(g_man.said_info, sizeof g_man.said_info, info, _TRUNCATE);
-            strncpy_s(g_man.said_notes, sizeof g_man.said_notes, notes, _TRUNCATE);
-            logf_("[%ld] %s %s.%s  ORDER %s\"%s\"\n", n, tag, obj_name, fn_name,
-                  first ? "" : "change ", say);
-            if (say[0]) {
-                speech_cancel_pending();
-                if (g_speak && !muted()) speech_say_now(say);
-            }
-            return;
-        }
-    }
-
-    // A country chosen on the room's map (Launch Satellite, covert ops). See
-    // hq.h. The HUD beside the map is the only place the country is named;
-    // what it draws is kept, and said when the map's selection moves.
-    if (strncmp(obj_name, "UISituationRoomHUD_", 19) == 0) {
-        static FrameArgs a;
-        static char body[FRAME_ARG_TEXT];
-        if (strcmp(fn_name, "AS_SetCountryInfo") == 0) {
-            frame_args(node, locals, &a);
-            frame_lines(node, locals, "bodyText", body, sizeof body);
-            hq_sat_country(a.ns > 0 ? a.s[0] : "", body, p->nnumbers ? (int)p->numbers[0] : 0);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetContinentInfo") == 0) {
-            frame_args(node, locals, &a);
-            frame_lines(node, locals, "bodyText", body, sizeof body);
-            hq_sat_continent(a.ns > 0 ? a.s[0] : "", body);
-            return;
-        }
-        if (strcmp(fn_name, "AS_SetLaunchButton") == 0 ||
-            strcmp(fn_name, "AS_SetAccuseButton") == 0) {
-            frame_args(node, locals, &a);
-            hq_sat_button(fn_name[5] == 'A', a.ns > 1 ? a.s[1] : "", a.nb > 0 && a.b[0]);
-            return;
-        }
-    }
-    if (strncmp(obj_name, "UISituationRoom_", 16) == 0 &&
-        obj_name[16] >= '0' && obj_name[16] <= '9') {
-        g_sitroom_at = GetTickCount64();
-        if (strcmp(fn_name, "AS_SetSatellites") == 0 && p->nnumbers >= 3) {
-            hq_sat_count((int)p->numbers[0], (int)p->numbers[1], (int)p->numbers[2]);
-            return;
-        }
-        if (strcmp(fn_name, "RealizeSelected") == 0) {
-            int idx = p->nnumbers ? (int)p->numbers[0] : -1;
-            if (idx < 0) {
-                hq_sat_reset();
-                logf_("[%ld] %s %s.%s  MAP left\n", n, tag, obj_name, fn_name);
-                return;
-            }
-            static char say[2 * HQ_SIT_TEXT];
-            if (!hq_sat_say(say, sizeof say)) {
-                logf_("[%ld] %s %s.%s  MAP %d, no country drawn\n", n, tag, obj_name, fn_name,
-                      idx);
-                return;
-            }
-            logf_("[%ld] %s %s.%s  MAP %d -> \"%s\"\n", n, tag, obj_name, fn_name, idx, say);
-            speech_cancel_pending();
-            if (g_speak && !muted()) speech_say_now(say);
-            return;
-        }
-    }
-
-    // The Situation Room's display. See hq.h. Kept for Delete; nothing else
-    // is changed, so the countries are still filed as the slots the satellite
-    // view's SetSelected moves over. The ticker and the objectives are read
-    // from the frame whole: the payload keeps 256 characters, and the ticker
-    // is every headline in one string.
-    if ((strncmp(obj_name, "UISituationRoom_", 16) == 0 &&
-         obj_name[16] >= '0' && obj_name[16] <= '9') ||
-        strncmp(obj_name, "UIObjectivesScreen_", 19) == 0) {
-        g_sitroom_at = GetTickCount64();
-        if (strcmp(fn_name, "AS_SetCountryInfo") == 0 && p->nnumbers >= 2) {
-            static FrameArgs a;
-            frame_args(node, locals, &a);
-            hq_sit_country((int)p->numbers[0], a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
-                           (int)p->numbers[1], a.nb > 0 ? a.b[0] : 1);
-        } else if (strcmp(fn_name, "AS_SetTickerText") == 0) {
-            static char title[64], text[MAX_STR];
-            frame_string(node, locals, 0, title, sizeof title);
-            frame_string(node, locals, 1, text, sizeof text);
-            hq_sit_news(title, text);
-        } else if (strcmp(fn_name, "AS_SetDoomLevel") == 0 && p->nnumbers >= 1) {
-            hq_sit_doom((int)p->numbers[0]);
-        } else if (strcmp(fn_name, "AS_SetSmallBody") == 0 ||
-                   strcmp(fn_name, "AS_SetLargeBody") == 0) {
-            static char body[MAX_STR];
-            frame_string(node, locals, 0, body, sizeof body);
-            if (fn_name[6] == 'S') hq_sit_objectives(body, NULL);
-            else                   hq_sit_objectives(NULL, body);
-        }
-    }
-    // Back at the facility row: out of the room, whatever drew last.
-    if (strncmp(obj_name, "UIStrategyHUD_FacilityMenu", 26) == 0 &&
-        strcmp(fn_name, "OnReceiveFocus") == 0)
-        g_sitroom_left_at = g_eng_left_at = GetTickCount64();
 
     // The mission's objectives. See mission.h. Kept, and said once a burst
     // of changes is over (mission_poll).
