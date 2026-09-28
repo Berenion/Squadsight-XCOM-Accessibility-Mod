@@ -72,172 +72,22 @@
 #include "mouse.h"
 #include "props.h"
 #include "input.h"
+#include "log.h"
+#include "game.h"
+#include "units.h"
 
 #define MAX_NATIVES 8192
 #define MAX_STR     4096
 #define MAX_FIELDS  64
 #define MAX_ELEMS   64      // array elements inspected per property
 
-static CRITICAL_SECTION g_lock;
 static volatile LONG    g_calls;
 static int              g_speak = 1;
 
 // Consecutive duplicates are collapsed: the UI re-sends the same string on
 // every refresh, which would otherwise bury the interesting transitions --
 // and would make the speech unusable.
-static char g_last[MAX_STR + 256];
-static long g_repeat;
-static ULONGLONG g_repeat_since;
 static char g_last_spoken[MAX_STR];
-
-// The log. It is the one part of this mod its user cannot read, so it has to
-// survive a crash and stay readable while the game runs -- and it is written
-// from the game's own UI thread, a line per call.
-//
-// It used to be flushed per line, which met both needs and cost a WriteFile
-// on the game thread for every line: the 2026-09-25 mission log had 37,275
-// call lines, 16,243 of them UIUnitFlag.SetPosition. (OutputDebugStringA
-// beside it was worse still -- every call took the machine-wide DBWinMutex --
-// and went long ago.)
-//
-// So a line is only copied into memory here, and log_writer puts it in the
-// file every LOG_FLUSH_MS from a thread of its own. The two needs are kept
-// another way:
-//   - Readable while running: the file is shared for reading, and at most
-//     LOG_FLUSH_MS behind.
-//   - A crash: what WriteFile has handed the system survives the process, so
-//     only the buffer is at risk, and log_on_crash writes it out on the first
-//     sign of a fatal exception, before any handler runs. A clean exit writes
-//     it from DllMain.
-#define LOG_BUF      (256 * 1024)
-#define LOG_FLUSH_MS 200
-
-static HANDLE           g_log = INVALID_HANDLE_VALUE;
-static char             g_log_buf[2][LOG_BUF];
-static size_t           g_log_n;            // bytes waiting in g_log_buf[g_log_cur]
-static int              g_log_cur;
-static long             g_log_dropped;      // lines that found the buffer full
-static CRITICAL_SECTION g_log_write;        // one WriteFile at a time, in order
-static HANDLE           g_log_wake;
-
-// Under g_lock. A line that does not fit is counted rather than written from
-// here: writing needs g_log_write, which log_flush takes before g_lock.
-static void emit(const char* line)
-{
-    if (g_log == INVALID_HANDLE_VALUE) return;
-    size_t len = strlen(line);
-    if (g_log_n + len > LOG_BUF) {
-        g_log_dropped++;
-        SetEvent(g_log_wake);
-        return;
-    }
-    memcpy(g_log_buf[g_log_cur] + g_log_n, line, len);
-    g_log_n += len;
-    if (g_log_n > LOG_BUF / 2) SetEvent(g_log_wake);
-}
-
-static void log_write(const char* data, size_t n)
-{
-    DWORD wrote;
-    if (n) WriteFile(g_log, data, (DWORD)n, &wrote, NULL);
-}
-
-// Hands the filled buffer over and writes it outside g_lock, so the game
-// thread waits only for the swap. Lock order: g_log_write, then g_lock.
-static void log_flush(void)
-{
-    if (g_log == INVALID_HANDLE_VALUE) return;
-    EnterCriticalSection(&g_log_write);
-    EnterCriticalSection(&g_lock);
-    const char* data = g_log_buf[g_log_cur];
-    size_t n = g_log_n;
-    long dropped = g_log_dropped;
-    g_log_cur ^= 1;
-    g_log_n = 0;
-    g_log_dropped = 0;
-    LeaveCriticalSection(&g_lock);
-    log_write(data, n);
-    if (dropped) {
-        char note[96];
-        int w = _snprintf_s(note, sizeof note, _TRUNCATE,
-                            "log: %ld lines lost -- the buffer was full\n", dropped);
-        if (w > 0) log_write(note, (size_t)w);
-    }
-    LeaveCriticalSection(&g_log_write);
-}
-
-static DWORD WINAPI log_writer(LPVOID param)
-{
-    (void)param;
-    for (;;) {
-        WaitForSingleObject(g_log_wake, LOG_FLUSH_MS);
-        log_flush();
-    }
-}
-
-// The exceptions that end a process when nobody handles them. Vectored, so
-// it runs first -- before the game's own crash handler, and before the
-// __try blocks of this DLL, which catch access violations of their own and
-// cost one early write each; they are rare. Locks are only tried: the thread
-// that faulted may hold one, and a crash must not become a hang. Waits up to
-// ~50 ms for a write already under way, so the file stays in order.
-static LONG CALLBACK log_on_crash(EXCEPTION_POINTERS* info)
-{
-    switch (info->ExceptionRecord->ExceptionCode) {
-    case EXCEPTION_ACCESS_VIOLATION:
-    case EXCEPTION_STACK_OVERFLOW:
-    case EXCEPTION_ILLEGAL_INSTRUCTION:
-    case EXCEPTION_PRIV_INSTRUCTION:
-    case EXCEPTION_INT_DIVIDE_BY_ZERO:
-    case EXCEPTION_IN_PAGE_ERROR:
-    case EXCEPTION_NONCONTINUABLE_EXCEPTION:
-    case 0xC0000409:    // STATUS_STACK_BUFFER_OVERRUN, /GS and fast-fail
-        break;
-    default:
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-    if (g_log == INVALID_HANDLE_VALUE) return EXCEPTION_CONTINUE_SEARCH;
-    int got = 0;
-    for (int i = 0; i < 50 && !(got = TryEnterCriticalSection(&g_log_write)); i++)
-        Sleep(1);
-    if (!got) return EXCEPTION_CONTINUE_SEARCH;
-    if (TryEnterCriticalSection(&g_lock)) {
-        log_write(g_log_buf[g_log_cur], g_log_n);
-        g_log_n = 0;
-        LeaveCriticalSection(&g_lock);
-    }
-    LeaveCriticalSection(&g_log_write);
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-
-// At process exit the writer thread is already gone, and whatever lock it
-// held is held for good -- so nothing is taken, and what is waiting is
-// written as it is.
-static void log_on_exit(void)
-{
-    if (g_log == INVALID_HANDLE_VALUE) return;
-    log_write(g_log_buf[g_log_cur], g_log_n);
-    g_log_n = 0;
-}
-
-// Opens the log beside the game exe, shared for reading so it can be tailed.
-static void log_open(const char* path)
-{
-    HANDLE h = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
-                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) return;
-    InitializeCriticalSection(&g_log_write);
-    g_log_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
-    // No writer, no log: every line would sit in the buffer until it filled.
-    if (!g_log_wake) { CloseHandle(h); return; }
-    g_log = h;
-    if (!CreateThread(NULL, 0, log_writer, NULL, 0, NULL)) {
-        g_log = INVALID_HANDLE_VALUE;
-        CloseHandle(h);
-        return;
-    }
-    AddVectoredExceptionHandler(1, log_on_crash);
-}
 
 // Calls that arrive every frame and that nothing here reads: where each
 // flag, message and the reticle sit on screen, and the radar's blips. They
@@ -253,8 +103,6 @@ static const char* const k_frame_calls[][2] = {
     { "UITargetingReticle_",  "SetLoc" },
 };
 #define LOG_FRAME_KINDS ((int)(sizeof k_frame_calls / sizeof k_frame_calls[0]))
-
-static void logf_(const char* fmt, ...);
 
 static int log_frame_call(const char* obj, const char* fn)
 {
@@ -287,110 +135,6 @@ static int log_frame_call(const char* obj, const char* fn)
         logf_("log: per-frame calls, not logged, over %u s: %s\n",
               (unsigned)((now - since) / 1000), line);
         since = now;
-    }
-    return 1;
-}
-
-static void logf_(const char* fmt, ...)
-{
-    if (g_log == INVALID_HANDLE_VALUE) return;
-    char line[MAX_STR + 256];
-    va_list ap;
-    va_start(ap, fmt);
-    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
-    va_end(ap);
-
-    // Compare past the "[N] " counter, otherwise every line is unique and the
-    // collapsing never fires.
-    const char* key = line;
-    if (key[0] == '[') {
-        const char* b = strchr(key, ']');
-        if (b) key = b + 1;
-    }
-
-    EnterCriticalSection(&g_lock);
-    if (strcmp(key, g_last) == 0) {
-        g_repeat++;
-        // Flush periodically. Holding the count until a *different* line
-        // arrives makes a live tail look frozen -- which is exactly how this
-        // looked when the main menu was repeating one call.
-        ULONGLONG now = GetTickCount64();
-        if (now - g_repeat_since > 1000) {
-            char note[64];
-            _snprintf_s(note, sizeof note, _TRUNCATE,
-                        "      ... repeated %ld times\n", g_repeat);
-            emit(note);
-            g_repeat = 0;
-            g_repeat_since = now;
-        }
-    } else {
-        if (g_repeat) {
-            char note[64];
-            _snprintf_s(note, sizeof note, _TRUNCATE,
-                        "      ... repeated %ld more times\n", g_repeat);
-            emit(note);
-            g_repeat = 0;
-        }
-        g_repeat_since = GetTickCount64();
-        emit(line);
-        strcpy_s(g_last, sizeof g_last, key);
-    }
-    LeaveCriticalSection(&g_lock);
-}
-
-// A pointer is only dereferenced after VirtualQuery says the whole range is
-// committed and readable -- this runs on the game's own UI thread and a stray
-// read would take the process down with it.  Non-static: names.c uses it too.
-//
-// The range is rejected outright if it wraps the address space. A garbage
-// pointer near the top -- 0xFFFFFFFB, as an ASValue array's Data -- made
-// `cur + n` overflow to a small number, the loop below never ran, and the
-// range was declared readable without one query. Both capture faults on the
-// second mission run were exactly this, in read_array and read_fstring.
-static int range_wraps(const void* p, size_t n)
-{
-    return n > (size_t)UINTPTR_MAX - (uintptr_t)p;
-}
-
-int readable(const void* p, size_t n)
-{
-    if (!p || range_wraps(p, n)) return 0;
-    MEMORY_BASIC_INFORMATION mbi;
-    const uint8_t* cur = (const uint8_t*)p;
-    const uint8_t* end = cur + n;
-    while (cur < end) {
-        if (!VirtualQuery(cur, &mbi, sizeof mbi)) return 0;
-        if (mbi.State != MEM_COMMIT) return 0;
-        DWORD prot = mbi.Protect & 0xFF;
-        if (prot == PAGE_NOACCESS || (mbi.Protect & PAGE_GUARD)) return 0;
-        if (!(prot == PAGE_READONLY || prot == PAGE_READWRITE ||
-              prot == PAGE_WRITECOPY || prot == PAGE_EXECUTE_READ ||
-              prot == PAGE_EXECUTE_READWRITE || prot == PAGE_EXECUTE_WRITECOPY))
-            return 0;
-        cur = (const uint8_t*)mbi.BaseAddress + mbi.RegionSize;
-    }
-    return 1;
-}
-
-// Same guard as readable(), but for the one place this DLL writes into the
-// game: rewriting an input command in the caller's frame.  A local that is not
-// in writable memory means the frame is not what it appears to be, and the
-// write is abandoned rather than forced.
-static int writable(const void* p, size_t n)
-{
-    if (!p || range_wraps(p, n)) return 0;
-    MEMORY_BASIC_INFORMATION mbi;
-    const uint8_t* cur = (const uint8_t*)p;
-    const uint8_t* end = cur + n;
-    while (cur < end) {
-        if (!VirtualQuery(cur, &mbi, sizeof mbi)) return 0;
-        if (mbi.State != MEM_COMMIT) return 0;
-        if (mbi.Protect & PAGE_GUARD) return 0;
-        DWORD prot = mbi.Protect & 0xFF;
-        if (!(prot == PAGE_READWRITE || prot == PAGE_WRITECOPY ||
-              prot == PAGE_EXECUTE_READWRITE || prot == PAGE_EXECUTE_WRITECOPY))
-            return 0;
-        cur = (const uint8_t*)mbi.BaseAddress + mbi.RegionSize;
     }
     return 1;
 }
@@ -1289,7 +1033,6 @@ static ULONGLONG g_last_at;
 // handler that logs runs after it, and it needs this still in place.
 static __declspec(thread) char tls_where[256];
 
-static void unit_note(void* flag, const char* name, const char* nick);
 static void unit_flag_drew(void* flag, const char* fn, const Payload* p);
 static void combat_message(LONG n, void* stack, const Payload* p);
 static void announce(const char* text);
@@ -1477,7 +1220,21 @@ static void*     g_mission_panel;       // the UITacticalHUD_ObjectivesList
 // to date because nobody sees it. The first run read exactly that, a list the
 // player took for stale (2026-09-22). So what is said follows the screen:
 // UI_FxsPanel.IsVisible, a native asked through its vtable slot.
-static int mission_visible(void);
+static int mission_visible(void)
+{
+    void* panel = g_mission_panel;
+    if (!panel) return -1;
+    // Gone with the mission it belonged to: what it held is not on any screen,
+    // and must not be read into the next mission, whose list comes later.
+    if (!unit_is_live(panel)) {
+        logf_("mission: the list's panel is gone -- forgetting its objectives\n");
+        g_mission_panel = NULL;
+        mission_reset();
+        return 0;
+    }
+    UnitTestFn visible = (UnitTestFn)tile_vfn(panel, g_panel_slot_visible);
+    return visible ? visible(panel, NULL) != 0 : -1;
+}
 
 // Visibility polled at most this often, and what it was last.
 #define MISSION_VIS_MS 250
@@ -5895,83 +5652,13 @@ static int cursor_tile(const CursorGrid* g, int* tx, int* ty, float* z)
 
 // ---- what is on the tile ---------------------------------------------------
 //
-// The game's own answers, asked of its C++ directly: see tile.h for why the
-// vtable, and how the slots are found. These are pure queries, called on the
-// game thread from inside one of its own natives, which is where the script
-// would have called them from.
-typedef int (__fastcall* TileCoverFn)(void* self, void* edx, float x, float y,
-                                      float z, TileCoverPoint* out);
-typedef int (__fastcall* TileTestFn)(void* self, void* edx, int x, int y, int z);
-typedef int (__fastcall* UnitTestFn)(void* self, void* edx);
-typedef int (__fastcall* CursorFloorFn)(void* self, void* edx, float x, float y, float z);
-// IsPositionOnFloor / IsPositionOnFloorAndValidDestination(const out Vector):
-// an `out` Vector goes by pointer, not as three floats.
-typedef int (__fastcall* PositionTestFn)(void* self, void* edx, const float* pos);
+// The natives these ask, and their signatures, are in game.h.
 
 // A value no measurement will be, so an out-parameter the native never wrote
 // is not mistaken for an answer.
 #define SENTINEL_FLOAT 1.0e9f
 
-// XComWorldData.CanSeeActorToTile(Actor FromActor, int X, int Y, int Z,
-//                                 optional bool bUseLineChecks)
-// The actor is the enemy's PAWN, as XGPlayer.IsEnemyUnitVisibleFromTile
-// passes it. An optional script parameter is still a real C++ one.
-typedef int (__fastcall* SeeTileFn)(void* self, void* edx, void* from_actor,
-                                    int x, int y, int z, int line_checks);
-
-// XGUnitNativeBase.IsFlankingCoverPoint(XComCoverPoint kCover) -- `self` is
-// the ENEMY, and the cover point goes by value as GetCoverPoint's Vector
-// does. One argument, so nothing can be knocked out of place behind it.
-typedef int (__fastcall* FlankCoverFn)(void* self, void* edx, TileCoverPoint cover);
-
-// XGUnitNativeBase.IsPointWithinFiringRange(out float fHeightBonusModifier,
-//     out float fDistSq, XGUnitNativeBase kTarget, Vector vTargetPoint,
-//     Vector vShooterLocation, optional XGWeapon kWeapon,
-//     optional float fOverrideRange)
-// Two Vectors by value, six floats in declaration order.
-typedef int (__fastcall* FiringRangeFn)(void* self, void* edx,
-                                        float* height_bonus, float* dist_sq,
-                                        void* target,
-                                        float tx, float ty, float tz,
-                                        float sx, float sy, float sz,
-                                        void* weapon, float override_range);
-
-static int       g_tile_slot_cover = -1, g_tile_slot_smoke = -1, g_tile_slot_poison = -1;
-static int       g_tile_slot_occupied = -1; // XComWorldData.IsTileOccupied
-static int       g_tile_slot_onfloor = -1;  // XComWorldData.IsPositionOnFloor
-static int       g_tile_slot_standable = -1; // ...OnFloorAndValidDestination
-static int       g_tile_slot_floorz = -1;   // XComWorldData.GetFloorZForPosition
-// float GetFloorZForPosition(const out Vector Position, optional bool
-// bUnlimitedSearch): the out Vector goes by pointer, as for IsPositionOnFloor,
-// and a float comes back in st(0) whatever the convention. When it finds no
-// floor it hands back the height it was given (XGUnit.IsAttemptingToHover
-// relies on that).
-typedef float (__fastcall* FloorZFn)(void* self, void* edx, const float* pos, int unlimited);
-static int       g_unit_slot_visible = -1;  // XGUnitNativeBase.IsAliveAndVisible
-static int       g_unit_slot_alive = -1;    // XGUnitNativeBase.IsAlive
-static int       g_unit_slot_overwatch = -1; // XGUnitNativeBase.IsInOverwatch
-static int       g_panel_slot_visible = -1; // UI_FxsPanel.IsVisible
-static int       g_cursor_slot_floor = -1;  // XCom3DCursor.WorldZToCursorFloor
-static int       g_world_slot_seetile = -1; // XComWorldData.CanSeeActorToTile
-static int       g_unit_slot_flanking = -1; // XGUnitNativeBase.IsFlankingCoverPoint
-static void*     g_unit_fn_flanking;        // ...which is final, so not virtual
-// Volume.EncompassesPoint(Vector Loc): its thunk calls AVolume::Encompasses
-// outright, not through the vtable, with the point and a zero extent -- two
-// Vectors by value, six floats (`ret 0x18`, EW 2026-09-27).
-typedef int (__fastcall* EncompassFn)(void* self, void* edx, float px, float py, float pz,
-                                      float ex, float ey, float ez);
-static int       g_volume_slot_encompass = -1;
-static void*     g_volume_fn_encompass;
-static int       g_unit_slot_range = -1;    // XGUnitNativeBase.IsPointWithinFiringRange
-// XGUnitNativeBase.IsFlankedBy_EnemyAtLocation(XGUnitNativeBase kEnemy,
-//     const out Vector vEnemyLocation, optional bool bDebugLog) -- `self` is
-// the unit that would BE flanked; a `const out` Vector goes by pointer.
-typedef int (__fastcall* FlankedByFn)(void* self, void* edx, void* enemy,
-                                      const float* enemy_loc, int debug_log);
-static int       g_unit_slot_flankedby = -1;
-static uint8_t*  g_image_lo;           // the game's image, to check a vtable entry
-static uint8_t*  g_image_hi;            // points into it before calling it
-static void*     g_path_pawn;           // the pathing pawn that built the last path
+static void*     g_path_pawn;          // the pathing pawn that built the last path
 static void*     g_reach_pawn;          // the pawn the path offsets were resolved on
 static ULONGLONG g_tile_due;            // when the target tile is to be described
 static int       g_tile_due_at[2];
@@ -6044,91 +5731,6 @@ static float     g_floor_hold_z;
 // The soldier's own tile has no verdict to wait for, only the floor search,
 // which on level ground settles on its first frame.
 #define OWN_TILE_DELAY_MS 60
-
-// A virtual function of `obj`, or NULL when the slot is unknown or the entry
-// does not point into the game's image.
-static void* tile_vfn(void* obj, int slot)
-{
-    if (slot < 0 || !obj || !readable(obj, sizeof(void*))) return NULL;
-    uint8_t* vt = *(uint8_t**)obj;
-    if (!readable(vt + slot, sizeof(void*))) return NULL;
-    uint8_t* fn = *(uint8_t**)(vt + slot);
-    if (fn < g_image_lo || fn >= g_image_hi) return NULL;
-    return fn;
-}
-
-// Where a field lookup's answer is kept, for one call site.
-//
-// Both answers, deliberately. A miss is the expensive one: field_find walks
-// every child of every class up the chain -- XGUnit alone declares over 700
-// members -- decoding a name for each, and gives up only at Object. Keeping
-// only the hit meant that a class *without* the field paid that walk on every
-// single call, and a mission spent 311 of them on one lookup.
-//
-// Several classes rather than one, because the classes alternate. The unit
-// flags are walked in a row, and the two whose class has no m_kUnit sit among
-// fourteen whose class does; a single slot would have each of them evicting
-// the other, which is how the miss got expensive in the first place. It was
-// one hit and one miss until the heartbeats: they read every unit's pawn
-// seven times a second, and a squad's pawns are several classes (soldiers,
-// SHIVs, each kind of alien), so `Location` was walked for afresh on nearly
-// every unit -- up to 105 ms of a frame, and 20-30 frames a second against 58
-// with the hearts off (2026-09-23, 21:58 log). Oldest out when full.
-#define FIELD_HITS   8
-#define FIELD_MISSES 4
-typedef struct {
-    void*    on[FIELD_HITS];        // classes the offset was found on
-    uint32_t off[FIELD_HITS];       // and where, for each
-    void*    absent[FIELD_MISSES];  // classes proved not to have the field
-    uint8_t  next_on, next_absent;  // the next entry to replace
-} FieldSlot;
-
-// How many lookups missed every slot and walked the class chain; the perf
-// line reports it, since a walk is the expensive part of a field read.
-static unsigned g_field_walks;
-
-// An object's field, by name: the offset is looked up again whenever the
-// object's class is not one this slot has already decided. An offset belongs
-// to the class, so that is once per class, not once per unit per key press.
-static int field_ptr(void* obj, const char* name, FieldSlot* slot,
-                     size_t size, const void** out)
-{
-    if (!obj) return 0;
-    uint32_t class_off = props_class_offset();
-    if (!class_off || !readable((const uint8_t*)obj + class_off, sizeof(void*))) return 0;
-    void* cls = *(void* const*)((const uint8_t*)obj + class_off);
-    if (!cls) return 0;
-    for (int i = 0; i < FIELD_MISSES; i++)
-        if (slot->absent[i] == cls) return 0;
-    int hit = -1;
-    for (int i = 0; i < FIELD_HITS && hit < 0; i++)
-        if (slot->on[i] == cls) hit = i;
-    if (hit < 0) {
-        uint32_t off;
-        g_field_walks++;
-        if (!object_field_offset(obj, name, &off)) {
-            slot->absent[slot->next_absent] = cls;
-            slot->next_absent = (uint8_t)((slot->next_absent + 1) % FIELD_MISSES);
-            // A class that cannot be read is not a missing field, it is a
-            // dead object, and the answer is to stop holding the pointer --
-            // which is whoever is holding it to say, not this. Saying it here
-            // filled a log with "on an unreadable class" and named neither
-            // the object nor anything that could be done about it.
-            char cls_name[128];
-            if (object_class_name(obj, cls_name, sizeof cls_name))
-                logf_("field: no %s on %s\n", name, cls_name);
-            return 0;
-        }
-        hit = slot->next_on;
-        slot->on[hit] = cls;
-        slot->off[hit] = off;
-        slot->next_on = (uint8_t)((hit + 1) % FIELD_HITS);
-    }
-    const uint8_t* v = (const uint8_t*)obj + slot->off[hit];
-    if (!readable(v, size)) return 0;
-    *out = v;
-    return 1;
-}
 
 // The labs with soldier slots: the Genetics Lab (UIGeneLab), the Psi Labs
 // (UIPsiLabs) and the Cybernetics Lab (UICyberneticsLab), all UISoldierSlots.
@@ -6418,378 +6020,7 @@ static int tile_dash(int* cost_out, int* std_out, int* max_out, int* moves_out,
 
 // ---- who is where ----------------------------------------------------------
 //
-// Every unit has a flag over its head, and UIUnitFlag.SetNames(unitName,
-// unitNickName) arrives through the text hooks once per flag: a soldier's
-// surname and nickname, an alien's or civilian's name. The flag also holds
-// its unit (UIUnitFlag.m_kUnit, an XGUnit), whose m_kPawn has the Location.
-// So the table is kept by flag object, as focus.c keeps its lists, and the
-// position is read when it is asked for -- units move, flags do not change.
-//
-// Only what a sighted player could see is ever said. The flag hides itself
-// unless m_kUnit.IsVisible(), and the native IsAliveAndVisible is that test
-// with the dead left out, asked of the unit through its vtable like the tile
-// queries. A unit it cannot be asked about counts as unseen.
-#define UNIT_MAX 64
-
-// The flag also draws a cover shield and hit points, which is what the shot
-// readout says about a target; they are kept as the flag last drew them.
-// UIUnitFlag.OnInit sends SetHitPoints before SetNames, so an entry can exist
-// for a moment with no name, and unit_seen passes over it until it has one.
-typedef struct {
-    void* flag;
-    char  name[64];
-    char  nick[64];
-    char  cover[16];    // RealizeCover's shield: "_highCover" ... "" unknown
-    int   flanked;      // the shield's flanked state, -1 unknown
-    int   hp, hp_max;   // as displayed, -1 when the flag shows none
-    int   strip_flanked; // the target strip's mark: flanked by the soldier, -1 unknown
-    int   moves;        // RealizeMoves: action pips, friendly units only; -1 unknown
-    int   buff, debuff; // ShowBuff / ShowDebuff: the flag's markers; -1 unknown
-    int   panicked;     // RealizeEKG: 1, 0, -1 unknown
-    int   wounded;      // RealizeCriticallyWounded: SOLDIER_WOUND_* (soldier.h)
-    int   bleed_turns;  // turns left while bleeding out
-} UnitName;
-
-static UnitName  g_units[UNIT_MAX];
-static int       g_nunits;
-static FieldSlot g_flag_unit, g_unit_pawn, g_pawn_loc;
-
-// A flag that has stopped being one. Its slot is left empty rather than
-// closed up, because everything that walks this table walks it by index and
-// an empty slot is skipped for nothing -- field_ptr answers a null object
-// without reading anything.
-static void unit_forget(UnitName* u)
-{
-    logf_("units: the flag for %s is gone -- dropped\n",
-          u->name[0] ? u->name : "someone");
-    u->flag = NULL;
-    u->name[0] = 0;
-    u->nick[0] = 0;
-}
-
-// The entry for a flag, made if there is none.
-static UnitName* unit_entry(void* flag)
-{
-    if (!flag) return NULL;
-    int i, free_slot = -1;
-    for (i = 0; i < g_nunits && g_units[i].flag != flag; i++)
-        if (!g_units[i].flag && free_slot < 0) free_slot = i;
-    if (i < g_nunits) return &g_units[i];
-    // A mission's worth of flags is dropped as its units die, so the emptied
-    // slots are where the next mission's go. Without this a long session
-    // would fill the table with the dead and stop noticing the living.
-    if (free_slot >= 0) i = free_slot;
-    else if (g_nunits < UNIT_MAX) g_nunits++;
-    else return NULL;
-    UnitName* u = &g_units[i];
-    memset(u, 0, sizeof *u);
-    u->flag = flag;
-    u->flanked = -1;
-    u->strip_flanked = -1;
-    u->moves = -1;
-    u->buff = u->debuff = -1;
-    u->hp = u->hp_max = -1;
-    u->panicked = -1;
-    return u;
-}
-
-static void unit_note(void* flag, const char* name, const char* nick)
-{
-    UnitName* u = unit_entry(flag);
-    if (!u) return;
-    strncpy_s(u->name, sizeof u->name, name, _TRUNCATE);
-    strncpy_s(u->nick, sizeof u->nick, nick, _TRUNCATE);
-}
-
-typedef struct {
-    const UnitName* who;
-    void*  unit;
-    void*  pawn;
-    float  loc[3];
-    int    friendly;
-} UnitSeen;
-
-// The player a unit belongs to (XGUnit.m_kPlayer).
-static FieldSlot g_player;
-
-static void* unit_player(void* unit)
-{
-    const void* v;
-    if (!field_ptr(unit, "m_kPlayer", &g_player, sizeof(void*), &v))
-        return NULL;
-    return *(void* const*)v;
-}
-
-// The player the soldier being moved belongs to: ChainedPawn.m_kGameUnit.
-static FieldSlot g_squad_unit;
-
-static void* squad_player(void)
-{
-    void* pawn = NULL;
-    const void* v;
-    if (!cursor_chained_pawn(&pawn) || !pawn ||
-        !field_ptr(pawn, "m_kGameUnit", &g_squad_unit, sizeof(void*), &v))
-        return NULL;
-    return unit_player(*(void* const*)v);
-}
-
-// A flag's unit, if it is alive and in sight: its pawn, where it stands, and
-// whether it is on the side of the soldier being moved.
-//
-// The side is the unit's player, compared with the soldier's. The flag's own
-// m_bIsFriendly was the first try and put Chryssalids in the squad: this
-// session never found UBoolProperty::BitMask ("no BitMask -- bools read as a
-// whole dword"), and that bool shares its dword with m_bIsDead, m_bIsSelected
-// and the rest, so any of them set read as friendly.
-// Liveness, where not knowing is not a reason to go quiet.
-//
-// objects_live can only answer once GObjObjects has been found. Without it
-// the mod has no way to ask, and refusing every unit would cost the whole
-// units readout -- who is on a tile, the radar, the squad list -- to guard
-// against a fault a build with no table cannot be protected from anyway. So
-// an unknown table means carry on, exactly as the mod did before this guard
-// existed. The table has been found on every run so far.
-static int unit_is_live(void* obj)
-{
-    return !objects_ready() || objects_live(obj);
-}
-
-static int mission_visible(void)
-{
-    void* panel = g_mission_panel;
-    if (!panel) return -1;
-    // Gone with the mission it belonged to: what it held is not on any screen,
-    // and must not be read into the next mission, whose list comes later.
-    if (!unit_is_live(panel)) {
-        logf_("mission: the list's panel is gone -- forgetting its objectives\n");
-        g_mission_panel = NULL;
-        mission_reset();
-        return 0;
-    }
-    UnitTestFn visible = (UnitTestFn)tile_vfn(panel, g_panel_slot_visible);
-    return visible ? visible(panel, NULL) != 0 : -1;
-}
-
-static int unit_seen(UnitName* u, void* squad, UnitSeen* out)
-{
-    const void* v;
-    if (!u->flag || !u->name[0]) return 0;
-    if (!field_ptr(u->flag, "m_kUnit", &g_flag_unit, sizeof(void*), &v)) {
-        // A flag whose class has no m_kUnit is not a flag any more. Flags
-        // are destroyed with their units -- eleven Chryssalids and zombies
-        // died over one mission, and loading a save replaced the squad's four
-        // as well -- and the engine hands the memory straight on, so what is
-        // left behind reads as an AudioComponent, or as a class pointer that
-        // is not readable at all. The table held sixteen of them, and every
-        // pass over it paid a failed class-chain walk for each. Dropping the
-        // entry is the answer; the question does not get better with age.
-        unit_forget(u);
-        return 0;
-    }
-    void* unit = *(void* const*)v;
-
-    // â›” A live flag is not a live unit, and this is a CALL into the game.
-    // tile_vfn only proves the vtable entry points into the image, which a
-    // RECYCLED object's does perfectly well -- so without this the mod can
-    // call a real function of the wrong class on a wrong `this`. The
-    // 2026-09-21 logs show it twice, as "tile: units faulted" one step after
-    // a flag was dropped, with the game gone shortly after both times.
-    // objects_live asks the object table instead of trusting the pointer.
-    if (!unit_is_live(unit)) return 0;
-
-    UnitTestFn visible = (UnitTestFn)tile_vfn(unit, g_unit_slot_visible);
-    if (!visible || !visible(unit, NULL)) return 0;
-    if (!field_ptr(unit, "m_kPawn", &g_unit_pawn, sizeof(void*), &v))
-        return 0;
-    void* pawn = *(void* const*)v;
-    if (!unit_is_live(pawn)) return 0;
-    if (!field_ptr(pawn, "Location", &g_pawn_loc, 3 * sizeof(float), &v))
-        return 0;
-    out->who = u;
-    out->unit = unit;
-    out->pawn = pawn;
-    memcpy(out->loc, v, 3 * sizeof(float));
-    out->friendly = squad && unit_player(unit) == squad;
-    return 1;
-}
-
-// What the squad can see: every enemy in any living squad member's
-// XGUnitNativeBase.m_arrVisibleEnemies.
-//
-// IsAliveAndVisible alone let unrevealed pods through -- the radar listed
-// Chryssalids 29 tiles north that no one had met. The game's own minimap
-// draws enemies from the active soldier's m_arrVisibleEnemies
-// (UITacticalHUD_Radar.UpdateBlips), and targeting from the squad's; the
-// union across the squad is what a sighted player could have on screen.
-#define SEEN_MAX 128
-
-typedef struct {
-    void* unit[SEEN_MAX];
-    int   n;
-} SeenSet;
-
-static FieldSlot g_visen, g_viciv;
-
-static void squad_sight_of(void* squad, SeenSet* set, const char* field, FieldSlot* slot)
-{
-    set->n = 0;
-    if (!squad) return;
-    for (int i = 0; i < g_nunits; i++) {
-        UnitSeen s;
-        if (!unit_seen(&g_units[i], squad, &s) || !s.friendly) continue;
-        const void* v;
-        if (!field_ptr(s.unit, field, slot, sizeof(FArray), &v))
-            continue;
-        const FArray* a = (const FArray*)v;
-        if (a->Num <= 0 || a->Num > SEEN_MAX ||
-            !readable(a->Data, (size_t)a->Num * sizeof(void*)))
-            continue;
-        void* const* e = (void* const*)a->Data;
-        for (int k = 0; k < a->Num; k++) {
-            int j;
-            for (j = 0; j < set->n && set->unit[j] != e[k]; j++) {}
-            if (j == set->n && set->n < SEEN_MAX) set->unit[set->n++] = e[k];
-        }
-    }
-}
-
-static void squad_sight(void* squad, SeenSet* set)
-{
-    squad_sight_of(squad, set, "m_arrVisibleEnemies", &g_visen);
-}
-
-// The civilians the squad can see, the same way: each squad member's
-// m_arrVisibleCivilians. IsAliveAndVisible is not the player's sight for a
-// civilian either -- the 2026-09-27 run's scanner gave "Survivor, 2 south,
-// 43 west" before anyone had seen them. The sight manager's
-// AddVisibleCivilian / RemoveVisibleCivilian events keep this array per
-// viewer, as AddVisibleEnemy does m_arrVisibleEnemies.
-static void squad_sight_civilians(void* squad, SeenSet* set)
-{
-    squad_sight_of(squad, set, "m_arrVisibleCivilians", &g_viciv);
-}
-
-static int seen_has(const SeenSet* set, const void* unit)
-{
-    for (int j = 0; j < set->n; j++)
-        if (set->unit[j] == unit) return 1;
-    return 0;
-}
-
-// Whether the squad sees this civilian: in someone's m_arrVisibleCivilians,
-// or failing that, a living soldier with a line to the civilian's tile.
-//
-// The array alone missed a mission survivor. The 2026-09-27 (23:25) log has
-// "Locate any survivors" complete and then "Civilians, 0 found" twice while
-// the squad stood beside them. A survivor is not a civilian to the game: its
-// behavior is XGAIBehavior_Survivor, not XGAIBehavior_Civilian, and
-// XGAIPlayer_Animal keeps survivors in m_arrSurvivor and rescues them by
-// distance, never through anyone's sight arrays. The line test is
-// XComPresentationLayer.CanSquadSee's -- each living soldier's pawn to the
-// place -- through CanSeeActorToTile, the native "Seen by" already trusts.
-static int civilian_seen(void* squad, const SeenSet* civilians, void* unit,
-                         const float* loc, const char* name)
-{
-    if (seen_has(civilians, unit)) return 1;
-    void* world = cursor_world();
-    CursorGrid g;
-    if (!world || !squad || !cursor_grid(&g)) return 0;
-    SeeTileFn see = (SeeTileFn)tile_vfn(world, g_world_slot_seetile);
-    if (!see) return 0;
-    // The tile the civilian stands in, as tile_report works one out: feet
-    // plus 4, in 64-unit layers from Min.Z.
-    int tx = cursor_tile_axis(loc[0], g.min_x, CURSOR_TILE);
-    int ty = cursor_tile_axis(loc[1], g.min_y, CURSOR_TILE);
-    int tz = cursor_tile_axis(loc[2] - NAV_CURSOR_LIFT + 4.0f, g.min_z, 64.0f);
-    for (int i = 0; i < g_nunits; i++) {
-        UnitSeen s;
-        if (!unit_seen(&g_units[i], squad, &s) || !s.friendly) continue;
-        if (see(world, NULL, s.pawn, tx, ty, tz, 0)) {
-            static void* told;
-            if (told != unit) {
-                told = unit;
-                logf_("scan: %s seen by line from %s, not in anyone's "
-                      "m_arrVisibleCivilians\n", name, s.who->name);
-            }
-            return 1;
-        }
-    }
-    return 0;
-}
-
-// ---- what the squad sees: the one rule --------------------------------------
-//
-// Whether a readout that names units may name this one. Kept in one place
-// because it was kept in three -- the scanner, who is on a tile, and the blast
-// list -- and a survivor the squad could see was missed by each in turn, and
-// had to be fixed in each in turn (2026-09-27).
-//
-//   - The squad's own: always.
-//   - A civilian (the neutral team): civilian_seen -- someone's
-//     m_arrVisibleCivilians, or a soldier's line to them.
-//   - Anyone else: the union of the squad's m_arrVisibleEnemies, as the
-//     radar and the targeting draw them. IsAliveAndVisible alone let
-//     unrevealed pods through.
-//
-// The readouts about threats -- the radar, the alien heartbeats, "Seen by"
-// and flanking, enemies coming into sight -- use `enemies` alone, on
-// purpose: a civilian is no threat.
-static int unit_team(void* unit);
-#define TEAM_NEUTRAL      1     // Object.ETeam.eTeam_Neutral -- a civilian
-
-typedef struct {
-    void*   squad;
-    SeenSet enemies;
-    SeenSet civilians;
-} SquadSight;
-
-// Taken once per readout; the sets are pointer lists, compared, never
-// dereferenced (see tile_exposure for what that costs when forgotten).
-static void squad_sight_take(void* squad, SquadSight* v)
-{
-    v->squad = squad;
-    squad_sight(squad, &v->enemies);
-    squad_sight_civilians(squad, &v->civilians);
-}
-
-static int squad_sees(const SquadSight* v, void* unit, const float* loc,
-                      int friendly, const char* name)
-{
-    if (friendly) return 1;
-    if (unit_team(unit) == TEAM_NEUTRAL)
-        return civilian_seen(v->squad, &v->civilians, unit, loc, name);
-    return seen_has(&v->enemies, unit);
-}
-
-static void unit_label(const UnitName* u, char* out, size_t out_sz)
-{
-    _snprintf_s(out, out_sz, _TRUNCATE, u->nick[0] ? "%s, %s" : "%s", u->name, u->nick);
-}
-
-// Whether a unit is on overwatch, asked of the game's own native. Only for
-// units unit_seen has just vouched for: a dead unit's natives are not safe to
-// call.
-static int unit_overwatch(void* unit)
-{
-    UnitTestFn on = unit ? (UnitTestFn)tile_vfn(unit, g_unit_slot_overwatch) : NULL;
-    return on && on(unit, NULL) != 0;
-}
-
-// The name with what the screen shows about the unit: "Sectoid, 3 of 4 HP, on
-// overwatch". HP is the flag's; overwatch is said of enemies the squad sees,
-// which is when the game floats "Overwatch" over one (XGAbilityTree's target
-// message) and shows its stance -- never of a hidden one, which unit_seen and
-// the squad's sight have already kept out.
-static void unit_label_state(const UnitName* u, void* unit, int enemy,
-                             char* out, size_t out_sz)
-{
-    unit_label(u, out, out_sz);
-    char state[64];
-    combat_unit_state(u->hp, u->hp_max, enemy && unit_overwatch(unit), state, sizeof state);
-    size_t used = strlen(out);
-    if (state[0] && used < out_sz)
-        _snprintf_s(out + used, out_sz - used, _TRUNCATE, "%s", state);
-}
+// The unit table and the rule for whom the squad sees are in units.c.
 
 // Everyone in sight whose pawn stands in the column of (tx, ty), on any
 // storey, with where their feet are: a pawn's origin is its middle,
@@ -6999,23 +6230,6 @@ static void unit_flag_drew(void* flag, const char* fn, const Payload* p)
     }
 }
 
-// The flag whose unit is `unit`, or NULL. Pointers are compared and nothing
-// is called, so a unit that has since gone costs a failed match, not a fault.
-static UnitName* unit_by_unit(const void* unit)
-{
-    for (int i = 0; i < g_nunits; i++) {
-        UnitName* u = &g_units[i];
-        const void* v;
-        if (!u->flag || !u->name[0]) continue;
-        if (!field_ptr(u->flag, "m_kUnit", &g_flag_unit, sizeof(void*), &v)) {
-            unit_forget(u);     // see unit_seen: not a flag any more
-            continue;
-        }
-        if (*(void* const*)v == unit) return u;
-    }
-    return NULL;
-}
-
 // One floating combat message, said. Which unit it floats over is found from
 // the calls that raised it, not from its position: DamageDisplay and the rest
 // are called from inside the unit's own functions (XGUnit.OnTakeDamage ->
@@ -7125,21 +6339,6 @@ static void announce_as(int setting, const char* text)
     if (setting < 0 || settings_get(setting)) { announce(text); return; }
     history_add(text);
     logf_("options: %s is off -- kept for Insert, not said\n", settings_name(setting));
-}
-
-// Whether a unit the game was showing is gone: its flag has been destroyed or
-// reused, the unit object is no longer live, or the game no longer counts it
-// alive and visible (IsAliveAndVisible, asked through its vtable as unit_seen
-// does).
-static int unit_gone(const UnitName* u, void* flag)
-{
-    const void* v;
-    if (u->flag != flag || !flag || !unit_is_live(flag)) return 1;
-    if (!field_ptr(flag, "m_kUnit", &g_flag_unit, sizeof(void*), &v)) return 1;
-    void* unit = *(void* const*)v;
-    if (!unit || !unit_is_live(unit)) return 1;
-    UnitTestFn visible = (UnitTestFn)tile_vfn(unit, g_unit_slot_visible);
-    return visible && !visible(unit, NULL);
 }
 
 // Every frame, from the cursor's per-frame native: the combat lines that wait.
@@ -7339,13 +6538,6 @@ static void strip_note(void* strip, const char* fn, const Payload* p)
 // every frame while the cursor moves, and IsLocationFlanking takes its
 // enemies from GetAllVisibleTargets -- the same restriction, made by the game
 // for the same reason.
-static void* unit_pawn(void* unit)
-{
-    const void* v;
-    if (!field_ptr(unit, "m_kPawn", &g_unit_pawn, sizeof(void*), &v)) return NULL;
-    return *(void* const*)v;
-}
-
 // Flanking is the ENEMY's question, asked of the cover point: the game's own
 // XComActionIconManager.IsLocationFlanked -- the thing that turns a cover
 // icon red -- walks the visible enemies and asks each
@@ -9520,7 +8712,7 @@ static void nav_press(int digit, int gliding)
 #define SCAN_CLIMB_APART   4    // tiles between two climbs worth naming apart
 
 static FieldSlot g_icon, g_ladder_loc, g_ilact_loc;
-static FieldSlot g_meld_loc, g_meld_turns, g_team;
+static FieldSlot g_meld_loc, g_meld_turns;
 
 // Where the scan was measured from, and the grid it was taken on, so Home and
 // End answer about the same scan the player has just heard.
@@ -9528,14 +8720,6 @@ static CursorGrid g_scan_grid;
 static int        g_scan_from[3];
 static float      g_scan_world_z;   // the origin's own height, for tile queries
 static int        g_scan_have;
-
-// A unit's team, from XGUnitNativeBase.m_eTeam (Object.ETeam, one byte).
-static int unit_team(void* unit)
-{
-    const void* v;
-    if (!field_ptr(unit, "m_eTeam", &g_team, 1, &v)) return 0;
-    return *(const uint8_t*)v;
-}
 
 // An actor's Location, through the same field walk everything else uses.
 static int actor_location(void* actor, FieldSlot* slot, float* out)
@@ -13968,7 +13152,6 @@ static void __cdecl on_invalid_parameter(const wchar_t* expr, const wchar_t* fun
 static DWORD WINAPI init(LPVOID param)
 {
     (void)param;
-    InitializeCriticalSection(&g_lock);
     InitializeCriticalSection(&g_alert_lock);
     _set_invalid_parameter_handler(on_invalid_parameter);
 

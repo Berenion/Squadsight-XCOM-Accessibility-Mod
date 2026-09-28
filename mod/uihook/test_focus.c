@@ -34,6 +34,7 @@
 #include "hq.h"
 #include "settings.h"
 #include "heart.h"
+#include "units.h"
 
 static int failures;
 
@@ -2808,6 +2809,60 @@ int main(void)
         heart_sound(0, 0, -1, -1, -1, SOLDIER_WOUND_NONE, &h);
         check(h.pan == 0.0f && h.gain == 1.0f && h.period > 1.1f,
               "unknown health on the same tile: centred, calm");
+    }
+
+    printf("\nthe unit table and the squad's sight\n");
+    {
+        // Flags are only compared as pointers here; nothing is read from
+        // them. The object table and UObject::Class are unknown offline, so
+        // every field read answers "no" -- unit_team is 0, never neutral.
+        static char flags[UNIT_MAX + 2][16];
+        char label[160];
+
+        UnitName* a = unit_entry(flags[0]);
+        check(a && a->hp == -1 && a->hp_max == -1 && a->moves == -1 && a->panicked == -1 &&
+              a->flanked == -1 && a->strip_flanked == -1 && a->buff == -1 && a->debuff == -1,
+              "a new flag's entry starts with everything unknown");
+        check(unit_entry(flags[0]) == a && g_nunits == 1, "the same flag finds the same entry");
+        unit_note(flags[0], "Vargas", "Dozer");
+        unit_label(a, label, sizeof label);
+        check(strcmp(label, "Vargas, Dozer") == 0, "a label is the name and nickname");
+        UnitName* b = unit_entry(flags[1]);
+        unit_note(flags[1], "Sectoid", "");
+        unit_label(b, label, sizeof label);
+        check(strcmp(label, "Sectoid") == 0, "a label with no nickname is the name alone");
+        b->hp = 3;
+        b->hp_max = 4;
+        unit_label_state(b, flags[1], 1, label, sizeof label);
+        check(strcmp(label, "Sectoid, 3 of 4 HP") == 0,
+              "the label carries the flag's HP; no overwatch without the native");
+
+        unit_forget(a);
+        check(a->flag == NULL && a->name[0] == 0, "a forgotten flag's slot is emptied");
+        UnitName* c = unit_entry(flags[2]);
+        check(c == a && g_nunits == 2, "the next new flag takes the emptied slot");
+        check(c->hp == -1 && c->name[0] == 0, "and starts clean, nothing of the old one left");
+
+        int full = 1;
+        for (int i = 3; i <= UNIT_MAX + 1; i++)
+            if (!unit_entry(flags[i])) { full = i; break; }
+        check(g_nunits == UNIT_MAX && full == UNIT_MAX + 1,
+              "the table fills to UNIT_MAX, and one more has no entry");
+
+        static char alien[8], other[8], civ[8];
+        SquadSight sight;
+        memset(&sight, 0, sizeof sight);
+        sight.enemies.unit[sight.enemies.n++] = alien;
+        check(seen_has(&sight.enemies, alien) && !seen_has(&sight.enemies, other),
+              "a seen set holds what was put in it, and nothing else");
+        check(squad_sees(&sight, other, NULL, 1, "Vargas"), "the squad's own are always named");
+        check(squad_sees(&sight, alien, NULL, 0, "Sectoid"), "an enemy the squad sees is named");
+        check(!squad_sees(&sight, other, NULL, 0, "Sectoid"), "an enemy nobody has seen is not");
+        sight.civilians.unit[sight.civilians.n++] = civ;
+        check(!squad_sees(&sight, civ, NULL, 0, "Civilian"),
+              "a civilian set does not vouch for a unit whose team is not neutral");
+        check(civilian_seen(NULL, &sight.civilians, civ, NULL, "Civilian"),
+              "a civilian in someone's m_arrVisibleCivilians is seen, no line needed");
     }
 
     printf("\nspeech debounce\n");

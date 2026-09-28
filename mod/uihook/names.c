@@ -25,7 +25,7 @@ static const int kNameOffsets[] = { 0x08, 0x0C, 0x10, 0x14, 0x18 };
 static FArray* g_names;      // points at the live TArray, re-read every lookup
 static int     g_name_off;
 
-extern int readable(const void* p, size_t n);   // provided by main.c
+extern int readable(const void* p, size_t n);   // provided by game.c
 
 // UE3 stores a name entry as either ANSI or UTF-16 depending on a flag we do
 // not need to locate: for the ASCII names UnrealScript actually uses, a

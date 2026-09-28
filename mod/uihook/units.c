@@ -1,0 +1,349 @@
+// Who is where, and whom the squad may be told about: see units.h.
+
+#include <windows.h>
+#include <stdio.h>
+#include <string.h>
+#include "units.h"
+#include "log.h"
+#include "cursor.h"
+#include "nav.h"
+#include "combat.h"
+#include "ue3.h"
+
+// Every unit has a flag over its head, and UIUnitFlag.SetNames(unitName,
+// unitNickName) arrives through the text hooks once per flag: a soldier's
+// surname and nickname, an alien's or civilian's name. The flag also holds
+// its unit (UIUnitFlag.m_kUnit, an XGUnit), whose m_kPawn has the Location.
+// So the table is kept by flag object, as focus.c keeps its lists, and the
+// position is read when it is asked for -- units move, flags do not change.
+//
+// Only what a sighted player could see is ever said. The flag hides itself
+// unless m_kUnit.IsVisible(), and the native IsAliveAndVisible is that test
+// with the dead left out, asked of the unit through its vtable like the tile
+// queries. A unit it cannot be asked about counts as unseen.
+
+UnitName         g_units[UNIT_MAX];
+int              g_nunits;
+FieldSlot        g_pawn_loc;
+static FieldSlot g_flag_unit, g_unit_pawn;
+
+// A flag that has stopped being one. Its slot is left empty rather than
+// closed up, because everything that walks this table walks it by index and
+// an empty slot is skipped for nothing -- field_ptr answers a null object
+// without reading anything.
+void unit_forget(UnitName* u)
+{
+    logf_("units: the flag for %s is gone -- dropped\n",
+          u->name[0] ? u->name : "someone");
+    u->flag = NULL;
+    u->name[0] = 0;
+    u->nick[0] = 0;
+}
+
+// The entry for a flag, made if there is none.
+UnitName* unit_entry(void* flag)
+{
+    if (!flag) return NULL;
+    int i, free_slot = -1;
+    for (i = 0; i < g_nunits && g_units[i].flag != flag; i++)
+        if (!g_units[i].flag && free_slot < 0) free_slot = i;
+    if (i < g_nunits) return &g_units[i];
+    // A mission's worth of flags is dropped as its units die, so the emptied
+    // slots are where the next mission's go. Without this a long session
+    // would fill the table with the dead and stop noticing the living.
+    if (free_slot >= 0) i = free_slot;
+    else if (g_nunits < UNIT_MAX) g_nunits++;
+    else return NULL;
+    UnitName* u = &g_units[i];
+    memset(u, 0, sizeof *u);
+    u->flag = flag;
+    u->flanked = -1;
+    u->strip_flanked = -1;
+    u->moves = -1;
+    u->buff = u->debuff = -1;
+    u->hp = u->hp_max = -1;
+    u->panicked = -1;
+    return u;
+}
+
+void unit_note(void* flag, const char* name, const char* nick)
+{
+    UnitName* u = unit_entry(flag);
+    if (!u) return;
+    strncpy_s(u->name, sizeof u->name, name, _TRUNCATE);
+    strncpy_s(u->nick, sizeof u->nick, nick, _TRUNCATE);
+}
+
+// The player a unit belongs to (XGUnit.m_kPlayer).
+static FieldSlot g_player;
+
+void* unit_player(void* unit)
+{
+    const void* v;
+    if (!field_ptr(unit, "m_kPlayer", &g_player, sizeof(void*), &v))
+        return NULL;
+    return *(void* const*)v;
+}
+
+// The player the soldier being moved belongs to: ChainedPawn.m_kGameUnit.
+static FieldSlot g_squad_unit;
+
+void* squad_player(void)
+{
+    void* pawn = NULL;
+    const void* v;
+    if (!cursor_chained_pawn(&pawn) || !pawn ||
+        !field_ptr(pawn, "m_kGameUnit", &g_squad_unit, sizeof(void*), &v))
+        return NULL;
+    return unit_player(*(void* const*)v);
+}
+
+// A flag's unit, if it is alive and in sight: its pawn, where it stands, and
+// whether it is on the side of the soldier being moved.
+//
+// The side is the unit's player, compared with the soldier's. The flag's own
+// m_bIsFriendly was the first try and put Chryssalids in the squad: this
+// session never found UBoolProperty::BitMask ("no BitMask -- bools read as a
+// whole dword"), and that bool shares its dword with m_bIsDead, m_bIsSelected
+// and the rest, so any of them set read as friendly.
+int unit_seen(UnitName* u, void* squad, UnitSeen* out)
+{
+    const void* v;
+    if (!u->flag || !u->name[0]) return 0;
+    if (!field_ptr(u->flag, "m_kUnit", &g_flag_unit, sizeof(void*), &v)) {
+        // A flag whose class has no m_kUnit is not a flag any more. Flags
+        // are destroyed with their units -- eleven Chryssalids and zombies
+        // died over one mission, and loading a save replaced the squad's four
+        // as well -- and the engine hands the memory straight on, so what is
+        // left behind reads as an AudioComponent, or as a class pointer that
+        // is not readable at all. The table held sixteen of them, and every
+        // pass over it paid a failed class-chain walk for each. Dropping the
+        // entry is the answer; the question does not get better with age.
+        unit_forget(u);
+        return 0;
+    }
+    void* unit = *(void* const*)v;
+
+    // â›” A live flag is not a live unit, and this is a CALL into the game.
+    // tile_vfn only proves the vtable entry points into the image, which a
+    // RECYCLED object's does perfectly well -- so without this the mod can
+    // call a real function of the wrong class on a wrong `this`. The
+    // 2026-09-21 logs show it twice, as "tile: units faulted" one step after
+    // a flag was dropped, with the game gone shortly after both times.
+    // objects_live asks the object table instead of trusting the pointer.
+    if (!unit_is_live(unit)) return 0;
+
+    UnitTestFn visible = (UnitTestFn)tile_vfn(unit, g_unit_slot_visible);
+    if (!visible || !visible(unit, NULL)) return 0;
+    if (!field_ptr(unit, "m_kPawn", &g_unit_pawn, sizeof(void*), &v))
+        return 0;
+    void* pawn = *(void* const*)v;
+    if (!unit_is_live(pawn)) return 0;
+    if (!field_ptr(pawn, "Location", &g_pawn_loc, 3 * sizeof(float), &v))
+        return 0;
+    out->who = u;
+    out->unit = unit;
+    out->pawn = pawn;
+    memcpy(out->loc, v, 3 * sizeof(float));
+    out->friendly = squad && unit_player(unit) == squad;
+    return 1;
+}
+
+// What the squad can see: every enemy in any living squad member's
+// XGUnitNativeBase.m_arrVisibleEnemies.
+//
+// IsAliveAndVisible alone let unrevealed pods through -- the radar listed
+// Chryssalids 29 tiles north that no one had met. The game's own minimap
+// draws enemies from the active soldier's m_arrVisibleEnemies
+// (UITacticalHUD_Radar.UpdateBlips), and targeting from the squad's; the
+// union across the squad is what a sighted player could have on screen.
+FieldSlot        g_visen;
+static FieldSlot g_viciv;
+
+static void squad_sight_of(void* squad, SeenSet* set, const char* field, FieldSlot* slot)
+{
+    set->n = 0;
+    if (!squad) return;
+    for (int i = 0; i < g_nunits; i++) {
+        UnitSeen s;
+        if (!unit_seen(&g_units[i], squad, &s) || !s.friendly) continue;
+        const void* v;
+        if (!field_ptr(s.unit, field, slot, sizeof(FArray), &v))
+            continue;
+        const FArray* a = (const FArray*)v;
+        if (a->Num <= 0 || a->Num > SEEN_MAX ||
+            !readable(a->Data, (size_t)a->Num * sizeof(void*)))
+            continue;
+        void* const* e = (void* const*)a->Data;
+        for (int k = 0; k < a->Num; k++) {
+            int j;
+            for (j = 0; j < set->n && set->unit[j] != e[k]; j++) {}
+            if (j == set->n && set->n < SEEN_MAX) set->unit[set->n++] = e[k];
+        }
+    }
+}
+
+void squad_sight(void* squad, SeenSet* set)
+{
+    squad_sight_of(squad, set, "m_arrVisibleEnemies", &g_visen);
+}
+
+// The civilians the squad can see, the same way: each squad member's
+// m_arrVisibleCivilians. IsAliveAndVisible is not the player's sight for a
+// civilian either -- the 2026-09-27 run's scanner gave "Survivor, 2 south,
+// 43 west" before anyone had seen them. The sight manager's
+// AddVisibleCivilian / RemoveVisibleCivilian events keep this array per
+// viewer, as AddVisibleEnemy does m_arrVisibleEnemies.
+void squad_sight_civilians(void* squad, SeenSet* set)
+{
+    squad_sight_of(squad, set, "m_arrVisibleCivilians", &g_viciv);
+}
+
+int seen_has(const SeenSet* set, const void* unit)
+{
+    for (int j = 0; j < set->n; j++)
+        if (set->unit[j] == unit) return 1;
+    return 0;
+}
+
+// Whether the squad sees this civilian: in someone's m_arrVisibleCivilians,
+// or failing that, a living soldier with a line to the civilian's tile.
+//
+// The array alone missed a mission survivor. The 2026-09-27 (23:25) log has
+// "Locate any survivors" complete and then "Civilians, 0 found" twice while
+// the squad stood beside them. A survivor is not a civilian to the game: its
+// behavior is XGAIBehavior_Survivor, not XGAIBehavior_Civilian, and
+// XGAIPlayer_Animal keeps survivors in m_arrSurvivor and rescues them by
+// distance, never through anyone's sight arrays. The line test is
+// XComPresentationLayer.CanSquadSee's -- each living soldier's pawn to the
+// place -- through CanSeeActorToTile, the native "Seen by" already trusts.
+int civilian_seen(void* squad, const SeenSet* civilians, void* unit,
+                  const float* loc, const char* name)
+{
+    if (seen_has(civilians, unit)) return 1;
+    void* world = cursor_world();
+    CursorGrid g;
+    if (!world || !squad || !cursor_grid(&g)) return 0;
+    SeeTileFn see = (SeeTileFn)tile_vfn(world, g_world_slot_seetile);
+    if (!see) return 0;
+    // The tile the civilian stands in, as tile_report works one out: feet
+    // plus 4, in 64-unit layers from Min.Z.
+    int tx = cursor_tile_axis(loc[0], g.min_x, CURSOR_TILE);
+    int ty = cursor_tile_axis(loc[1], g.min_y, CURSOR_TILE);
+    int tz = cursor_tile_axis(loc[2] - NAVH_LIFT + 4.0f, g.min_z, 64.0f);
+    for (int i = 0; i < g_nunits; i++) {
+        UnitSeen s;
+        if (!unit_seen(&g_units[i], squad, &s) || !s.friendly) continue;
+        if (see(world, NULL, s.pawn, tx, ty, tz, 0)) {
+            static void* told;
+            if (told != unit) {
+                told = unit;
+                logf_("scan: %s seen by line from %s, not in anyone's "
+                      "m_arrVisibleCivilians\n", name, s.who->name);
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// A unit's team, from XGUnitNativeBase.m_eTeam (Object.ETeam, one byte).
+static FieldSlot g_team;
+
+int unit_team(void* unit)
+{
+    const void* v;
+    if (!field_ptr(unit, "m_eTeam", &g_team, 1, &v)) return 0;
+    return *(const uint8_t*)v;
+}
+
+void* unit_pawn(void* unit)
+{
+    const void* v;
+    if (!field_ptr(unit, "m_kPawn", &g_unit_pawn, sizeof(void*), &v)) return NULL;
+    return *(void* const*)v;
+}
+
+// The flag whose unit is `unit`, or NULL. Pointers are compared and nothing
+// is called, so a unit that has since gone costs a failed match, not a fault.
+UnitName* unit_by_unit(const void* unit)
+{
+    for (int i = 0; i < g_nunits; i++) {
+        UnitName* u = &g_units[i];
+        const void* v;
+        if (!u->flag || !u->name[0]) continue;
+        if (!field_ptr(u->flag, "m_kUnit", &g_flag_unit, sizeof(void*), &v)) {
+            unit_forget(u);     // see unit_seen: not a flag any more
+            continue;
+        }
+        if (*(void* const*)v == unit) return u;
+    }
+    return NULL;
+}
+
+// Whether a unit the game was showing is gone: its flag has been destroyed or
+// reused, the unit object is no longer live, or the game no longer counts it
+// alive and visible (IsAliveAndVisible, asked through its vtable as unit_seen
+// does).
+int unit_gone(const UnitName* u, void* flag)
+{
+    const void* v;
+    if (u->flag != flag || !flag || !unit_is_live(flag)) return 1;
+    if (!field_ptr(flag, "m_kUnit", &g_flag_unit, sizeof(void*), &v)) return 1;
+    void* unit = *(void* const*)v;
+    if (!unit || !unit_is_live(unit)) return 1;
+    UnitTestFn visible = (UnitTestFn)tile_vfn(unit, g_unit_slot_visible);
+    return visible && !visible(unit, NULL);
+}
+
+// ---- what the squad sees: the one rule --------------------------------------
+//
+// The rule and why it is one are in units.h.
+
+// Taken once per readout; the sets are pointer lists, compared, never
+// dereferenced (see tile_exposure for what that costs when forgotten).
+void squad_sight_take(void* squad, SquadSight* v)
+{
+    v->squad = squad;
+    squad_sight(squad, &v->enemies);
+    squad_sight_civilians(squad, &v->civilians);
+}
+
+int squad_sees(const SquadSight* v, void* unit, const float* loc,
+               int friendly, const char* name)
+{
+    if (friendly) return 1;
+    if (unit_team(unit) == TEAM_NEUTRAL)
+        return civilian_seen(v->squad, &v->civilians, unit, loc, name);
+    return seen_has(&v->enemies, unit);
+}
+
+void unit_label(const UnitName* u, char* out, size_t out_sz)
+{
+    _snprintf_s(out, out_sz, _TRUNCATE, u->nick[0] ? "%s, %s" : "%s", u->name, u->nick);
+}
+
+// Whether a unit is on overwatch, asked of the game's own native. Only for
+// units unit_seen has just vouched for: a dead unit's natives are not safe to
+// call.
+int unit_overwatch(void* unit)
+{
+    UnitTestFn on = unit ? (UnitTestFn)tile_vfn(unit, g_unit_slot_overwatch) : NULL;
+    return on && on(unit, NULL) != 0;
+}
+
+// The name with what the screen shows about the unit: "Sectoid, 3 of 4 HP, on
+// overwatch". HP is the flag's; overwatch is said of enemies the squad sees,
+// which is when the game floats "Overwatch" over one (XGAbilityTree's target
+// message) and shows its stance -- never of a hidden one, which unit_seen and
+// the squad's sight have already kept out.
+void unit_label_state(const UnitName* u, void* unit, int enemy,
+                      char* out, size_t out_sz)
+{
+    unit_label(u, out, out_sz);
+    char state[64];
+    combat_unit_state(u->hp, u->hp_max, enemy && unit_overwatch(unit), state, sizeof state);
+    size_t used = strlen(out);
+    if (state[0] && used < out_sz)
+        _snprintf_s(out + used, out_sz - used, _TRUNCATE, "%s", state);
+}

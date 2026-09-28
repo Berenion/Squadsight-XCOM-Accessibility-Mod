@@ -87,6 +87,6 @@ static __inline int ends_with_property(const char* s)
 // here.
 uint32_t props_class_offset(void);
 
-// Implemented in main.c; shared so the probe can check a pointer before
+// Implemented in game.c; shared so the probe can check a pointer before
 // following it.
 int readable(const void* p, size_t n);

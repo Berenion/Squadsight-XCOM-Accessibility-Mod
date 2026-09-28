@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
-extern int readable(const void* p, size_t n);   // provided by main.c
+extern int readable(const void* p, size_t n);   // provided by game.c
 
 // Candidate offsets of UObject::Index. UE3 puts it just past ObjectFlags,
 // which is a QWORD at 0x04, so 0x0C is the expected answer -- but the probe
