@@ -49,6 +49,10 @@ int props_read_bool(const void* prop, const uint8_t* base, int* out);
 // offset can run past the 0x1000 a frame allows: PlayerInput is large.
 int props_read_object_bool(const void* prop, const uint8_t* obj, int* out);
 
+// Sets or clears a BoolProperty of an object. Only when the bitfield mask is
+// known and selects one bit; returns 0, having written nothing, otherwise.
+int props_write_object_bool(const void* prop, uint8_t* obj, int value);
+
 // Where the first member past UProperty lives: UBoolProperty::BitMask, and
 // by the same layout UStructProperty::Struct. 0 until discovered.
 uint32_t props_mask_offset(void);

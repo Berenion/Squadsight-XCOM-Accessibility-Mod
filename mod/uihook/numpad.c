@@ -57,6 +57,86 @@ static FieldSlot g_nav_curr_action;
 int              g_nav_aim;
 static float     g_aim_floor;           // the floor the aim stands on (aim_floor)
 
+// Free aim for a thrown ability. The numpad moves an aim only through
+// Mouse_CheckForFreeAim (ActiveUnit_Firing, the copy the cursor-moving state
+// inherits), which returns at once unless the shot's m_bFreeAiming is set:
+//
+//     kAbility = kAction.m_kShot;
+//     if(kAbility == none || !kAbility.m_bFreeAiming) return;
+//
+// The rocket reaches it (the HUD read "Free Aiming: Fire Rocket"); the
+// grenade of 2026-09-22 did not move at all. Its target is the cursor's feet
+// every tick (ActiveUnit_Firing_WithMoveCharacteristics.
+// PostProcessCheckGameLogic -> SetTargetLoc(CURSOR.GetCursorFeetLocation())),
+// so a cursor the numpad can place is all it needs. For the abilities the
+// game aims at the ground rather than at a unit --
+// XGAction_Targeting.AbilityIgnoresTargetedUnit: the grenades, the battle
+// scanner, the mimic beacon, the torch, plague, the telekinetic field, psi
+// inspiration -- the flag is set while the numpad aims, as the game's own
+// XGAbility_Targeted.SetFreeAim(true) would, and put back when the aim ends.
+// Never for a shot at a unit: Tab's NextTarget and PrevTarget cycle targets
+// only while m_bFreeAiming is off.
+static void*     g_aim_freed_shot;      // the shot whose flag the numpad set
+static FieldSlot g_aim_action_slot, g_aim_shot_slot, g_aim_type_slot;
+
+static int ability_aims_at_ground(int type)
+{
+    static const int ground[] = { 15, 16, 17, 18, 23, 24, 56, 59, 61, 75, 76, 77, 79 };
+    for (size_t i = 0; i < sizeof ground / sizeof ground[0]; i++)
+        if (ground[i] == type) return 1;
+    return 0;
+}
+
+// The shot being aimed: the soldier's m_kCurrAction.m_kShot.
+static void* aim_shot(void)
+{
+    void* unit = soldier_unit();
+    const void* v;
+    if (!unit || !field_ptr(unit, "m_kCurrAction", &g_aim_action_slot, sizeof(void*), &v))
+        return NULL;
+    void* action = *(void* const*)v;
+    if (!action || !unit_is_live(action) ||
+        !field_ptr(action, "m_kShot", &g_aim_shot_slot, sizeof(void*), &v))
+        return NULL;
+    void* shot = *(void* const*)v;
+    return shot && unit_is_live(shot) ? shot : NULL;
+}
+
+static void aim_free_restore(void)
+{
+    void* shot = g_aim_freed_shot;
+    g_aim_freed_shot = NULL;
+    if (!shot || !unit_is_live(shot) || !object_is_a(shot, "XGAbility_Targeted")) return;
+    const void* prop = object_field_prop(shot, "m_bFreeAiming");
+    int ok = prop && props_write_object_bool(prop, (uint8_t*)shot, 0);
+    logf_("nav: free aim put back off%s\n", ok ? "" : " -- could not write it");
+}
+
+static void aim_free_on(void)
+{
+    void* shot = aim_shot();
+    if (!shot || shot == g_aim_freed_shot) return;
+    aim_free_restore();                 // a different shot: the old one first
+    char cls[64] = "?";
+    object_class_name(shot, cls, sizeof cls);
+    const void* v;
+    int type = -1;
+    if (field_ptr(shot, "iType", &g_aim_type_slot, sizeof(int), &v)) type = *(const int*)v;
+    const void* prop = object_field_prop(shot, "m_bFreeAiming");
+    int free = -1;
+    if (!prop || !props_read_object_bool(prop, (const uint8_t*)shot, &free)) free = -1;
+    int ground = ability_aims_at_ground(type);
+    logf_("nav: aiming %s, type %d, free aim %d, %s\n", cls, type, free,
+          ground ? "aimed at the ground" : "aimed at a unit");
+    if (!ground || free != 0) return;
+    if (!props_write_object_bool(prop, (uint8_t*)shot, 1)) {
+        logf_("nav: free aim could not be set -- the bool's mask is not known\n");
+        return;
+    }
+    g_aim_freed_shot = shot;
+    logf_("nav: free aim turned on for the numpad\n");
+}
+
 // The cursor, watched rather than driven -- for now.
 //
 // AXCom3DCursor::GetCursorMode is native and the cursor's own Tick calls it
@@ -593,6 +673,7 @@ void nav_stop(const char* why)
     // still there, and the player has not stopped needing to hear them.
     g_nav_live = 0;
     g_nav_aim = 0;
+    GUARDED("nav: free aim back", aim_free_restore());
     g_nav_parked = 0;
     g_tile_due = 0;
     g_step_pending = 0;
@@ -905,6 +986,8 @@ static void nav_press(int digit, int gliding)
         g_floor_prev_ok = 1;
         where_forget();
     }
+    // Every step, not only the first: the shot can change mid-aim.
+    if (g_nav_aim) GUARDED("nav: free aim", aim_free_on());
 
     char say[NAV_MAX_TEXT + TILE_MAX_TEXT];
     NavGrid ng = { g.num_x, g.num_y };
@@ -985,6 +1068,7 @@ void nav_focus(int tx, int ty, float ground, const char* what)
     // lift an aim onto a higher floor: numpad steps only ever go down to one.
     g_nav_aim = soldier_aiming();
     if (g_nav_aim) g_aim_floor = aim_floor(&g, tx, ty, ground);
+    if (g_nav_aim) GUARDED("nav: free aim", aim_free_on());
     nav_arrive(tx, ty);
 
     g_nav_world[0] = grid_centre_x(&g, tx);

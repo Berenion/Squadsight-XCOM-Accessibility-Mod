@@ -202,6 +202,26 @@ int props_read_object_bool(const void* prop, const uint8_t* obj, int* out)
     return 1;
 }
 
+int writable(const void* p, size_t n);
+
+int props_write_object_bool(const void* prop, uint8_t* obj, int value)
+{
+    // Only with the mask known and a single bit: a whole-dword write would
+    // clear every other bool packed beside this one.
+    if (!g_ready || !prop || !obj || !g_mask_off) return 0;
+    if (!readable((const uint8_t*)prop + UPROPERTY_OFFSET, sizeof(uint32_t)) ||
+        !readable((const uint8_t*)prop + g_mask_off, sizeof(uint32_t)))
+        return 0;
+    uint32_t off = *(const uint32_t*)((const uint8_t*)prop + UPROPERTY_OFFSET);
+    uint32_t mask = *(const uint32_t*)((const uint8_t*)prop + g_mask_off);
+    if (off >= 0x10000 || !is_single_bit(mask) || !writable(obj + off, sizeof(uint32_t)))
+        return 0;
+    uint32_t* word = (uint32_t*)(obj + off);
+    if (value) *word |= mask;
+    else       *word &= ~mask;
+    return 1;
+}
+
 uint32_t props_mask_offset(void) { return g_mask_off; }
 
 int props_learn_mask(const void* node)
