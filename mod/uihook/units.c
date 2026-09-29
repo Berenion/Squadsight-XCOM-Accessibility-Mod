@@ -10,6 +10,7 @@
 #include "combat.h"
 #include "names.h"
 #include "ue3.h"
+#include "props.h"
 
 // Every unit has a flag over its head, and UIUnitFlag.SetNames(unitName,
 // unitNickName) arrives through the text hooks once per flag: a soldier's
@@ -320,7 +321,7 @@ typedef struct {
     char  obj[64];              // the XGUnit's object name, for known_relink
     char  name[64];             // the kind, as its flag names it
     int   number;
-    int   dead;                 // known_lost found it dead
+    int   dead;                 // found dead or stunned (known_gone)
     int   seen;                 // in sight at the last sight poll
     int   placed;               // loc holds a place the squad saw it
     float loc[3];
@@ -514,6 +515,30 @@ static int squad_turn(void* squad)
     return *(const int32_t*)v;
 }
 
+// Whether a known enemy is no longer anywhere to look for: dead, or stunned.
+// A stunned alien never dies -- XGUnit.AddCriticallyWoundedAction(bStunAlien)
+// sets m_bStunned and m_bCriticallyWounded, and IsAlive stays true -- so the
+// 2026-09-29 (18:34) log kept "Floater 5, last seen .." on the scanner for
+// six turns after the Arc Thrower took it.
+static const void* g_stunned_prop;
+
+static int known_gone(const Known* kn)
+{
+    if (!unit_is_live(kn->unit)) return 1;
+    UnitTestFn alive = (UnitTestFn)tile_vfn(kn->unit, g_unit_slot_alive);
+    if (alive && !alive(kn->unit, NULL)) return 1;
+    // m_bStunned is XGUnitNativeBase's, the same property for every unit.
+    if (!g_stunned_prop) g_stunned_prop = object_field_prop(kn->unit, "m_bStunned");
+    int stunned = 0;
+    if (g_stunned_prop &&
+        props_read_object_bool(g_stunned_prop, (const uint8_t*)kn->unit, &stunned) &&
+        stunned) {
+        logf_("known: %s %d is stunned -- off the last seen list\n", kn->name, kn->number);
+        return 1;
+    }
+    return 0;
+}
+
 void known_seen(void* squad, void* const* units, const float (*locs)[3], int n)
 {
     if (!known_for(squad)) return;
@@ -538,10 +563,7 @@ void known_seen(void* squad, void* const* units, const float (*locs)[3], int n)
         // when the scanner asks (known_lost). A load keeps the entry but not
         // the unit, and the corpse has no flag to be matched to, so a death
         // not noted before the load would come back as "last seen".
-        if (!kn->dead && unit_is_live(kn->unit)) {
-            UnitTestFn alive = (UnitTestFn)tile_vfn(kn->unit, g_unit_slot_alive);
-            if (alive && !alive(kn->unit, NULL)) kn->dead = 1;
-        }
+        if (!kn->dead && unit_is_live(kn->unit) && known_gone(kn)) kn->dead = 1;
         if (!kn->seen) continue;
         kn->seen = 0;
         kn->lost_turn = turn;
@@ -566,10 +588,8 @@ int known_lost(void* squad, const SeenSet* now, KnownLost* out, int max)
         // Not matched since a load: still where the squad last saw it.
         if (kn->unit) {
             if (seen_has(now, kn->unit)) continue;
-            // Dead, or its object gone: no longer somewhere to look.
-            if (!unit_is_live(kn->unit)) { kn->dead = 1; continue; }
-            UnitTestFn alive = (UnitTestFn)tile_vfn(kn->unit, g_unit_slot_alive);
-            if (alive && !alive(kn->unit, NULL)) { kn->dead = 1; continue; }
+            // Dead, stunned, or its object gone: no longer somewhere to look.
+            if (known_gone(kn)) { kn->dead = 1; continue; }
         }
         _snprintf_s(out[k].label, sizeof out[k].label, _TRUNCATE, "%s %d", kn->name,
                     kn->number);
