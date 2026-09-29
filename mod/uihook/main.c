@@ -358,6 +358,8 @@ static int       g_debrief_rereads;
 
 // The dialogue box last said, for Up and Down to say again (rewrite_cmd).
 static char      g_dialog_said[DIALOG_MAX_TEXT];
+// How soon the same box drawn again counts as the same appearance.
+#define DIALOG_REPEAT_MS 1500
 
 // The mission summary on screen, once it has drawn; see msum_screen_up.
 static void*     g_msum_screen;
@@ -5058,6 +5060,20 @@ static void capture_body(const char* tag, LONG n, void* stack)
 
         char say[DIALOG_MAX_TEXT];
         int what = dialog_note(object, fn_name, slot, text, say, sizeof say);
+        // The same box drawn twice running is one box. The 2026-09-29
+        // (11:30) log: the Laser Pistol's unlock ran Realize twice, 7 calls
+        // apart (SetStyle to SetHelp, then again), so it was said twice and
+        // kept twice; the Laser Rifle's right after it, once. dialog.c starts
+        // a box afresh at every SetStyle -- that is what lets the player hear
+        // a prompt they raise again -- so the repeat is caught here, by time.
+        static ULONGLONG s_dialog_spoke_at;
+        if (what == DIALOG_SPEAK && strcmp(say, g_dialog_said) == 0 &&
+            GetTickCount64() - s_dialog_spoke_at < DIALOG_REPEAT_MS) {
+            logf_("[%ld] %s %s.%s  DIALOG drawn again, not said again\n",
+                  n, tag, obj_name, fn_name);
+            what = DIALOG_SILENT;
+        }
+        if (what == DIALOG_SPEAK) s_dialog_spoke_at = GetTickCount64();
         if (what != DIALOG_IGNORED) {
             if (what == DIALOG_SPEAK || what == DIALOG_UPDATE)
                 strncpy_s(g_dialog_said, sizeof g_dialog_said, say, _TRUNCATE);
