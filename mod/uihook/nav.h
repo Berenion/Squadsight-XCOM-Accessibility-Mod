@@ -101,6 +101,10 @@ void navh_set_ground(float ground);
 // Starts on a new target tile, from the ground as it stands.
 void navh_begin_tile(void);
 
+// The tile's floor is already known -- F / C found it -- so the search is
+// skipped and the pick goes straight there.
+void navh_settle_at(float z);
+
 // The height to put the pick at this frame.
 float navh_query_z(void);
 

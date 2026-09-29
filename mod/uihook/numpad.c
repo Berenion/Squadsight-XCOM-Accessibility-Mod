@@ -276,8 +276,11 @@ static char      g_step_where[64];             // then "Inside building, floor 2
 static int       g_floor_hold;
 static float     g_floor_hold_z;
 // How far a path's end, or a pick's floor, may sit from the held floor and
-// still be on it: half a storey, well clear of the floors either side.
-#define FLOOR_HOLD_SLACK 96.0f
+// still be on it: under half of FLOOR_STEP_MIN, the least F / C ever moves,
+// so the floor it was taken off is never inside it. It was 96, and on
+// 2026-09-29 (17:25) F at 74, 53 went 224 -> 320, the old path ended exactly
+// 96 below, counted as on the new floor, and the target settled back on 224.
+#define FLOOR_HOLD_SLACK 40.0f
 
 // How long after a tile's first path it is described. None: the next frame.
 // It was 200 ms while "Dash" came from DestinationReachability, which the
@@ -1317,6 +1320,14 @@ static void nav_floor(int dir)
     logf_("nav: %s at %d, %d: %.1f -> %.1f, storey %d (%s)\n", dir > 0 ? "F" : "C",
           tx, ty, from, to, storey, seen);
     nav_focus(tx, ty, to, dir > 0 ? "the floor above" : "the floor below");
+    // The floor is known, so no search: it starts 32 above the ground, and on
+    // 2026-09-29 (17:25) C onto 208 at 53, 53 found a path from 240 (a stair
+    // step) and settled there -- 80 under the floor at 320, so F then said
+    // "No floor above" and C "No floor below".
+    if (!g_nav_aim) {
+        navh_settle_at(to);
+        g_nav_world[2] = navh_query_z();
+    }
     // How far: inside a building, in its own floors (asked for 2026-09-27,
     // after "2 storeys up" from a tall ground floor to the one above it);
     // elsewhere, or between two heights on the same floor of it, in storeys

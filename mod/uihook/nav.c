@@ -102,6 +102,8 @@ static void settle(float z)
     g_failed_at = 0;
 }
 
+void navh_settle_at(float z) { settle(z); }
+
 void navh_floor_result(float asked, float got)
 {
     if (g_phase == NAVH_SETTLED || g_phase == NAVH_NONE) return;
