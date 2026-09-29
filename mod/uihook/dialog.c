@@ -35,11 +35,10 @@ int dialog_is_box(const char* obj_name)
 // does not truncate, it calls the CRT invalid-parameter handler, which
 // __fastfail()s past SEH and takes the game with it.
 //
-// DIALOG_MAX_TEXT is the speech queue's own limit, and speech_say drops an
-// utterance that will not fit rather than shortening it, so a box longer than
-// this has to be cut here or it is not spoken at all.  It is cut at a space:
-// the beginning of a question is worth hearing, half a word is not.  Every
-// prompt in the shell is a small fraction of this, so the case is defensive.
+// DIALOG_MAX_TEXT is the speech queue's own limit, so a box longer than it is
+// cut here, at a space, rather than by the speech thread mid-word: the
+// beginning of a question is worth hearing, half a word is not.  It was 512
+// and a research unlock could reach it; at 4096 the case is defensive.
 static void join(char* out, size_t out_sz, const char* piece)
 {
     if (!piece || !*piece) return;

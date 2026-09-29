@@ -12,7 +12,9 @@
 // place in the list stays put while new announcements come in underneath it.
 
 #define HISTORY_MAX  200
-#define HISTORY_TEXT 256
+// Long enough for a research unlock's popup or a briefing; it was 256, and
+// an entry longer than that came back cut when read again.
+#define HISTORY_TEXT 2048
 
 // Adds an announcement.
 void history_add(const char* text);

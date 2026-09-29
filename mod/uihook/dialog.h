@@ -29,7 +29,10 @@
 // So the calls are accumulated here instead and spoken once, as one sentence,
 // when the last of them arrives.
 
-#define DIALOG_MAX_TEXT 512
+// The speech queue's own limit (speech.c, MAX_UTTER). It was 512, and a
+// research unlock's popup -- the item's name, description and help in one
+// body -- can run past that.
+#define DIALOG_MAX_TEXT 4096
 
 // What to do with the composed text.
 #define DIALOG_IGNORED (-1) // not one of the box's own setters; not handled

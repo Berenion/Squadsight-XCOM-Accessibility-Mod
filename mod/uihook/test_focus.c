@@ -455,6 +455,30 @@ int main(void)
             check(strcmp(say, "Enter: ACCEPT. Escape: CANCEL") == 0,
                   "an uncuttable body is dropped, not spliced");
         }
+
+        // A research unlock (XComPresentationLayerBase.UIItemUnlock): the
+        // item's name, description and help in one body, well past the old
+        // 512, is said whole with its answer after it.
+        dialog_reset();
+        {
+            char body[1600];
+            size_t used = 0;
+            used += _snprintf_s(body, sizeof body, _TRUNCATE, "Laser Rifle ");
+            while (used + 40 < sizeof body - 20)
+                used += _snprintf_s(body + used, sizeof body - used, _TRUNCATE,
+                                    "A beam weapon of great accuracy. ");
+            _snprintf_s(body + used, sizeof body - used, _TRUNCATE, "Build it in Engineering.");
+            dialog_note(box, "AS_SetStyleNormal", -1, "", say, sizeof say);
+            dialog_note(box, "AS_SetTitle", -1, "NEW ITEM AVAILABLE", say, sizeof say);
+            dialog_note(box, "AS_SetText", -1, body, say, sizeof say);
+            dialog_note(box, "AS_SetHelp", 0, "OK", say, sizeof say);
+            check(dialog_note(box, "AS_SetHelp", 1, "", say, sizeof say) == DIALOG_SPEAK,
+                  "a long unlock is announced");
+            check(strstr(say, "Build it in Engineering.") != NULL,
+                  "the unlock's help, at the end of a long body, is kept");
+            check(strlen(say) > 1500 && strstr(say, "Enter: OK") != NULL,
+                  "the whole body and the answer are said");
+        }
     }
 
     // The help bar, read back on request. The difficulty screen is the case

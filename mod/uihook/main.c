@@ -682,8 +682,20 @@ static int is_selection_fn(const char* fn)
 #define AS_STRING 3
 #define AS_BOOL   4
 
+// A call's strings, whole. They were FOCUS_MAX_LABELS slots of FOCUS_MAX_LABEL
+// (256) bytes, and everything past 256 was dropped before any reader saw it:
+// a research unlock's popup (XComPresentationLayerBase.UIItemUnlock) is one
+// AS_SetText of the item's name, its description and its help, joined by
+// <br><br>, and the dialogue box read only its first 256. Now each string
+// goes into one pool as long as read_fstring gave it (MAX_STR); the pool is
+// the same size the slots were, so only a call carrying more than 64 KB of
+// text in all is cut, and then at its last string.
+#define PAYLOAD_POOL (FOCUS_MAX_LABELS * FOCUS_MAX_LABEL)
+
 typedef struct {
-    char  strings[FOCUS_MAX_LABELS][FOCUS_MAX_LABEL];
+    char* strings[FOCUS_MAX_LABELS];
+    char  pool[PAYLOAD_POOL];
+    size_t pool_used;
     int   nstrings;
     float numbers[8];
     int   nnumbers;
@@ -701,7 +713,20 @@ typedef struct {
 static void payload_add_string(Payload* p, const char* s)
 {
     if (p->nstrings >= FOCUS_MAX_LABELS) return;
-    strncpy_s(p->strings[p->nstrings], FOCUS_MAX_LABEL, s, _TRUNCATE);
+    size_t room = PAYLOAD_POOL - p->pool_used;
+    if (room < 2) return;
+    size_t len = strlen(s);
+    if (len > room - 1) {
+        // Out of pool: cut, but never inside a UTF-8 sequence -- the speech
+        // thread's MultiByteToWideChar refuses the whole string for one.
+        len = room - 1;
+        while (len && ((unsigned char)s[len] & 0xC0) == 0x80) len--;
+    }
+    char* dst = p->pool + p->pool_used;
+    memcpy(dst, s, len);
+    dst[len] = 0;
+    p->pool_used += len + 1;
+    p->strings[p->nstrings] = dst;
     p->hues[p->nstrings] = -1;
     p->nstrings++;
 }
@@ -4347,6 +4372,7 @@ static void capture_body(const char* tag, LONG n, void* stack)
 
     Payload* p = &tls_payload;
     p->nstrings = 0;
+    p->pool_used = 0;
     p->nnumbers = 0;
     p->nbools   = 0;
     p->nabools  = 0;
@@ -5042,6 +5068,11 @@ static void capture_body(const char* tag, LONG n, void* stack)
                 // waiting: the prompt is what the keyboard is now attached to.
                 speech_cancel_pending();
                 if (g_speak && !muted()) speech_say(say);
+                // Kept for Insert, as announce() keeps an event: a research
+                // unlock is said once, while the next screen is already
+                // arriving. Only the box as it appears -- a DIALOG_UPDATE is
+                // a countdown's tick (KeepResolutionCountdown), once a second.
+                history_add(say);
             } else if (what == DIALOG_UPDATE) {
                 logf_("[%ld] %s %s.%s  DIALOG update \"%s\"\n",
                       n, tag, obj_name, fn_name, say);

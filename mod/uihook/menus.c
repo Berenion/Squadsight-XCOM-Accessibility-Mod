@@ -283,8 +283,8 @@ int review_poll(void)
         pressed[k] = now[k] && !g_review_was[k];
         g_review_was[k] = now[k];
     }
-    // A page's lines (history_page_open) are longer than an announcement.
-    static char say[HISTORY_PAGE_TEXT + 64];
+    // An entry or a page's line, with "Oldest." and the like in front.
+    static char say[(HISTORY_TEXT > HISTORY_PAGE_TEXT ? HISTORY_TEXT : HISTORY_PAGE_TEXT) + 64];
     if (!history_is_open()) {
         if (!pressed[0]) return 0;
         g_menu_polled_at = GetTickCount64();
