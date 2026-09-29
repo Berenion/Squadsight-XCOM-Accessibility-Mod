@@ -304,11 +304,23 @@ int unit_gone(const UnitName* u, void* flag)
 //
 // See units.h. Keyed by the XGUnit, which is only ever compared here -- the
 // entry outlives the unit's flag, and a dead unit's object may be gone.
+//
+// A load keeps the table (known_reset). The 2026-09-29 (12:53) log reloaded
+// mid-mission and had "known: 4 enemies forgotten": every place the squad had
+// seen an alien went with it, although a sighted player reloading still
+// remembers them. A load makes every unit again, so an entry loses its
+// XGUnit then and is matched to the new one by the object's name: the
+// checkpoint records each actor's ActorName (Checkpoint.ActorRecord) and
+// makes it again under that name. The kind must match too. Until matched,
+// an entry is still listed where it was last seen -- nothing the squad saw
+// is forgotten -- unless it was known dead.
 
 typedef struct {
-    void* unit;
+    void* unit;                 // NULL after a load, until known_relink
+    char  obj[64];              // the XGUnit's object name, for known_relink
     char  name[64];             // the kind, as its flag names it
     int   number;
+    int   dead;                 // known_lost found it dead
     int   seen;                 // in sight at the last sight poll
     int   placed;               // loc holds a place the squad saw it
     float loc[3];
@@ -318,14 +330,114 @@ typedef struct {
 static Known g_known[KNOWN_MAX];
 static int   g_nknown;
 static void* g_known_squad;     // the human player the table belongs to
+static int   g_known_carried;   // kept across a squad change, map not yet compared
+static CursorGrid g_known_grid; // the map the places are on
+static int   g_known_have_grid;
+static int   g_known_turn = -1; // the squad's m_iTurn as last read
 
-void known_reset(void)
+static void known_forget(const char* why)
 {
-    if (g_nknown) logf_("known: %d enemies forgotten\n", g_nknown);
+    if (g_nknown) logf_("known: %d enemies forgotten -- %s\n", g_nknown, why);
     memset(g_known, 0, sizeof g_known);
     g_nknown = 0;
     g_known_squad = NULL;
+    g_known_carried = 0;
+    g_known_have_grid = 0;
+    g_known_turn = -1;
     for (int i = 0; i < g_nunits; i++) g_units[i].number = 0;
+}
+
+// A different squad is a load or another mission, and which one is only
+// known once the new map's grid can be read (known_settle). Until then the
+// table is kept with its units let go, since after a load their addresses
+// belong to other objects. One in sight at that moment was last seen then.
+void known_reset(void)
+{
+    if (!g_nknown || !g_known_have_grid) { known_forget("a new squad"); return; }
+    int kept = 0;
+    char list[512];
+    size_t used = 0;
+    for (int i = 0; i < g_nknown; i++) {
+        Known* kn = &g_known[i];
+        if (kn->unit) kept++;
+        kn->unit = NULL;
+        if (kn->seen) { kn->seen = 0; kn->lost_turn = g_known_turn; }
+        int w = _snprintf_s(list + used, sizeof list - used, _TRUNCATE, "%s%s %d (%s%s)",
+                            used ? ", " : "", kn->name, kn->number, kn->obj,
+                            kn->dead ? ", dead" : "");
+        if (w > 0) used += (size_t)w;
+    }
+    // With the object names, so a load that matches nobody shows why.
+    if (kept) logf_("known: %d enemies carried across a squad change, kept if the map is "
+                    "the same: %s\n", g_nknown, used ? list : "");
+    g_known_squad = NULL;
+    g_known_carried = 1;
+    for (int i = 0; i < g_nunits; i++) g_units[i].number = 0;
+}
+
+// After a squad change: the same grid is the same map, a load of this
+// mission; any other is another mission, and its places mean nothing there.
+// 0 while the grid cannot be read yet.
+static int known_settle(void)
+{
+    CursorGrid g;
+    if (!cursor_grid(&g)) return !g_known_carried;
+    if (!g_known_carried) {
+        g_known_grid = g;
+        g_known_have_grid = 1;
+        return 1;
+    }
+    if (memcmp(&g, &g_known_grid, sizeof g) != 0) {
+        void* squad = g_known_squad;
+        known_forget("another map");
+        g_known_squad = squad;
+        g_known_grid = g;
+        g_known_have_grid = 1;
+        return 1;
+    }
+    g_known_carried = 0;
+    logf_("known: the same map after the squad change, %d enemies kept\n", g_nknown);
+    return 1;
+}
+
+// Gives entries that lost their unit in a load the unit made again under the
+// same object name, and its number back. Only while something is unmatched,
+// and on every call then: known_number would otherwise give a unit coming
+// back into sight a new number before it was matched.
+static FieldSlot g_known_flag_unit;
+
+static void known_relink(void)
+{
+    int want = 0;
+    for (int i = 0; i < g_nknown; i++)
+        if (!g_known[i].unit && g_known[i].obj[0] && !g_known[i].dead) want++;
+    if (!want) return;
+    for (int i = 0; i < g_nunits; i++) {
+        UnitName* u = &g_units[i];
+        const void* v;
+        if (!u->flag || !u->name[0] ||
+            !field_ptr(u->flag, "m_kUnit", &g_known_flag_unit, sizeof(void*), &v))
+            continue;
+        void* unit = *(void* const*)v;
+        char obj[64];
+        if (!unit || !unit_is_live(unit) || !object_name(unit, obj, sizeof obj)) continue;
+        int taken = 0;
+        for (int k = 0; k < g_nknown && !taken; k++) taken = g_known[k].unit == unit;
+        if (taken) continue;
+        for (int k = 0; k < g_nknown; k++) {
+            Known* kn = &g_known[k];
+            if (kn->unit || kn->dead || strcmp(kn->obj, obj) != 0) continue;
+            if (strcmp(kn->name, u->name) != 0) {
+                logf_("known: %s is a %s now, not %s %d -- not matched\n", obj, u->name,
+                      kn->name, kn->number);
+                continue;
+            }
+            kn->unit = unit;
+            u->number = kn->number;
+            logf_("known: %s %d is %s again\n", kn->name, kn->number, obj);
+            break;
+        }
+    }
 }
 
 // Whether `squad` is a human player, asked by class every time. Remembered
@@ -347,14 +459,17 @@ static int known_for(void* squad)
 {
     if (!squad_is_human(squad)) return 0;
     if (squad != g_known_squad) {
-        known_reset();
+        if (g_known_squad) known_reset();
         g_known_squad = squad;
     }
+    if (!known_settle()) return 0;
+    known_relink();
     return 1;
 }
 
 static Known* known_find(const void* unit)
 {
+    if (!unit) return NULL;
     for (int i = 0; i < g_nknown; i++)
         if (g_known[i].unit == unit) return &g_known[i];
     return NULL;
@@ -375,6 +490,7 @@ static void known_number(void* squad, const SeenSet* set)
         memset(kn, 0, sizeof *kn);
         kn->unit = e;
         kn->lost_turn = -1;
+        object_name(e, kn->obj, sizeof kn->obj);
         strncpy_s(kn->name, sizeof kn->name, u->name, _TRUNCATE);
         int top = 0;
         for (int i = 0; i < g_nknown - 1; i++)
@@ -401,9 +517,13 @@ static int squad_turn(void* squad)
 void known_seen(void* squad, void* const* units, const float (*locs)[3], int n)
 {
     if (!known_for(squad)) return;
-    int turn = -2;                      // read once, and only if needed
+    // Every poll, for known_reset: one in sight when a load comes was last
+    // seen on the turn before it.
+    int turn = squad_turn(squad);
+    if (turn >= 0) g_known_turn = turn;
     for (int i = 0; i < g_nknown; i++) {
         Known* kn = &g_known[i];
+        if (!kn->unit) continue;
         int j;
         for (j = 0; j < n && units[j] != kn->unit; j++) {}
         if (j < n) {
@@ -414,9 +534,16 @@ void known_seen(void* squad, void* const* units, const float (*locs)[3], int n)
             memcpy(kn->loc, locs[j], sizeof kn->loc);
             continue;
         }
+        // Out of sight: a death is noted here, on every poll, and not only
+        // when the scanner asks (known_lost). A load keeps the entry but not
+        // the unit, and the corpse has no flag to be matched to, so a death
+        // not noted before the load would come back as "last seen".
+        if (!kn->dead && unit_is_live(kn->unit)) {
+            UnitTestFn alive = (UnitTestFn)tile_vfn(kn->unit, g_unit_slot_alive);
+            if (alive && !alive(kn->unit, NULL)) kn->dead = 1;
+        }
         if (!kn->seen) continue;
         kn->seen = 0;
-        if (turn == -2) turn = squad_turn(squad);
         kn->lost_turn = turn;
         logf_("known: %s %d out of sight at %.0f, %.0f, %.0f (turn %d)\n", kn->name,
               kn->number, kn->loc[0], kn->loc[1], kn->loc[2], turn);
@@ -429,15 +556,21 @@ int known_lost(void* squad, const SeenSet* now, KnownLost* out, int max)
     // is theirs, and the last human one still owns it.
     if (!squad_is_human(squad)) squad = g_known_squad;
     if (!squad || squad != g_known_squad || !squad_is_human(squad)) return 0;
+    if (!known_settle()) return 0;
+    known_relink();
     int turn = squad_turn(squad);
     int k = 0;
     for (int i = 0; i < g_nknown && k < max; i++) {
         Known* kn = &g_known[i];
-        if (kn->seen || !kn->placed || seen_has(now, kn->unit)) continue;
-        // Dead, or its object gone: no longer somewhere to look.
-        if (!unit_is_live(kn->unit)) continue;
-        UnitTestFn alive = (UnitTestFn)tile_vfn(kn->unit, g_unit_slot_alive);
-        if (alive && !alive(kn->unit, NULL)) continue;
+        if (kn->seen || !kn->placed || kn->dead) continue;
+        // Not matched since a load: still where the squad last saw it.
+        if (kn->unit) {
+            if (seen_has(now, kn->unit)) continue;
+            // Dead, or its object gone: no longer somewhere to look.
+            if (!unit_is_live(kn->unit)) { kn->dead = 1; continue; }
+            UnitTestFn alive = (UnitTestFn)tile_vfn(kn->unit, g_unit_slot_alive);
+            if (alive && !alive(kn->unit, NULL)) { kn->dead = 1; continue; }
+        }
         _snprintf_s(out[k].label, sizeof out[k].label, _TRUNCATE, "%s %d", kn->name,
                     kn->number);
         memcpy(out[k].loc, kn->loc, sizeof out[k].loc);

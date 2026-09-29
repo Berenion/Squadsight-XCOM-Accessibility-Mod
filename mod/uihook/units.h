@@ -147,11 +147,15 @@ int  squad_sees(const SquadSight* v, void* unit, const float* loc,
 //
 // Only a human player's sight counts (XGPlayer, XGPlayer_MP): in the aliens'
 // turn the cursor's player is theirs, and their "enemies" are the squad. A
-// different human player -- a new mission, a load -- starts again from 1.
+// different human player on another map starts again from 1; on the same
+// map it is a load, and what was seen is kept, matched to the units made
+// again by their object names (units.c).
 #define KNOWN_MAX 128
 
-// Forgets them all, as sight_reset does: a new squad, or the old one gone
-// (a load frees it, and the next may be made at the same address).
+// Lets go of the units, as sight_reset does: a new squad, or the old one
+// gone (a load frees it, and the next may be made at the same address).
+// What was seen is kept until the next map's grid says whether it is the
+// same map; another map forgets it.
 void known_reset(void);
 
 // Whether `squad` is live and a human player (XGPlayer, XGPlayer_MP), asked
