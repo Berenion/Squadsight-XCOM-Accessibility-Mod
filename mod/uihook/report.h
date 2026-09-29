@@ -10,7 +10,10 @@
 
 // Describes tile (tx, ty) with its floor at `floor`. Returns 0 when the game
 // could not be asked, leaving `say` empty. `with_dash` is off where the last
-// path is not this tile's; `with_who` off where the units were said already.
+// path is not this tile's, TILE_DASH_FELL_SHORT where the path at one move's
+// allowance ran out before the tile (tile_dash_pending), so the move is a
+// dash at least; `with_who` off where the units were said already.
+#define TILE_DASH_FELL_SHORT 2
 int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
                 char* say, size_t say_sz);
 

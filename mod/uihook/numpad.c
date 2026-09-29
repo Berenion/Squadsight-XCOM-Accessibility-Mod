@@ -1654,7 +1654,9 @@ static void nav_poll(void)
                 char what[TILE_MAX_TEXT] = "";
                 Fault f;
                 __try {
-                    if (!tile_report(tx, ty, navh_ground(), g_tile_due_dash, 0,
+                    int dash = g_tile_due_dash && g_tile_due_waits ? TILE_DASH_FELL_SHORT
+                                                                   : g_tile_due_dash;
+                    if (!tile_report(tx, ty, navh_ground(), dash, 0,
                                      what, sizeof what))
                         what[0] = 0;
                 }

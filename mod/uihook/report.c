@@ -100,7 +100,11 @@ int tile_dash(int* cost_out, int* std_out, int* max_out, int* moves_out,
             return 2;
         }
         *turns_out = 1;
-        return *cost_out > *std_out;
+        // A path that reaches on the last action is that action's move,
+        // whatever it cost: the dash is only for a first move (SetDashing).
+        // The 2026-09-29 (17:25) log: White, 1 action left, reached 62, 37
+        // at a cost of 17 of 16 and it was said as "Dash".
+        return *moves_out <= 0 && *cost_out > *std_out;
     }
     if (*cost_out > limit) return 2;
     return *cost_out > *std_out;
@@ -615,6 +619,12 @@ int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     tile_rings(here, r.reach, sizeof r.reach);
     int cost = -1, std = -1, maxc = -1, moves = -1, turns = 0;
     int reach = with_dash ? tile_dash(&cost, &std, &maxc, &moves, &turns) : -1;
+    // The game dashes when the destination does not fit one move
+    // (XComPathingPawn.ChangeDashState), and the rebuilt path can then cost
+    // exactly one move: the 2026-09-29 (17:47) log, Robinson to 67, 34 --
+    // out of range at max 12, then cost 12 of 12 at max 24, said without
+    // "Dash", and the move took both actions under the game's "Dashing".
+    if (reach == 0 && with_dash == TILE_DASH_FELL_SHORT && moves == 0) reach = 1;
     r.dash = reach == 1;
     r.turns = reach == 2 ? turns : 0;
 
