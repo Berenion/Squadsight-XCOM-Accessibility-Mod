@@ -1645,6 +1645,7 @@ static CallFamily call_family(const char* o)
     case 'P': if (name_is(o, "UIPsiLabs")) return FAM_BASE; break;
     case 'S':
         if (name_is(o, "UISituationRoom") || name_is(o, "UISoldierGeneMods") ||
+            name_is(o, "UISoldierAugmentation") ||
             name_is(o, "UIStrategyHUD_") || name_is(o, "UIStrategyComponent_"))
             return FAM_BASE;
         if (name_is(o, "UISightlineHUD_SightlineContainer")) return FAM_TACTICAL;
@@ -2648,6 +2649,95 @@ static int base_call(const Call* c)
         }
         if (strcmp(fn_name, "AS_SetCalloutImage") == 0 || strcmp(fn_name, "AS_SetIcon") == 0)
             return 1;
+    }
+
+    // Augment Soldier (UISoldierAugmentation, EW), after a soldier is picked
+    // for the Cybernetics Lab. The 2026-09-29 log: the arrival said nothing
+    // but "COST: §10 10" (the general path took AS_SetSelected for a list
+    // and the cost for its row), and the second button was "unresolved".
+    // OnInit sends
+    //     AS_SetLabels(title, "BONUS HEAVY ABILITY", "WARNING", warning)
+    //     AS_SetSoldierData(name, rank, rank icon, class icon)
+    //     AS_SetBonusAbilityData(perk, description, icon)
+    //     AS_SetCost("COST: §<cash> <meld icon><meld>")
+    //     AS_SetButtonHelp(0, "AUGMENT SOLDIER" or "INSUFFICIENT
+    //         RESOURCES", icon, disabled), AS_SetButtonHelp(1, "NOT NOW", ...)
+    // and then RealizeSelected: AS_SetSelected(old, false), AS_SetSelected(
+    // new, true), as every Up and Down does. Enter acts on the selected
+    // button (OnUnrealCommand 511: OnAccept on 0, OnCancel on 1), Escape
+    // leaves; OnAccept does nothing when the lab cannot be afforded.
+    if (strncmp(obj_name, "UISoldierAugmentation", 21) == 0 && strncmp(fn_name, "AS_", 3) == 0) {
+        static char s_title[64], s_bonus[64], s_warn[64], s_warning[512], s_soldier[160],
+                    s_perk[96], s_perk_desc[512], s_cost[96], s_btn[2][96];
+        static int  s_off[2], s_fresh;
+        if (strcmp(fn_name, "AS_SetLabels") == 0) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            strcpy_s(s_title, sizeof s_title, a.ns > 0 ? a.s[0] : "");
+            strcpy_s(s_bonus, sizeof s_bonus, a.ns > 1 ? a.s[1] : "");
+            strcpy_s(s_warn, sizeof s_warn, a.ns > 2 ? a.s[2] : "");
+            strcpy_s(s_warning, sizeof s_warning, a.ns > 3 ? a.s[3] : "");
+            s_fresh = 1;
+        } else if (strcmp(fn_name, "AS_SetSoldierData") == 0) {
+            // The name and the rank; the icons are image names.
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            _snprintf_s(s_soldier, sizeof s_soldier, _TRUNCATE, "%s%s%s",
+                        a.ns > 0 ? a.s[0] : "", a.ns > 1 && a.s[1][0] ? ", " : "",
+                        a.ns > 1 ? a.s[1] : "");
+        } else if (strcmp(fn_name, "AS_SetBonusAbilityData") == 0) {
+            frame_string(node, locals, 0, s_perk, sizeof s_perk);
+            frame_string(node, locals, 1, s_perk_desc, sizeof s_perk_desc);
+        } else if (strcmp(fn_name, "AS_SetCost") == 0) {
+            // "COST: §10 10" once the Meld icon is stripped: the credits
+            // through hire_text, and the last number is the Meld. From the
+            // payload: frame_string came back empty here (the 2026-09-29
+            // (19:01) log said "irreversible. . Up and Down"), as it did
+            // for the gene mods' Meld, while the payload had the text.
+            char raw[96] = "", c[96];
+            if (p->nstrings) strncpy_s(raw, sizeof raw, p->strings[0], _TRUNCATE);
+            logf_("[%ld] AUGMENT cost \"%s\"\n", n, raw);
+            hire_text(raw, c, sizeof c);
+            char* sp = strrchr(c, ' ');
+            if (sp && sp[1] >= '0' && sp[1] <= '9' && sp > c && sp[-1] != ':') {
+                char meld[16];
+                strncpy_s(meld, sizeof meld, sp + 1, _TRUNCATE);
+                *sp = 0;
+                _snprintf_s(s_cost, sizeof s_cost, _TRUNCATE, "%s, %s Meld", c, meld);
+            } else {
+                strcpy_s(s_cost, sizeof s_cost, c);
+            }
+        } else if (strcmp(fn_name, "AS_SetButtonHelp") == 0 && p->nnumbers) {
+            int i = (int)p->numbers[0];
+            if (i >= 0 && i < 2) {
+                frame_string(node, locals, 0, s_btn[i], sizeof s_btn[i]);
+                s_off[i] = p->nbools > 0 && p->bools[0];
+            }
+        } else if (strcmp(fn_name, "AS_SetSelected") == 0 && p->nnumbers) {
+            // Only the one being selected; the other call unselects.
+            if (p->nbools < 1 || !p->bools[0]) return 1;
+            int i = (int)p->numbers[0];
+            if (i < 0 || i > 1) return 1;
+            char button[160];
+            _snprintf_s(button, sizeof button, _TRUNCATE, "%s%s, %d of 2.", s_btn[i],
+                        s_off[i] ? ", unavailable" : "", i + 1);
+            static char say[2048];
+            if (s_fresh) {
+                _snprintf_s(say, sizeof say, _TRUNCATE,
+                            "%s. %s. %s: %s. %s %s: %s %s%sUp and Down choose, Enter: select. %s",
+                            s_title, s_soldier, s_bonus, s_perk, s_perk_desc, s_warn, s_warning,
+                            s_cost, s_cost[0] ? ". " : "", button);
+            } else {
+                strcpy_s(say, sizeof say, button);
+            }
+            logf_("[%ld] %s %s.%s  AUGMENT %d%s \"%s\"\n", n, tag, obj_name, fn_name, i,
+                  s_fresh ? " (arrival)" : "", say);
+            speech_cancel_pending();
+            if (s_fresh) announce(say);
+            else if (g_speak && !muted()) speech_say_now(say);
+            s_fresh = 0;
+        }
+        return 1;
     }
 
     // Build Items. UpdateLayout sends the heading and column labels
