@@ -141,8 +141,16 @@ typedef int (__fastcall* EncompassFn)(void* self, void* edx, float px, float py,
 typedef int (__fastcall* FlankedByFn)(void* self, void* edx, void* enemy,
                                       const float* enemy_loc, int debug_log);
 
+// XComWorldData.IsTileBlockedByUnitFlag(const out int X, const out int Y,
+// const out int Z, Actor IgnoreUnit): whether a unit's blocking flag is set on
+// the tile (SetTileBlockedByUnitFlag, by any unit, seen or not). `const out`
+// ints go by pointer.
+typedef int (__fastcall* TileUnitBlockFn)(void* self, void* edx, const int* x, const int* y,
+                                          const int* z, void* ignore);
+
 extern int   g_tile_slot_cover, g_tile_slot_smoke, g_tile_slot_poison;
 extern int   g_tile_slot_occupied;      // XComWorldData.IsTileOccupied
+extern int   g_tile_slot_unitblock;     // XComWorldData.IsTileBlockedByUnitFlag
 extern int   g_tile_slot_onfloor;       // XComWorldData.IsPositionOnFloor
 extern int   g_tile_slot_standable;     // ...OnFloorAndValidDestination
 extern int   g_tile_slot_floorz;        // XComWorldData.GetFloorZForPosition

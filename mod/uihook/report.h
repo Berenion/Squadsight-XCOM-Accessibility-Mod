@@ -18,6 +18,15 @@ int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
 //   0 a standard move, 1 a dash, 2 past this turn's reach, -1 unreadable.
 int tile_dash(int* cost_out, int* std_out, int* max_out, int* moves_out, int* turns_out);
 
+// A pathing pawn's bOutOfRange: 1 when the path it last built stops short of
+// its destination for want of allowance, 0 when not, -1 unreadable.
+int path_out_of_range(void* ppawn);
+
+// Whether the path just built ran out of a one-move allowance while a dash is
+// still open this turn: its cost is not the tile's until the game builds it
+// again at the dash allowance.
+int tile_dash_pending(void);
+
 // The pathing pawn that built the last path, set by hook_computepath.
 extern void* g_path_pawn;
 

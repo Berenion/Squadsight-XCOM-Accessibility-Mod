@@ -20,6 +20,11 @@ void move_poll(void);
 // would end, which is not always where it was asked to go. 0 when unreadable.
 int path_end(void* ppawn, float* end);
 
+// For the log: the path's Cost, and the pawn's
+// MaxPathCost, StandardMoveLength, bOutOfRange and DestinationReachability,
+// as one line. Empty when the pawn is gone.
+void path_limits(void* ppawn, char* out, size_t out_sz);
+
 // How far a path's end may stand from the height asked for and still be that
 // floor: half a storey (192) either way. A path's points stand a few units
 // under floor + NAVH_LIFT (58 over a floor at 2.0 in the 18:58 log).

@@ -158,6 +158,7 @@ int game_has_focus(void)
 static ULONGLONG g_tile_due;            // when the target tile is to be described
 static int       g_tile_due_at[2];
 static int       g_tile_due_dash;       // whether its path says anything about it
+static int       g_tile_due_waits;      // times put off for the dash rebuild
 
 // A step is announced once, when what is on the tile is known, with the
 // coordinates last: "Ellis. Low cover south. 44, 12." Until then the step's
@@ -204,6 +205,13 @@ static float     g_floor_hold_z;
 // needs no such wait -- the pathfinder builds the whole path at once, past
 // the dash limit included (costs of 54 against a MaxPathCost of 24).
 #define TILE_DESCRIBE_DELAY_MS 0
+// That held until F: a path built on a one-move allowance that runs out
+// stops the search there, and its cost is not the tile's (tile_dash_pending,
+// report.c). The description is then put off, DASH_WAIT_MS at a time, for
+// the game's rebuild at the dash allowance, and said as it stands after
+// DASH_WAITS_MAX.
+#define DASH_WAIT_MS   50
+#define DASH_WAITS_MAX 8
 // The soldier's own tile has no verdict to wait for, only the floor search,
 // which on level ground settles on its first frame.
 #define OWN_TILE_DELAY_MS 60
@@ -417,18 +425,28 @@ static float aim_floor(const CursorGrid* g, int tx, int ty, float from)
 // that ended on 14, 42 outside; that is caught at the confirm instead
 // (move_confirmed), when the path is the one the click performs. Read in the
 // ComputePath2 hook it is also a path behind: DrawPath updates it afterwards.
+#define PATH_EDGE_LOG 3
+
 static void path_note(int tx, int ty, float floor)
 {
     float end[3];
     CursorGrid g;
     if (!g_path_pawn || !cursor_grid(&g) || !path_end(g_path_pawn, end)) return;
     int ex = grid_x(&g, end[0]), ey = grid_y(&g, end[1]);
-    if (ex == tx && ey == ty && fabsf(end[2] - NAV_CURSOR_LIFT - floor) <= PATH_END_Z_SLACK)
-        return;
+    int reached = ex == tx && ey == ty &&
+                  fabsf(end[2] - NAV_CURSOR_LIFT - floor) <= PATH_END_Z_SLACK;
     int cost, std, max, moves, turns;
     tile_dash(&cost, &std, &max, &moves, &turns);
-    logf_("nav: the path to %d, %d floor %.1f ends on %d, %d (z %.1f) for now; "
-          "cost %d, max %d\n", tx, ty, floor, ex, ey, end[2], cost, max);
+    // Paths that reach are logged too near the limit (PATH_EDGE_LOG of it),
+    // so the log holds both sides of the cut: see path_limits.
+    if (reached && (max < 0 || cost < max - PATH_EDGE_LOG)) return;
+    char limits[256];
+    path_limits(g_path_pawn, limits, sizeof limits);
+    if (reached)
+        logf_("nav: the path to %d, %d floor %.1f reaches it; %s\n", tx, ty, floor, limits);
+    else
+        logf_("nav: the path to %d, %d floor %.1f ends on %d, %d (z %.1f) for now; "
+              "cost %d, max %d; %s\n", tx, ty, floor, ex, ey, end[2], cost, max, limits);
 }
 
 // A tile no path reaches. A unit standing on it is the likeliest reason, and
@@ -1524,7 +1542,19 @@ static void nav_poll(void)
             // (TILE_DESCRIBE_DELAY_MS), outside the pathfinder's own call.
             int tx, ty;
             g_tile_due = 0;
-            if (nav_target(&tx, &ty) && tx == g_tile_due_at[0] && ty == g_tile_due_at[1]) {
+            int pending = 0;
+            if (g_tile_due_dash && g_tile_due_waits < DASH_WAITS_MAX)
+                GUARDED("nav: dash pending", pending = tile_dash_pending(), pending = 0);
+            if (pending) {
+                if (!g_tile_due_waits)
+                    logf_("nav: %d, %d waits for the dash allowance -- the path ran out of "
+                          "one move's\n", g_tile_due_at[0], g_tile_due_at[1]);
+                g_tile_due_waits++;
+                g_tile_due = GetTickCount64() + DASH_WAIT_MS;
+            } else if (nav_target(&tx, &ty) && tx == g_tile_due_at[0] && ty == g_tile_due_at[1]) {
+                if (g_tile_due_waits)
+                    logf_("nav: %d, %d described after %d waits for the dash allowance\n",
+                          tx, ty, g_tile_due_waits);
                 GUARDED("nav: path end", path_note(tx, ty, navh_ground()));
                 char what[TILE_MAX_TEXT] = "";
                 Fault f;
@@ -2365,6 +2395,7 @@ static void nav_path_result(void* self, void* stack, void* result)
         } else if (v == NAVH_REACHABLE) {
             logf_("nav: %d, %d reachable, floor %.1f\n", tx, ty, navh_ground());
             g_tile_due = GetTickCount64() + TILE_DESCRIBE_DELAY_MS;
+            g_tile_due_waits = 0;
             g_tile_due_at[0] = tx;
             g_tile_due_at[1] = ty;
             g_tile_due_dash = 1;

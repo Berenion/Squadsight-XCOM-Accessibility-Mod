@@ -13,6 +13,10 @@ void scan_poll(void);
 // Forgets which keys were down, so one released elsewhere is not a press.
 void scan_keys_forget(void);
 
+// A terror mission's civilian counter (UITerrorInfo) has drawn: the panel,
+// whose m_civilians gives the count listed under Objectives.
+void scanner_terror_panel(void* panel);
+
 // Provided by main.c, with the target strip's capture (strip_note): the
 // enemies the strip draws, in its order; their count, 0 when unreadable.
 int strip_enemies(void* const** out);

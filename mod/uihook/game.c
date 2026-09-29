@@ -14,6 +14,7 @@
 // The natives' slots, -1 until tile_arm (main.c) finds them.
 int   g_tile_slot_cover = -1, g_tile_slot_smoke = -1, g_tile_slot_poison = -1;
 int   g_tile_slot_occupied = -1;
+int   g_tile_slot_unitblock = -1;
 int   g_tile_slot_onfloor = -1;
 int   g_tile_slot_standable = -1;
 int   g_tile_slot_floorz = -1;

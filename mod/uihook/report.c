@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include "report.h"
 #include "where.h"
 #include "world.h"
@@ -14,6 +15,7 @@
 #include "nav.h"
 #include "tile.h"
 #include "props.h"
+#include "names.h"
 
 // The pathing pawn that built the last path (hook_computepath), and the one
 // the path offsets were resolved on.
@@ -80,11 +82,55 @@ int tile_dash(int* cost_out, int* std_out, int* max_out, int* moves_out,
             *moves_out = *(const int32_t*)v;
     }
     int limit = *moves_out == 0 ? 2 * *std_out : *std_out;
+    int full = *max_out >= limit;
     if (*max_out > limit) limit = *max_out;
 
     *turns_out = tile_turns(*cost_out, limit, *std_out);
+
+    // Once the allowance is the whole of this turn's reach, the pawn's own
+    // verdict outranks the cost. The 2026-09-29 (10:47) log: bOutOfRange was
+    // 1 on every path that stopped short of its tile and 0 on every one that
+    // reached it, 44 of 44, while the cost disagreed both ways -- 20, 29 cut
+    // at a cost of 24 of 24 (said "Dash"), 22, 31 reached at 26 of 24 (said
+    // "2 turns"). Moletta's hold at 24, 27 (cost 23 of 24) was the first.
+    int oor = path_out_of_range(pawn);
+    if (full && oor >= 0) {
+        if (oor) {
+            if (*turns_out < 2) *turns_out = 2;
+            return 2;
+        }
+        *turns_out = 1;
+        return *cost_out > *std_out;
+    }
     if (*cost_out > limit) return 2;
     return *cost_out > *std_out;
+}
+
+int path_out_of_range(void* ppawn)
+{
+    if (!ppawn || !unit_is_live(ppawn)) return -1;
+    const void* prop = object_field_prop(ppawn, "bOutOfRange");
+    int oor = -1;
+    if (!prop || !props_read_object_bool(prop, (const uint8_t*)ppawn, &oor)) return -1;
+    return oor != 0;
+}
+
+// Whether the path just built was measured against one move's allowance
+// while this turn allows a dash, and runs past it: its cost is then not the
+// tile's. The pathfinder builds with bObeyUnitMaxCost, so the search stops at
+// MaxPathCost and the Cost it leaves is of wherever it got to; the game
+// raises the allowance a moment later (XComPathingPawn.ChangeDashState:
+// Dash(), then ComputePath2 to the same destination). The 2026-09-29 (10:47)
+// log: F onto floor 2 of 14, 41 built its path at max 12 -- it stopped on
+// 11, 39 with a cost of 14 -- and said "Dash"; the next step on that floor, at
+// max 24, cost 30 and said "2 turns", as did every step after.
+int tile_dash_pending(void)
+{
+    int cost, std, max, moves, turns;
+    if (tile_dash(&cost, &std, &max, &moves, &turns) < 0) return 0;
+    int limit = moves == 0 ? 2 * std : std;
+    if (max >= limit) return 0;
+    return path_out_of_range(g_path_pawn) == 1 || cost > max;
 }
 
 // ---- who is on the tile ----------------------------------------------------
@@ -263,6 +309,58 @@ static const char* const RING_FIELD[4] = { "MedikitRing", "ArcThrowerRing",
 static const char* const RING_SAY[4] = { "Medikit reaches %s.", "Arc Thrower reaches %s.",
                                          "Close and Personal on %s.", "Rescues %s." };
 
+// The ring a pawn shows, as a RING_FIELD index, and its radius; -1 when its
+// indicator is hidden or is not one of the four rings. `state` gets what was
+// found, for the log.
+static int pawn_ring(void* pawn, float* radius, char* state, size_t state_sz)
+{
+    const void* v;
+    strcpy_s(state, state_sz, "no indicator");
+    if (!field_ptr(pawn, "RangeIndicator", &g_pawn_ring, sizeof(void*), &v)) return -1;
+    void* comp = *(void* const*)v;
+    if (!comp || !unit_is_live(comp)) return -1;
+    const void* hidden_prop = object_field_prop(comp, "HiddenGame");
+    int hidden = 1;
+    if (!hidden_prop || !props_read_object_bool(hidden_prop, (const uint8_t*)comp, &hidden)) {
+        strcpy_s(state, state_sz, "HiddenGame unread");
+        return -1;
+    }
+    if (hidden) {
+        strcpy_s(state, state_sz, "hidden");
+        return -1;
+    }
+    if (!field_ptr(comp, "StaticMesh", &g_ring_mesh, sizeof(void*), &v)) return -1;
+    void* mesh = *(void* const*)v;
+    char mesh_name[64] = "none";
+    if (mesh) object_name(mesh, mesh_name, sizeof mesh_name);
+    int kind = -1;
+    for (int k = 0; k < 4 && kind < 0 && mesh; k++)
+        if (field_ptr(pawn, RING_FIELD[k], &g_ring_kind[k], sizeof(void*), &v) &&
+            *(void* const*)v == mesh)
+            kind = k;
+    *radius = 0.0f;
+    if (field_ptr(comp, "Scale", &g_ring_scale, sizeof(float), &v))
+        *radius = *(const float*)v * 256.0f;
+    _snprintf_s(state, state_sz, _TRUNCATE, "shown, mesh %s (%s), radius %.0f", mesh_name,
+                kind >= 0 ? RING_FIELD[kind] : "not a ring", *radius);
+    return kind;
+}
+
+// One ring's sentence, when the hovered point is inside it.
+static void ring_say(int kind, float radius, const float* loc, const float* here,
+                     const char* name, char* out, size_t out_sz, size_t* used)
+{
+    float dx = here[0] - loc[0], dy = here[1] - loc[1];
+    if (kind < 0 || !(radius > 0.0f) || dx * dx + dy * dy > radius * radius) return;
+    char one[160];
+    _snprintf_s(one, sizeof one, _TRUNCATE, RING_SAY[kind], name);
+    int w = _snprintf_s(out + *used, out_sz - *used, _TRUNCATE, "%s%s", *used ? " " : "", one);
+    if (w > 0) *used += (size_t)w;
+}
+
+// How near a flagless civilian must be for their ring to be logged on a step.
+#define RING_LOG_RANGE (10.0f * 96.0f)
+
 static void tile_rings(const float* here, char* out, size_t out_sz)
 {
     out[0] = 0;
@@ -270,38 +368,46 @@ static void tile_rings(const float* here, char* out, size_t out_sz)
     void* squad = squad_player();
     void* soldier = NULL;
     cursor_chained_pawn(&soldier);
+    char state[160];
     for (int i = 0; i < g_nunits; i++) {
         UnitSeen s;
         if (!unit_seen(&g_units[i], squad, &s)) continue;
         if (s.pawn == soldier) continue;            // the kinetic strike and flamer cards
-        const void* v;
-        if (!field_ptr(s.pawn, "RangeIndicator", &g_pawn_ring, sizeof(void*), &v)) continue;
-        void* comp = *(void* const*)v;
-        if (!comp || !unit_is_live(comp)) continue;
-        const void* hidden_prop = object_field_prop(comp, "HiddenGame");
-        int hidden = 1;
-        if (!hidden_prop || !props_read_object_bool(hidden_prop, (const uint8_t*)comp, &hidden) ||
-            hidden)
-            continue;
-        if (!field_ptr(comp, "StaticMesh", &g_ring_mesh, sizeof(void*), &v)) continue;
-        void* mesh = *(void* const*)v;
-        if (!mesh) continue;
-        int kind = -1;
-        for (int k = 0; k < 4 && kind < 0; k++)
-            if (field_ptr(s.pawn, RING_FIELD[k], &g_ring_kind[k], sizeof(void*), &v) &&
-                *(void* const*)v == mesh)
-                kind = k;
+        float radius;
+        int kind = pawn_ring(s.pawn, &radius, state, sizeof state);
         if (kind < 0) continue;
-        if (!field_ptr(comp, "Scale", &g_ring_scale, sizeof(float), &v)) continue;
-        float radius = *(const float*)v * 256.0f;
-        float dx = here[0] - s.loc[0], dy = here[1] - s.loc[1];
-        if (!(radius > 0.0f) || dx * dx + dy * dy > radius * radius) continue;
-        char name[96], one[160];
+        char name[96];
         unit_label(s.who, name, sizeof name);
-        _snprintf_s(one, sizeof one, _TRUNCATE, RING_SAY[kind], name);
-        int w = _snprintf_s(out + used, out_sz - used, _TRUNCATE, "%s%s", used ? " " : "", one);
-        if (w < 0) break;
-        used += (size_t)w;
+        ring_say(kind, radius, s.loc, here, name, out, out_sz, &used);
+    }
+
+    // The civilians of a terror mission have no flag over them either: the
+    // 2026-09-28 (20:27) log, Novgorod, has 75 SetNames and not one for a
+    // civilian, and no ring was ever said, not even as Vargas walked up to
+    // the one he saved. XGUnit.DrawRangesOnSquad rings each of the animal
+    // player's units that IsVisible, not dead, and IsCloseRange of the cursor
+    // (ShouldDrawProximityRing: a terror civilian not running to the
+    // dropship, a survivor always), with CivilianRescueRing. So they come
+    // from the object walk too, through the same sight gate as the tile's
+    // column. Each within RING_LOG_RANGE is logged with its indicator's state.
+    if (!squad) return;
+    static SquadSight sight;
+    static FlaglessUnit found[COLUMN_FLAGLESS];
+    int nf = flagless_units(0, found, COLUMN_FLAGLESS);
+    int sight_taken = 0;
+    for (int i = 0; i < nf; i++) {
+        float dx = here[0] - found[i].loc[0], dy = here[1] - found[i].loc[1];
+        if (dx * dx + dy * dy > RING_LOG_RANGE * RING_LOG_RANGE) continue;
+        if (!sight_taken) {
+            squad_sight_take(squad, &sight);
+            sight_taken = 1;
+        }
+        int seen = squad_sees(&sight, found[i].unit, found[i].loc, 0, found[i].name);
+        float radius = 0.0f;
+        int kind = pawn_ring(found[i].pawn, &radius, state, sizeof state);
+        logf_("rings: %s %.1f tiles away, seen %d, indicator %s\n", found[i].name,
+              sqrtf(dx * dx + dy * dy) / 96.0f, seen, state);
+        if (seen) ring_say(kind, radius, found[i].loc, here, found[i].name, out, out_sz, &used);
     }
 }
 

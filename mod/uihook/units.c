@@ -578,8 +578,10 @@ int soldier_aiming(void)
 //
 // The unit table is built from UIUnitFlag.SetNames, and not every unit has a
 // flag: UIUnitFlagManager.OnInit gives one to every XGUnit NOT on the neutral
-// team, and a civilian gets one only when spawned with bAddFlag (the terror
-// civilians) or when XGBattle.SwapTeams moves them to a side. A mission's
+// team, and a civilian gets one only when spawned with bAddFlag or when
+// XGBattle.SwapTeams moves them to a side. The terror civilians were thought
+// to be the bAddFlag kind; on the Novgorod terror map (2026-09-28, 20:27 log)
+// not one had a flag. A mission's
 // survivor is neither until rescued -- the 2026-09-27 (23:33) log has no
 // "SetNames Survivor" until the escort, and "No civilians" at every press
 // before it. So the units come from the object walk too, and a neutral one

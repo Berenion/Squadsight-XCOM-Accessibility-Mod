@@ -334,6 +334,50 @@ static void scan_add_evac(void)
     if (scan_item_at(&it, at, 0.0f)) scan_add(&it);
 }
 
+// A terror mission's civilian count, under Objectives, as the HUD's counter
+// top right draws it: UITerrorInfo.UpdateTerrorInfo writes "N Remaining"
+// (m_nLiveCivilians - m_nSavedCivilians), "Saved" and "Lost" off its
+// m_civilians, the XGAIPlayer_Animal XComTacticalController hands it with
+// SetCiviliansData, redrawn whenever one of the three changes. The panel is
+// the one that last drew (scanner_terror_panel, from main.c's capture of its
+// SetDisplayText); it exists on terror missions only. No place to go, so it
+// is unplaced: said as it stands, after everything that has a tile.
+static void*     g_terror_panel;
+static FieldSlot g_terror_civs, g_civs_live, g_civs_saved, g_civs_dead;
+
+void scanner_terror_panel(void* panel)
+{
+    if (panel == g_terror_panel) return;
+    g_terror_panel = panel;
+    logf_("scan: the terror counter is %p\n", panel);
+}
+
+static void scan_add_civilian_count(void)
+{
+    void* panel = g_terror_panel;
+    if (!panel || !unit_is_live(panel) || !object_is_a(panel, "UITerrorInfo")) return;
+    const void* v;
+    if (!field_ptr(panel, "m_civilians", &g_terror_civs, sizeof(void*), &v)) return;
+    void* civs = *(void* const*)v;
+    if (!civs || !unit_is_live(civs)) return;
+    int live, saved, dead;
+    if (!field_ptr(civs, "m_nLiveCivilians", &g_civs_live, sizeof(int), &v)) return;
+    live = *(const int*)v;
+    if (!field_ptr(civs, "m_nSavedCivilians", &g_civs_saved, sizeof(int), &v)) return;
+    saved = *(const int*)v;
+    if (!field_ptr(civs, "m_nDeadCivilians", &g_civs_dead, sizeof(int), &v)) return;
+    dead = *(const int*)v;
+
+    ScanItem it;
+    memset(&it, 0, sizeof it);
+    it.kind = SCAN_OBJECTIVES;
+    it.unplaced = 1;
+    strcpy_s(it.name, sizeof it.name, "Civilians");
+    _snprintf_s(it.detail, sizeof it.detail, _TRUNCATE, "%d remaining, %d saved, %d lost",
+                live - saved, saved, dead);
+    scan_add(&it);
+}
+
 static void scan_add_tutorial(void)
 {
     void* pawn = NULL;
@@ -517,6 +561,7 @@ static int scan_rebuild(void)
     // -- and inside one it is the only objective that matters.
     if (c == SCAN_ALL || c == SCAN_OBJECTIVES) scan_add_tutorial();
     if (c == SCAN_ALL || c == SCAN_OBJECTIVES) scan_add_evac();
+    if (c == SCAN_ALL || c == SCAN_OBJECTIVES) scan_add_civilian_count();
     // The climb scan is a query per tile, so it runs only when its own
     // category is showing: "Everything" would pay for it on every press, and
     // a hundred ledges would bury the doors and the people in it anyway.

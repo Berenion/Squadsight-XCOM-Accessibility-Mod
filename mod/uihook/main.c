@@ -4442,6 +4442,9 @@ static void capture_body(const char* tag, LONG n, void* stack)
         g_seen_strategy_at = GetTickCount64();
     else if (strncmp(obj_name, "UITacticalHUD", 13) == 0)
         g_seen_tactical_at = GetTickCount64();
+    // A terror mission's civilian counter: the scanner reads the count off
+    // this panel (scanner_terror_panel). Its text goes on as it did.
+    if (strncmp(obj_name, "UITerrorInfo", 12) == 0) scanner_terror_panel(object);
 
     Call call = { tag, n, stack, node, object, locals, obj_name, fn_name, p };
     CallFamily family = call_family(obj_name);
@@ -6371,6 +6374,7 @@ static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
         { "XComWorldDataexecTileContainsSmoke",      &g_tile_slot_smoke,    NULL },
         { "XComWorldDataexecTileContainsPoison",     &g_tile_slot_poison,   NULL },
         { "XComWorldDataexecIsTileOccupied",         &g_tile_slot_occupied, NULL },
+        { "XComWorldDataexecIsTileBlockedByUnitFlag", &g_tile_slot_unitblock, NULL },
         { "XComWorldDataexecIsPositionOnFloor",      &g_tile_slot_onfloor,  NULL },
         { "XComWorldDataexecGetFloorZForPosition",   &g_tile_slot_floorz,   NULL },
         { "XComWorldDataexecIsPositionOnFloorAndValidDestination",

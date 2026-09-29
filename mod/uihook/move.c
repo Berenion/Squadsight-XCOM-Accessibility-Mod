@@ -34,6 +34,7 @@
 #include "log.h"
 #include "world.h"
 #include "props.h"
+#include "report.h"
 
 // XComPathData's PathPoint: Vector Position (12), ETraversalType Traversal (a
 // byte, padded to 4), Actor Actor (4). A traversal past the enum's end means
@@ -112,6 +113,44 @@ static int path_points(void* ppawn, const uint8_t** data)
         return -1;
     *data = (const uint8_t*)a->Data;
     return a->Num;
+}
+
+// What the pathing pawn holds about how far a path may go, for the log. The
+// 2026-09-28 (20:27) log: after Run and Gun, Moletta's paths to 24, 26 and
+// 24, 27 ended on 23, 27, a tile short, at a Cost of 23 and 24 against a
+// MaxPathCost of 24 -- and at cost 22 to 24 about half the paths in the whole
+// log were cut short, the rest not. So the cut is not Cost against
+// MaxPathCost. XGUnit measures its ranges as GetPathLength() * 64
+// (XComPathingPawn.PATH_SEGMENT_DISTANCE) against a distance. The pawn's
+// bOutOfRange (UITacticalTutorialMgr.CanDash reads it) and
+// DestinationReachability (0 standard, 1 dash, which ChangeDashState watches)
+// are the game's own verdicts on the destination -- and the 2026-09-29
+// (10:47) log settled it: bOutOfRange was 1 on all of the cut paths and 0 on
+// all that reached, so tile_dash (report.c) now takes it. XComPath's
+// TraversalLength (private, transient) read -1 on every line and is gone.
+static FieldSlot g_pl_path, g_pl_cost, g_pl_max, g_pl_std, g_pl_reach;
+
+void path_limits(void* ppawn, char* out, size_t out_sz)
+{
+    out[0] = 0;
+    if (!ppawn || !unit_is_live(ppawn)) return;
+    const void* v;
+    int cost = -1, max = -1, std = -1, reach = -1, oor = -1;
+    if (field_ptr(ppawn, "Path", &g_pl_path, sizeof(void*), &v)) {
+        void* path = *(void* const*)v;
+        if (path && unit_is_live(path)) {
+            if (field_ptr(path, "Cost", &g_pl_cost, sizeof(int), &v)) cost = *(const int*)v;
+        }
+    }
+    if (field_ptr(ppawn, "MaxPathCost", &g_pl_max, sizeof(int), &v)) max = *(const int*)v;
+    if (field_ptr(ppawn, "StandardMoveLength", &g_pl_std, sizeof(int), &v)) std = *(const int*)v;
+    if (field_ptr(ppawn, "DestinationReachability", &g_pl_reach, 1, &v))
+        reach = *(const uint8_t*)v;
+    const void* prop = object_field_prop(ppawn, "bOutOfRange");
+    if (!prop || !props_read_object_bool(prop, (const uint8_t*)ppawn, &oor)) oor = -1;
+    _snprintf_s(out, out_sz, _TRUNCATE,
+                "cost %d, max cost %d, standard %d, out of range %d, reachability %d",
+                cost, max, std, oor, reach);
 }
 
 int path_end(void* ppawn, float* end)
@@ -273,8 +312,23 @@ static void held_why(const CursorGrid* g, int tx, int ty, float floor, const flo
         if (w < 0) break;
         used += (size_t)w;
     }
-    logf_("move: held -- target %d, %d occupied %d; near the path's end: %s\n", tx, ty, occ,
-          nearby[0] ? nearby : "nothing the scanner knows");
+    // A unit's blocking flag on the target, the soldier's own left out --
+    // the unseen unit supposed above. IsTileOccupied is no help there: it
+    // said 1 of 14, 40 and 21, 28, both walked onto later.
+    TileUnitBlockFn unit_block = world ? (TileUnitBlockFn)tile_vfn(world, g_tile_slot_unitblock)
+                                       : NULL;
+    void* unit = soldier_unit();
+    void* pawn = unit ? unit_pawn(unit) : NULL;
+    int tz = grid_floor_layer(g, floor);
+    int blocked = unit_block ? unit_block(world, NULL, &tx, &ty, &tz, pawn) != 0 : -1;
+
+    char limits[256] = "";
+    const void* v;
+    if (unit && field_ptr(unit, "m_kPathingPawn", &g_mv_ppawn, sizeof(void*), &v))
+        path_limits(*(void* const*)v, limits, sizeof limits);
+    logf_("move: held -- target %d, %d occupied %d, unit-blocked %d; near the path's end: %s; "
+          "%s\n", tx, ty, occ, blocked, nearby[0] ? nearby : "nothing the scanner knows",
+          limits[0] ? limits : "no path limits");
 }
 
 int move_confirmed(int tx, int ty, float floor)
@@ -330,11 +384,23 @@ int move_confirmed(int tx, int ty, float floor)
                                                                          : "Above the target");
                 int door = door_at_end(&g, end);
                 GUARDED("move: held why", held_why(&g, tx, ty, floor, end));
+                // The pawn's own verdict on the target (report.c,
+                // path_out_of_range): Moletta's hold at 24, 27 in the
+                // 2026-09-28 (20:27) log said no reason, and it was this.
+                int oor = -1;
+                const void* v;
+                if (field_ptr(unit, "m_kPathingPawn", &g_mv_ppawn, sizeof(void*), &v))
+                    oor = path_out_of_range(*(void* const*)v);
                 if (door)
                     _snprintf_s(say, sizeof say, _TRUNCATE,
                                 "The path stops at a closed door, %d, %d. "
                                 "Numpad 0 again to go to it, then open it with V.",
                                 g_move.tx, g_move.ty);
+                else if (oor == 1)
+                    _snprintf_s(say, sizeof say, _TRUNCATE,
+                                "Out of reach this turn. The path stops short. %s%s%s, %d, %d. "
+                                "Numpad 0 again to go there.",
+                                where, where[0] ? " " : "", off, g_move.tx, g_move.ty);
                 else
                     _snprintf_s(say, sizeof say, _TRUNCATE,
                                 "The path stops short. %s%s%s, %d, %d. "
