@@ -15,6 +15,8 @@
 #include "objects.h"
 #include "props.h"
 #include "names.h"
+#include "fog.h"
+#include "nav.h"
 
 // XComInteractiveLevelActor.IconSocket: how the level designer classified it.
 // XGDOOR_Icon 0, XGWINDOW_Icon 1, XGBUTTON_Icon 2. Read rather than asking the
@@ -61,6 +63,7 @@ typedef struct {
     int   kind;     // 0 interactive, 1 ladder, 2 Meld canister, 3 window,
                     // 4 a blast (its actor is the action, its owner explodes),
                     // 5 a unit (scan_add_flagless: civilians with no flag)
+    int   revealed; // the fog has lifted off it once (world_unseen)
 } WorldActor;
 
 static WorldActor g_wactors[SCAN_MAX];
@@ -100,8 +103,55 @@ static int world_item_at(ScanItem* it, const float* world)
     return 1;
 }
 
-static void scan_describe_interactive(void* actor)
+// ---- the fog --------------------------------------------------------------
+//
+// A tile nobody has seen is black on the screen (fog.h), and whatever stands
+// on it is not drawn: a sighted player does not know where the doors are in a
+// building nobody has looked into, and does not know a UFO's power source is
+// there until someone has seen it. So a level actor is left out until the fog
+// has lifted off it, and kept from then on: seen before is grey, and grey
+// still shows the door. The 3D fog is per tile, and an actor is not one tile
+// -- a door stands on the line between two, a car covers several, a ladder
+// climbs a storey -- so it counts as seen when any tile within `reach` of its
+// Location, and up to `up` layers above its base, is.
+//
+// When the fog cannot be read (FOG_UNKNOWN everywhere asked) nothing is
+// hidden: the scanner goes back to what it said before the fog, rather than
+// going silent about every door on the map.
+static int g_fog_hidden;            // this refresh: actors the fog kept out
+
+static int world_unseen(WorldActor* wa, const ScanItem* it, int reach, int up)
 {
+    if (wa->revealed) return 0;
+    int tz = grid_floor_layer(&g_world_grid, it->world[2]);
+    int never = 0;
+    for (int z = tz; z <= tz + up; z++)
+        for (int dy = -reach; dy <= reach; dy++)
+            for (int dx = -reach; dx <= reach; dx++) {
+                int f = fog_tile(&g_world_grid, it->tx + dx, it->ty + dy, z);
+                if (f == FOG_SEEN) {
+                    wa->revealed = 1;
+                    logf_("fog: %s at %d, %d revealed (tile %d, %d, %d)\n", it->name,
+                          it->tx, it->ty, it->tx + dx, it->ty + dy, z);
+                    return 0;
+                }
+                if (f == FOG_NEVER) never++;
+            }
+    if (!never) return 0;
+    g_fog_hidden++;
+    return 1;
+}
+
+// How far round an actor the fog is asked: a tile each way for what stands in
+// a wall, two for what is several tiles across.
+#define FOG_REACH_WALL  1
+#define FOG_REACH_WIDE  2
+#define FOG_UP_LAYERS   1       // its base may be a hair below its floor
+#define FOG_UP_LADDER   3       // a storey: its top can be seen from a roof
+
+static void scan_describe_interactive(WorldActor* wa)
+{
+    void* actor = wa->actor;
     ScanItem it;
     memset(&it, 0, sizeof it);
 
@@ -129,7 +179,14 @@ static void scan_describe_interactive(void* actor)
 
     float world[3];
     if (!actor_location(actor, &g_ilact_loc, world)) return;
-    if (world_item_at(&it, world)) world_keep(&it);
+    if (!world_item_at(&it, world)) return;
+    // The radar array is not held back: the two the mission switches on
+    // (XGBattle_SPCovertOpsExtraction.InitRadarArrays) carry a waypoint and
+    // the HUD's arrows (XComRadarArrayActor.SetActive), which show through
+    // the fog.
+    if (it.kind != SCAN_OBJECTIVES && world_unseen(wa, &it, FOG_REACH_WALL, FOG_UP_LAYERS))
+        return;
+    world_keep(&it);
 }
 
 // ---- what explodes ---------------------------------------------------------
@@ -149,8 +206,9 @@ static FieldSlot g_blast_outer, g_blast_radius, g_blast_loc, g_blast_health,
 static void*     g_blast_owner[SCAN_MAX];
 static int       g_blast_owner_n;
 
-static void scan_describe_explosive(void* action)
+static void scan_describe_explosive(WorldActor* wa)
 {
+    void* action = wa->actor;
     const void* v;
     if (!field_ptr(action, "Outer", &g_blast_outer, sizeof(void*), &v)) return;
     void* owner = *(void* const*)v;
@@ -198,31 +256,36 @@ static void scan_describe_explosive(void* action)
     float world[3];
     if (!actor_location(owner, &g_blast_loc, world)) return;
     if (world[0] == 0.0f && world[1] == 0.0f && world[2] == 0.0f) return;
-    if (world_item_at(&it, world)) world_keep(&it);
+    if (world_item_at(&it, world) && !world_unseen(wa, &it, FOG_REACH_WIDE, FOG_UP_LAYERS))
+        world_keep(&it);
 }
 
 static FieldSlot g_window_loc;
 
-static void scan_describe_window(void* actor)
+static void scan_describe_window(WorldActor* wa)
 {
+    void* actor = wa->actor;
     ScanItem it;
     memset(&it, 0, sizeof it);
     it.kind = SCAN_INTERACT;
     strncpy_s(it.name, sizeof it.name, "Window", _TRUNCATE);
     float world[3];
     if (!actor_location(actor, &g_window_loc, world)) return;
-    if (world_item_at(&it, world)) world_keep(&it);
+    if (world_item_at(&it, world) && !world_unseen(wa, &it, FOG_REACH_WALL, FOG_UP_LAYERS))
+        world_keep(&it);
 }
 
-static void scan_describe_ladder(void* actor)
+static void scan_describe_ladder(WorldActor* wa)
 {
+    void* actor = wa->actor;
     ScanItem it;
     memset(&it, 0, sizeof it);
     it.kind = SCAN_INTERACT;
     strncpy_s(it.name, sizeof it.name, "Ladder", _TRUNCATE);
     float world[3];
     if (!actor_location(actor, &g_ladder_loc, world)) return;
-    if (world_item_at(&it, world)) world_keep(&it);
+    if (world_item_at(&it, world) && !world_unseen(wa, &it, FOG_REACH_WALL, FOG_UP_LADDER))
+        world_keep(&it);
 }
 
 static void scan_describe_meld(void* actor)
@@ -292,17 +355,45 @@ static void scan_describe_meld(void* actor)
 // relative to the turn.
 static void scan_world_items(void)
 {
+    // The squad's own tiles tell fog.c what its bytes mean (fog_calibrate).
+    // The player is kept across a soldier switch, when squad_player is
+    // briefly nothing (scan_squad_player has the same).
+    static void* squad_was;
+    void* squad = squad_player();
+    if (squad) squad_was = squad; else squad = squad_was;
+    int tiles[UNIT_MAX][3];
+    const char* names[UNIT_MAX];
+    int nsquad = 0;
+    for (int i = 0; i < g_nunits && squad; i++) {
+        UnitSeen s;
+        if (!unit_seen(&g_units[i], squad, &s) || !s.friendly) continue;
+        tiles[nsquad][0] = grid_x(&g_world_grid, s.loc[0]);
+        tiles[nsquad][1] = grid_y(&g_world_grid, s.loc[1]);
+        tiles[nsquad][2] = grid_floor_layer(&g_world_grid, s.loc[2] - NAVH_LIFT);
+        names[nsquad++] = s.who->name;
+    }
+    fog_calibrate(&g_world_grid, (const int (*)[3])tiles, names, nsquad);
+
+    static int hidden_said = -1;
+    g_fog_hidden = 0;
     g_world_n = 0;
     g_blast_owner_n = 0;
     for (int i = 0; i < g_wactor_n; i++) {
         switch (g_wactors[i].kind) {
-        case 0:  scan_describe_interactive(g_wactors[i].actor); break;
-        case 1:  scan_describe_ladder(g_wactors[i].actor);      break;
+        case 0:  scan_describe_interactive(&g_wactors[i]);      break;
+        case 1:  scan_describe_ladder(&g_wactors[i]);           break;
         case 2:  scan_describe_meld(g_wactors[i].actor);        break;
-        case 3:  scan_describe_window(g_wactors[i].actor);      break;
+        case 3:  scan_describe_window(&g_wactors[i]);           break;
         case 5:  break;     // units are scan_add_flagless's, not items
-        default: scan_describe_explosive(g_wactors[i].actor);   break;
+        default: scan_describe_explosive(&g_wactors[i]);        break;
         }
+    }
+    // Every refresh would be a line a second with the door sounds on, so
+    // only when the count moves: each actor the fog lets go is logged on its
+    // own by world_unseen.
+    if (g_fog_hidden != hidden_said) {
+        hidden_said = g_fog_hidden;
+        logf_("fog: %d level actors kept out, not yet seen\n", g_fog_hidden);
     }
 }
 
@@ -371,6 +462,7 @@ static int scan_collect_world(void* actor, int which, int idx, void* ctx)
     g_wactors[g_wactor_n].actor = actor;
     g_wactors[g_wactor_n].idx   = idx;
     g_wactors[g_wactor_n].kind  = g_scan_kinds[which];
+    g_wactors[g_wactor_n].revealed = 0;
     g_wactor_n++;
     return 1;
 }

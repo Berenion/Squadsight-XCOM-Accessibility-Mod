@@ -24,6 +24,7 @@ int   g_unit_slot_overwatch = -1;
 int   g_panel_slot_visible = -1;
 int   g_cursor_slot_floor = -1;
 int   g_world_slot_seetile = -1;
+int   g_world_slot_vismap = -1;
 int   g_unit_slot_flanking = -1;
 void* g_unit_fn_flanking;
 int   g_volume_slot_encompass = -1;

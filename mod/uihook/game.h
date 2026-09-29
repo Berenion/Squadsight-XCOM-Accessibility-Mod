@@ -160,6 +160,7 @@ extern int   g_unit_slot_overwatch;     // XGUnitNativeBase.IsInOverwatch
 extern int   g_panel_slot_visible;      // UI_FxsPanel.IsVisible
 extern int   g_cursor_slot_floor;       // XCom3DCursor.WorldZToCursorFloor
 extern int   g_world_slot_seetile;      // XComWorldData.CanSeeActorToTile
+extern int   g_world_slot_vismap;       // XComWorldData.GetVisibilityMapTileIndex
 extern int   g_unit_slot_flanking;      // XGUnitNativeBase.IsFlankingCoverPoint
 extern void* g_unit_fn_flanking;        // ...which is final, so not virtual
 extern int   g_volume_slot_encompass;   // Volume.EncompassesPoint

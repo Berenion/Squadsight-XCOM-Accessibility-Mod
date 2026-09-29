@@ -43,9 +43,11 @@
 //           flags word walls_scan reads, so a way up a ledge -- a ramp, a
 //           crate, a low wall -- costs one query per tile and nothing else.
 //
-// Only the units are gated on being seen. XCOM draws the whole map, so a
-// sighted player can pick out a door across it, and hiding level actors would
-// take away something the screen already gives.
+// Units are gated on being in sight now; level actors on the fog having lifted
+// off them once (world_unseen in world.c). XCOM paints a tile nobody has seen
+// black, so a sighted player does not know where the doors, the ladders or a
+// UFO's power source are until the squad has looked; a tile seen before is
+// only greyed, and what is on it stays on the list.
 
 // COVER_ClimbOnto_N..W and COVER_ClimbOver_N..W, from XComWorldData.
 #define COVER_CLIMB_ONTO 0x001E0000
