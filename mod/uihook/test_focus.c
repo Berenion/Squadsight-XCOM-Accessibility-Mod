@@ -2050,6 +2050,50 @@ int main(void)
         check(scan_selected(&it) && strcmp(it.name, "Door") == 0,
               "the selection survives a rebuild");
 
+        // A double door is two actors on one tile. The 2026-09-22 log said
+        // "Doors, 3 found." and read two of them as the same "Door, 2 north,
+        // 24 east": one doorway, named once, and every place reached.
+        {
+            ScanItem d;
+            memset(&d, 0, sizeof d);
+            d.kind = SCAN_DOORS;
+            strcpy_s(d.name, sizeof d.name, "Door");
+            scan_forget();      // no selection carried in from the checks above
+            for (int round = 0; round < 3; round++) {
+                scan_begin(10, 10, 2);
+                d.tx = 9;  d.ty = 10; d.tz = 2;  scan_add(&d);   // 1 west
+                d.tx = 34; d.ty = 12; d.tz = 2;
+                check(round || scan_add(&d) == 1, "the first leaf is kept");
+                if (round) scan_add(&d);
+                check(round || scan_add(&d) == 0, "the second leaf folds into it");
+                if (round) scan_add(&d);
+                scan_end();
+                if (round == 0) {
+                    check(scan_count() == 2, "three door actors are two places");
+                    scan_cycle(1);
+                }
+                if (round == 1) {
+                    check(scan_selected(&it) && strcmp(it.name, "Door") == 0 &&
+                          it.tx == 9, "the single door, nearest");
+                    scan_cycle(1);
+                }
+                if (round == 2)
+                    check(scan_selected(&it) && strcmp(it.name, "Double door") == 0 &&
+                          it.tx == 34, "the pair, named once, reached after a rebuild");
+            }
+            // Three leaves on one tile are still one doorway.
+            scan_begin(10, 10, 2);
+            d.tx = 20; d.ty = 20; d.tz = 2;
+            scan_add(&d); scan_add(&d); scan_add(&d);
+            scan_end();
+            check(scan_count() == 1, "any number of leaves on one tile is one item");
+            // The same tile a storey up is another door.
+            d.tz = 3;
+            scan_add(&d);
+            check(scan_end() == 2, "a door on the storey above is its own");
+            scan_forget();
+        }
+
         // A door one storey up is farther than one the same distance away on
         // this floor, or every stairwell cycles upstairs first.
         scan_begin(10, 10, 2);

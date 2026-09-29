@@ -70,6 +70,28 @@ int scan_add(const ScanItem* item)
     if (g_category != SCAN_ALL && item->kind != g_category) return 0;
     if (!item->name[0]) return 0;
     if (g_floor != SCAN_ALL_FLOORS && (item->unplaced || item->tz != g_floor)) return 0;
+
+    // One place, one item. A double door is two actors, one doorway: the
+    // 2026-09-22 log had "Doors, 3 found." with two of them reading "Door, 2
+    // north, 24 east" -- same name, same tile -- so the player heard one
+    // door twice and was promised three places to go. The same kind and
+    // name on the same tile and storey is one item, and a pair of doors is
+    // named for what it is. Never for items with no place: those all stand
+    // on 0, 0, 0 (two Meld canisters, one collected and one unseen).
+    if (!item->unplaced) {
+        for (int i = 0; i < g_n; i++) {
+            ScanItem* o = &g_items[i];
+            if (o->unplaced || o->kind != item->kind || o->tx != item->tx ||
+                o->ty != item->ty || o->tz != item->tz)
+                continue;
+            int door_pair = strcmp(item->name, "Door") == 0 &&
+                            (strcmp(o->name, "Door") == 0 ||
+                             strcmp(o->name, "Double door") == 0);
+            if (!door_pair && strcmp(o->name, item->name) != 0) continue;
+            if (door_pair) strcpy_s(o->name, sizeof o->name, "Double door");
+            return 0;
+        }
+    }
     g_items[g_n++] = *item;
     return 1;
 }

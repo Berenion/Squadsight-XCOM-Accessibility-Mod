@@ -108,7 +108,9 @@ int scan_mesh_is_dressing(const char* mesh);
 void scan_begin(int from_tx, int from_ty, int from_tz);
 
 // Adds one item. Ignored when the list is full, or when its category is not
-// the one being shown. Returns 1 when it was kept.
+// the one being shown; folded into one already there with the same kind,
+// name and tile (two doors on one tile become one "Double door"). Returns 1
+// when it was kept as an item of its own.
 int  scan_add(const ScanItem* item);
 
 // Sorts nearest first -- by rank first, for items that carry one -- and restores the selection, by name and tile, to the
