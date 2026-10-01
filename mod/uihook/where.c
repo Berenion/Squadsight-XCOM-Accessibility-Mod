@@ -30,7 +30,8 @@
 // whose brush holds a point just above the floor (Volume.EncompassesPoint),
 // then CheckForFloorVolumeEvents' rule over them:
 //   - if any of them belongs to an internal building (a building within a
-//     building), only those count;
+//     building), only those count -- for the game. Here it is the other way
+//     round: the outer building's volumes win when there are any (where_at);
 //   - the first building met is the one, and the floor is the highest
 //     FloorNumber among its volumes;
 //   - a floor volume with no building behind it still counts as inside.
@@ -427,7 +428,7 @@ static int where_at(int tx, int ty, float floor, TileWhere* out)
                    floor + WHERE_LIFT };
 
     struct { void* bv; int number; int internal; } hit[WHERE_HITS];
-    int n = 0, any_internal = 0;
+    int n = 0, any_internal = 0, any_outer = 0;
     for (int i = 0; i < g_where_n && n < WHERE_HITS; i++) {
         WhereVolume* w = &g_where_vol[i];
         if (p[0] < w->lo[0] || p[0] > w->hi[0] || p[1] < w->lo[1] || p[1] > w->hi[1] ||
@@ -443,17 +444,25 @@ static int where_at(int tx, int ty, float floor, TileWhere* out)
         if (hit[n].bv && !unit_is_live(hit[n].bv)) hit[n].bv = NULL;
         hit[n].internal = hit[n].bv ? where_bool(hit[n].bv, "m_bIsInternalBuilding", 0) : 0;
         if (hit[n].internal) any_internal = 1;
+        else if (hit[n].bv) any_outer = 1;
         n++;
     }
 
     out->state = TILE_WHERE_OUTSIDE;
     if (!n) return 1;
 
-    // CheckForFloorVolumeEvents, which walks its list from the end.
+    // CheckForFloorVolumeEvents, which walks its list from the end -- but
+    // with the outer building ahead of an internal one. The game prefers the
+    // room inside, for what its cut-away hides; for the player the room is
+    // part of the building around it. The 2026-10-01 (13:34) log had a room
+    // of two bands (floor at -53, its top band 122..302) inside a building
+    // of three storeys: its ceiling at 129.7 is the outer building's floor 2
+    // (floor_missed: "nearest on 16, 40", the very tile), and was said "On
+    // the roof." between "Inside building." and "floor 3 of 3".
     void* bv = NULL;
     int floor_no = 0;
     for (int i = n - 1; i >= 0; i--) {
-        if (any_internal && !hit[i].internal) continue;
+        if (any_outer ? hit[i].internal : any_internal && !hit[i].internal) continue;
         if (bv && hit[i].bv != bv) continue;
         bv = hit[i].bv;
         if (hit[i].number > floor_no) floor_no = hit[i].number;
@@ -678,11 +687,18 @@ static int where_level(const TileWhere* w)
 
 int where_levels_between(int tx, int ty, float from, float to, int* dz)
 {
+    return where_levels_apart(tx, ty, from, tx, ty, to, dz);
+}
+
+// The same between two tiles: the scanner's "Panel, one floor up" is measured
+// from the player's tile to the item's.
+int where_levels_apart(int ax, int ay, float from, int bx, int by, float to, int* dz)
+{
     TileWhere a, b;
     int ok = 0;
     Fault f;
     __try {
-        ok = where_at(tx, ty, from, &a) && where_at(tx, ty, to, &b) &&
+        ok = where_at(ax, ay, from, &a) && where_at(bx, by, to, &b) &&
              a.building && a.building == b.building &&
              where_level(&a) > 0 && where_level(&b) > 0 && a.storeys > 0;
     }

@@ -21,6 +21,9 @@ void where_forget(void);
 // (tx, ty), in *dz; 0 when the two are not in the same building.
 int  where_levels_between(int tx, int ty, float from, float to, int* dz);
 
+// The same from height `from` on (ax, ay) to height `to` on (bx, by).
+int  where_levels_apart(int ax, int ay, float from, int bx, int by, float to, int* dz);
+
 // After F / C inside a building: "Floor 2 of 3 does not reach this tile;
 // nearest 3 north, 2 east." when the next storey that way (`dir` +1 / -1) was
 // passed over or not found. Empty otherwise.

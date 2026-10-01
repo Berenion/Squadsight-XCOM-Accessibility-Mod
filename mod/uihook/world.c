@@ -184,6 +184,7 @@ static int world_item_at(ScanItem* it, const float* world)
         it->tx >= g_world_grid.num_x || it->ty >= g_world_grid.num_y)
         return 0;
     it->tz = floor_of(world);
+    it->feet = world[2];
     return 1;
 }
 

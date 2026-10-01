@@ -63,6 +63,7 @@ typedef struct {
     char         name[SCAN_NAME];
     int          tx, ty, tz;        // tile x and y; tz is a floor, not a row
     float        world[3];          // where it actually is, for the cursor
+    float        feet;              // the height of the floor it is on
     ScanCategory kind;              // the one category it belongs to
     // Said after the name: "45%, low cover, 8 of 8 HP". Kept apart from the
     // name because the name is what the selection is held by, and a hit

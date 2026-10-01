@@ -87,7 +87,27 @@ static int scan_item_at(ScanItem* it, const float* world, float lift)
         return 0;
     float feet[3] = { world[0], world[1], world[2] - lift };
     it->tz = floor_of(feet);
+    it->feet = feet[2];
     return 1;
+}
+
+// The floor to measure `it` from: the scan's own, unless the player and the
+// item are in the same building -- then its own storeys, as F / C and a
+// step's units count them (where_levels_apart). The 2026-10-01 (13:34) log
+// had "Panel, here, one floor up" from the ground at -64 under a panel at
+// 448, where F went -64 -> 450 as "2 floors up. Floor 2 of 3 does not reach
+// this tile"; the cursor's floors (floor_of) and the building's disagreed.
+static int scan_from_floor(const ScanItem* it)
+{
+    int dz;
+    if (it->unplaced || !g_scan_have) return g_scan_from[2];
+    if (!where_levels_apart(g_scan_from[0], g_scan_from[1], g_scan_world_z,
+                            it->tx, it->ty, it->feet, &dz))
+        return g_scan_from[2];
+    if (it->tz - dz != g_scan_from[2])
+        logf_("scan: %s is %d of the building's floors from here, %d of the cursor's\n",
+              it->name, dz, it->tz - g_scan_from[2]);
+    return it->tz - dz;
 }
 
 // ---- the units -------------------------------------------------------------
@@ -586,7 +606,7 @@ static void scan_say_selected(void)
         scan_say(say);
         return;
     }
-    scan_describe(&it, g_scan_from[0], g_scan_from[1], g_scan_from[2],
+    scan_describe(&it, g_scan_from[0], g_scan_from[1], scan_from_floor(&it),
                   say, sizeof say);
     logf_("scan: %s  [%d of %d, %s]\n", say, scan_index(), scan_count(),
           scan_category_name(scan_category()));
@@ -693,7 +713,7 @@ static void scan_distance(int shift)
         g_scan_from[0] = tx; g_scan_from[1] = ty; g_scan_from[2] = tz;
         g_scan_have = 1;
     }
-    scan_describe(&it, g_scan_from[0], g_scan_from[1], g_scan_from[2],
+    scan_describe(&it, g_scan_from[0], g_scan_from[1], scan_from_floor(&it),
                   say, sizeof say);
     scan_say(say);
 }
