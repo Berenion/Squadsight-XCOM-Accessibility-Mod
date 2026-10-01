@@ -511,16 +511,57 @@ void world_arrows_note(void* panel)
     logf_("world: objective arrows drawn by %s\n", name);
 }
 
-// The floor under an arrow's point, which hangs above it (PointInSpace_9 is
-// 160 units up): GetFloorZForPosition searches down from where it is asked,
-// and gives the height back unchanged when it finds nothing.
-static void arrow_to_floor(float* pos)
+// Where a soldier can stand for an arrow. The point hangs above what it marks
+// (PointInSpace_9 is 160 units up), and what it marks can be solid: the
+// 2026-10-01 (17:59) log had Home take the cursor to 20, 11 at 160.0 --
+// GetFloorZForPosition had given the height back, finding no floor -- and
+// "Blocked." there and on every tile round it but 21, 11, where the player
+// stood to set the train going. So the place listed is the nearest tile, out
+// to ARROW_REACH, with a layer the game takes as a move's end
+// (IsPositionOnFloorAndValidDestination, as the numpad's "Blocked." asks it)
+// at or below the point, down to ARROW_DOWN layers, else the layer above; its
+// exact floor from the top of that layer. Nearest on the grid first, and in
+// a tile the layer nearest the point. 0 when nothing is found: the point is
+// kept.
+#define ARROW_REACH 3
+#define ARROW_DOWN  4
+
+static int arrow_stand(const CursorGrid* g, const float* at, float* out, int* moved)
 {
     void* w = cursor_world();
-    FloorZFn floorz = w ? (FloorZFn)tile_vfn(w, g_tile_slot_floorz) : NULL;
-    if (!floorz) return;
-    float z = floorz(w, NULL, pos, 0);
-    if (z < pos[2]) pos[2] = z;
+    PositionTestFn standable = w ? (PositionTestFn)tile_vfn(w, g_tile_slot_standable) : NULL;
+    if (!standable) return 0;
+    int cx = grid_x(g, at[0]), cy = grid_y(g, at[1]), top = grid_layer(g, at[2]);
+    for (int r = 0; r <= ARROW_REACH; r++) {
+        int found = 0, best_d2 = 0;
+        float best[3];
+        for (int dy = -r; dy <= r; dy++)
+            for (int dx = -r; dx <= r; dx++) {
+                if (abs(dx) != r && abs(dy) != r) continue;     // this ring only
+                int tx = cx + dx, ty = cy + dy;
+                if (tx < 0 || ty < 0 || tx >= g->num_x || ty >= g->num_y) continue;
+                int d2 = dx * dx + dy * dy;
+                if (found && d2 >= best_d2) continue;
+                for (int k = 0; k <= ARROW_DOWN + 1; k++) {
+                    int tz = k <= ARROW_DOWN ? top - k : top + 1;
+                    if (tz < 0 || (g->num_z > 0 && tz >= g->num_z)) continue;
+                    float pos[3] = { grid_centre_x(g, tx), grid_centre_y(g, ty),
+                                     grid_layer_middle(g, tz) };
+                    if (!standable(w, NULL, pos)) continue;
+                    pos[2] = aim_floor_exact(w, pos, grid_layer_bottom(g, tz));
+                    memcpy(best, pos, sizeof best);
+                    best_d2 = d2;
+                    found = 1;
+                    break;
+                }
+            }
+        if (found) {
+            memcpy(out, best, sizeof best);
+            *moved = r > 0;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static void scan_add_arrows(void)
@@ -553,7 +594,6 @@ static void scan_add_arrows(void)
         if (!actor_location(actor, &g_arrow_loc, world)) continue;
         const float* off = (const float*)e;
         for (int k = 0; k < 3; k++) world[k] += off[k];
-        GUARDED("world: arrow floor", arrow_to_floor(world), (void)0);
 
         ScanItem it;
         memset(&it, 0, sizeof it);
@@ -568,13 +608,40 @@ static void scan_add_arrows(void)
             dup = (g_world[j].kind == SCAN_OBJECTIVES || g_world[j].kind == SCAN_MELD) &&
                   g_world[j].tz == it.tz &&
                   abs(g_world[j].tx - it.tx) <= 1 && abs(g_world[j].ty - it.ty) <= 1;
+        if (dup) {
+            if (changed) {
+                char name[80] = "?";
+                object_name(actor, name, sizeof name);
+                logf_("world: arrow %d of %d at %s, tile %d, %d floor %d -- an objective "
+                      "listed there already\n", i + 1, a->Num, name, it.tx, it.ty, it.tz);
+            }
+            continue;
+        }
+
+        // Then to where a soldier can stand for it.
+        float stand[3];
+        int found = 0, moved = 0;
+        GUARDED("world: arrow stand",
+                found = arrow_stand(&g_world_grid, world, stand, &moved), found = 0);
+        if (found) {
+            ScanItem at = it;
+            if (world_item_at(&at, stand)) {
+                it = at;
+                if (moved) strcpy_s(it.detail, sizeof it.detail, "the nearest tile to stand on");
+            } else {
+                found = 0;
+            }
+        }
         if (changed) {
             char name[80] = "?";
             object_name(actor, name, sizeof name);
-            logf_("world: arrow %d of %d at %s, tile %d, %d floor %d -- %s\n", i + 1, a->Num,
-                  name, it.tx, it.ty, it.tz, dup ? "an objective listed there already" : "listed");
+            logf_("world: arrow %d of %d at %s (%.1f, %.1f, %.1f) -- listed on %d, %d floor %d "
+                  "at %.1f, %s\n", i + 1, a->Num, name, world[0], world[1], world[2],
+                  it.tx, it.ty, it.tz, it.feet,
+                  !found ? "no tile to stand on found, the point itself"
+                  : moved ? "the nearest tile to stand on" : "its own tile");
         }
-        if (!dup) world_keep(&it);
+        world_keep(&it);
     }
     nsaid = a->Num;
 }
