@@ -4528,6 +4528,7 @@ static void capture_body(const char* tag, LONG n, void* stack)
     // A counter's text is read off the panel when asked (counters.c); this
     // is where the panels are found.
     if (strncmp(obj_name, "UISpecialMissionHUD_TurnCounter", 31) == 0) counters_note(object);
+    if (strncmp(obj_name, "UISpecialMissionHUD_Arrows", 26) == 0) world_arrows_note(object);
     if (strncmp(obj_name, "UISpecialMissionHUD_TurnCounter", 31) == 0 ||
         strncmp(obj_name, "UISpecialMissionHUD_Arrows", 26) == 0) {
         static struct { void* obj; char fn[48]; char last[160]; } s_seen[24];

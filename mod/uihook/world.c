@@ -474,6 +474,111 @@ static void scan_describe_meld(void* actor)
     if (world_item_at(&it, world)) world_keep(&it);
 }
 
+// ---- the HUD's objective arrows --------------------------------------------
+//
+// Not every objective is something to press. The train mission's "Activate
+// the train's drive system from the control room" has no button: the map's
+// Kismet (DLC1_2_CnfndLight_Stream, Manage_Trigger_Volumes) fires
+// ControlButtonActivated when a soldier stands in the control room's
+// TriggerVolume, and all a sighted player gets is the yellow arrow that
+// Manage_Control_Button points at PointInSpace_9 -- the 2026-10-01 (17:42)
+// log has SetArrow "PointInSpace_9" as the objective came up, and
+// "Objectives, 1 found" with only the turn counter in it.
+//
+// The arrows are SeqAct_DisplayUIArrowPointingToActor ->
+// UISpecialMissionHUD_Arrows.AddArrowPointingAtActor, kept in arr3DArrows
+// until RemoveArrowPointingAtActor; Update redraws each one every frame with
+// SetArrow(KActor.Name, ...), which is where main.c finds the panel. They are
+// drawn through the fog, so nothing here is held back for it.
+//
+// T3DArrowActor is { Vector Offset; Actor KActor; byte arrowState; int
+// arrowCounter; }: 12 + 4 + 1 (+3) + 4. Nothing here reads a struct's size
+// from the game, so the stride is UE3's layout, and an element whose KActor
+// is not a live object ends the read.
+#define ARROW_STRIDE    24
+#define ARROW_ACTOR     12
+#define ARROWS_MAX      16
+
+static void*     g_arrows;
+static FieldSlot g_arrows_3d, g_arrow_loc;
+
+void world_arrows_note(void* panel)
+{
+    if (panel == g_arrows) return;
+    g_arrows = panel;
+    char name[80] = "?";
+    object_name(panel, name, sizeof name);
+    logf_("world: objective arrows drawn by %s\n", name);
+}
+
+// The floor under an arrow's point, which hangs above it (PointInSpace_9 is
+// 160 units up): GetFloorZForPosition searches down from where it is asked,
+// and gives the height back unchanged when it finds nothing.
+static void arrow_to_floor(float* pos)
+{
+    void* w = cursor_world();
+    FloorZFn floorz = w ? (FloorZFn)tile_vfn(w, g_tile_slot_floorz) : NULL;
+    if (!floorz) return;
+    float z = floorz(w, NULL, pos, 0);
+    if (z < pos[2]) pos[2] = z;
+}
+
+static void scan_add_arrows(void)
+{
+    if (!g_arrows || !unit_is_live(g_arrows)) return;
+    const void* v;
+    if (!field_ptr(g_arrows, "arr3DArrows", &g_arrows_3d, sizeof(FArray), &v)) return;
+    const FArray* a = (const FArray*)v;
+    // Logged when the set of arrows changes, not every refresh.
+    static void* said[ARROWS_MAX];
+    static int   nsaid = -1;
+    if (a->Num <= 0) { nsaid = 0; return; }
+    if (a->Num > ARROWS_MAX || !readable(a->Data, (size_t)a->Num * ARROW_STRIDE))
+        return;
+    int changed = a->Num != nsaid;
+
+    for (int i = 0; i < a->Num; i++) {
+        const uint8_t* e = (const uint8_t*)a->Data + i * ARROW_STRIDE;
+        void* actor = *(void* const*)(e + ARROW_ACTOR);
+        if (!actor || !unit_is_live(actor)) {
+            logf_("world: arrow %d of %d points at %p, not a live object -- stopped\n",
+                  i + 1, a->Num, actor);
+            break;
+        }
+        if (said[i] != actor) { said[i] = actor; changed = 1; }
+        // A canister's arrow: the Meld category has it already.
+        if (object_is_a(actor, "XComMeldContainerActor")) continue;
+
+        float world[3];
+        if (!actor_location(actor, &g_arrow_loc, world)) continue;
+        const float* off = (const float*)e;
+        for (int k = 0; k < 3; k++) world[k] += off[k];
+        GUARDED("world: arrow floor", arrow_to_floor(world), (void)0);
+
+        ScanItem it;
+        memset(&it, 0, sizeof it);
+        it.kind = SCAN_OBJECTIVES;
+        strncpy_s(it.name, sizeof it.name, "Objective marker", _TRUNCATE);
+        if (!world_item_at(&it, world)) continue;
+
+        // The transponders' arrows hang over their panels, which are listed
+        // already (panel_objective): one entry for the place, not two.
+        int dup = 0;
+        for (int j = 0; j < g_world_n && !dup; j++)
+            dup = (g_world[j].kind == SCAN_OBJECTIVES || g_world[j].kind == SCAN_MELD) &&
+                  g_world[j].tz == it.tz &&
+                  abs(g_world[j].tx - it.tx) <= 1 && abs(g_world[j].ty - it.ty) <= 1;
+        if (changed) {
+            char name[80] = "?";
+            object_name(actor, name, sizeof name);
+            logf_("world: arrow %d of %d at %s, tile %d, %d floor %d -- %s\n", i + 1, a->Num,
+                  name, it.tx, it.ty, it.tz, dup ? "an objective listed there already" : "listed");
+        }
+        if (!dup) world_keep(&it);
+    }
+    nsaid = a->Num;
+}
+
 // What the scanner would say about each actor it is holding, worked out
 // afresh: the tiles are relative to a grid, and a canister's countdown is
 // relative to the turn.
@@ -512,6 +617,8 @@ static void scan_world_items(void)
         default: scan_describe_explosive(&g_wactors[i]);        break;
         }
     }
+    // After the actors, so an arrow over a listed panel is known as one.
+    scan_add_arrows();
     // Every refresh would be a line a second with the door sounds on, so
     // only when the count moves: each actor the fog lets go is logged on its
     // own by world_unseen.

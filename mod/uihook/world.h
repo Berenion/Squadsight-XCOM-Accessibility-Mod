@@ -33,3 +33,8 @@ int world_explodes(const void* actor);
 // `refresh` brings the walk up to date first; otherwise it is walked only if
 // it never has been.
 int flagless_units(int refresh, FlaglessUnit* out, int max);
+
+// The special-mission HUD's arrow panel (UISpecialMissionHUD_Arrows), handed
+// over by main.c from its SetArrow calls: the scanner reads the actors the
+// arrows point at as objectives.
+void world_arrows_note(void* panel);
