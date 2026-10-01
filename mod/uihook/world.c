@@ -244,6 +244,14 @@ static int world_unseen(WorldActor* wa, const ScanItem* it, int reach, int up)
 // 2026-10-01 (13:11) log had under Interactables only ("Panel, 9 north, 10
 // west") once the objective "Reactivate the ship's transponder" was up.
 // Unreadable state: the wiring alone decides.
+//
+// Except a joke. The train mission (DLC1_2_CnfndLight_Stream) has a button
+// on the platform wired to Easter_Egg_Activated, whose Easter_Egg sequence
+// plays RailroadsSound_Cue, toggles two emitters and switches the button off
+// -- no objective, no reward. The 2026-10-01 (17:42) log counted it among
+// the Objectives ("6 found" with four transponders and the turn counter).
+// The event's name is the only mark it carries, so a panel whose event names
+// an easter egg stays under Interactables.
 static FieldSlot g_remote_event;
 
 static int panel_objective(void* actor)
@@ -255,6 +263,10 @@ static int panel_objective(void* actor)
         return 0;
     char state[64] = "";
     int live = !actor_state(actor, state, sizeof state) || strcmp(state, "_Pristine") == 0;
+    char low[64];
+    strcpy_s(low, sizeof low, ev);
+    _strlwr_s(low, sizeof low);
+    int joke = strstr(low, "easter") != NULL;
     static struct { void* actor; int live; } said[16];
     static int nsaid;
     int k;
@@ -265,9 +277,11 @@ static int panel_objective(void* actor)
         char name[80] = "?";
         object_name(actor, name, sizeof name);
         logf_("world: panel %s sends %s, state %s -- %s\n", name, ev,
-              state[0] ? state : "unread", live ? "an objective" : "used or switched off");
+              state[0] ? state : "unread",
+              !live ? "used or switched off" : joke ? "an easter egg, not an objective"
+                                                    : "an objective");
     }
-    return live;
+    return live && !joke;
 }
 
 static void scan_describe_interactive(WorldActor* wa)
