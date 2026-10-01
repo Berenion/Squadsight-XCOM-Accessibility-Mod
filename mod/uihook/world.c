@@ -28,6 +28,90 @@
 static FieldSlot g_icon, g_ladder_loc, g_ilact_loc;
 static FieldSlot g_meld_loc, g_meld_turns;
 
+// ---- whether a door is shut ------------------------------------------------
+//
+// A door is shut while it is in its first state. XComDestructibleActor is
+// `auto state _Pristine`; XGAction_Interact opening it ends in
+// _Pristine.EndInteraction -> GotoState('_Inactive'), whose CanInteract is
+// false, and a door shot off its hinges goes to _Destroyed. So any state but
+// _Pristine is open.
+//
+// The state is UObject.StateFrame (an FStateFrame*, at 0x14 -- between
+// HashOuterNext and _Linker, below the Index at 0x20 that objects.c found)
+// and the frame's Node (FFRAME_NODE), set to the state by GotoState. The
+// 0x14 is UE3's layout, not read out of a disassembly, so what it yields is
+// only believed when it is a live object of class State; otherwise the door's
+// collision decides, which the 2026-10-01 (11:46) log showed going from 1 to
+// 0 when Hagen opened XComInteractiveLevelActor_3 with V
+// (_Pristine.BeginInteraction -> SetCollision(false, ...)).
+#define UOBJECT_STATEFRAME 0x14
+
+// `why` gets what was found instead when it is not a state, for the log.
+static int object_state(void* obj, char* out, size_t out_sz, char* why, size_t why_sz)
+{
+    const uint8_t* o = (const uint8_t*)obj;
+    strcpy_s(why, why_sz, "no state frame");
+    if (!readable(o + UOBJECT_STATEFRAME, sizeof(void*))) return 0;
+    const uint8_t* frame = *(const uint8_t* const*)(o + UOBJECT_STATEFRAME);
+    if (!frame || !readable(frame + FFRAME_NODE, sizeof(void*))) return 0;
+    void* node = *(void* const*)(frame + FFRAME_NODE);
+    strcpy_s(why, why_sz, "no node");
+    if (!node || !objects_live(node)) return 0;
+    char cls[32] = "?", name[64] = "?";
+    object_class_name(node, cls, sizeof cls);
+    object_name(node, name, sizeof name);
+    if (strcmp(cls, "State") != 0) {
+        _snprintf_s(why, why_sz, _TRUNCATE, "node %s of class %s", name, cls);
+        return 0;
+    }
+    strcpy_s(out, out_sz, name);
+    return 1;
+}
+
+// Which actors' state reads have been logged: once each, not once a refresh.
+// The 2026-10-01 (13:11) log flipped between "reads" and "cannot be read"
+// 956 times, door after door, saying nothing about which or why.
+#define STATE_LOGGED_MAX 256
+static void* g_state_logged[STATE_LOGGED_MAX];
+static int   g_state_logged_n;
+
+static void state_log_once(void* actor, int have, const char* state, const char* why)
+{
+    for (int i = 0; i < g_state_logged_n; i++) if (g_state_logged[i] == actor) return;
+    if (g_state_logged_n < STATE_LOGGED_MAX) g_state_logged[g_state_logged_n++] = actor;
+    char name[80] = "?";
+    object_name(actor, name, sizeof name);
+    if (have) logf_("world: %s is in state %s\n", name, state);
+    else      logf_("world: %s has no readable state (%s)\n", name, why);
+}
+
+// The actor's state name; 0 when it cannot be read.
+static int actor_state(void* actor, char* out, size_t out_sz)
+{
+    char why[128] = "";
+    int have = 0;
+    GUARDED("world: state", have = object_state(actor, out, out_sz, why, sizeof why), have = 0);
+    state_log_once(actor, have, out, why);
+    return have;
+}
+
+int world_door_shut(void* door, char* how, size_t how_sz)
+{
+    char state[64] = "";
+    int shut = -1;
+    int have = actor_state(door, state, sizeof state);
+    if (have) {
+        shut = strcmp(state, "_Pristine") == 0;
+        if (how) _snprintf_s(how, how_sz, _TRUNCATE, "state %s", state);
+        return shut;
+    }
+    const void* prop = object_field_prop(door, "bCollideActors");
+    int b = -1;
+    if (prop && props_read_object_bool(prop, (const uint8_t*)door, &b)) shut = b != 0;
+    if (how) _snprintf_s(how, how_sz, _TRUNCATE, "bCollideActors %d", b);
+    return shut;
+}
+
 // An actor's Location, through the same field walk everything else uses.
 static int actor_location(void* actor, FieldSlot* slot, float* out)
 {
@@ -149,6 +233,42 @@ static int world_unseen(WorldActor* wa, const ScanItem* it, int reach, int up)
 #define FOG_UP_LAYERS   1       // its base may be a hair below its floor
 #define FOG_UP_LADDER   3       // a storey: its top can be seen from a roof
 
+// Whether a panel is the mission's to press. Pressing one runs
+// XComInteractiveLevelActor.Interact -> Kismet_OnInteract ->
+// RemoteEvent(InteractRemoteEvent): a panel with a remote event is wired into
+// the level's script, which also switches it on and off
+// (OnEnableInteractiveActor -> _Pristine, OnDisableInteractiveActor and a
+// press -> _Inactive). So a wired panel that can still be pressed is an
+// objective -- the transponder of the Newfoundland mission, which the
+// 2026-10-01 (13:11) log had under Interactables only ("Panel, 9 north, 10
+// west") once the objective "Reactivate the ship's transponder" was up.
+// Unreadable state: the wiring alone decides.
+static FieldSlot g_remote_event;
+
+static int panel_objective(void* actor)
+{
+    const void* v;
+    char ev[64] = "";
+    if (!field_ptr(actor, "InteractRemoteEvent", &g_remote_event, sizeof(FName), &v) ||
+        !name_to_string((const FName*)v, ev, sizeof ev) || !ev[0] || !_stricmp(ev, "None"))
+        return 0;
+    char state[64] = "";
+    int live = !actor_state(actor, state, sizeof state) || strcmp(state, "_Pristine") == 0;
+    static struct { void* actor; int live; } said[16];
+    static int nsaid;
+    int k;
+    for (k = 0; k < nsaid && said[k].actor != actor; k++) {}
+    if (k == nsaid || said[k].live != live) {
+        if (k == nsaid && nsaid < 16) nsaid++;
+        if (k < 16) { said[k].actor = actor; said[k].live = live; }
+        char name[80] = "?";
+        object_name(actor, name, sizeof name);
+        logf_("world: panel %s sends %s, state %s -- %s\n", name, ev,
+              state[0] ? state : "unread", live ? "an objective" : "used or switched off");
+    }
+    return live;
+}
+
 static void scan_describe_interactive(WorldActor* wa)
 {
     void* actor = wa->actor;
@@ -167,14 +287,17 @@ static void scan_describe_interactive(WorldActor* wa)
         it.kind = SCAN_OBJECTIVES;
         strncpy_s(it.name, sizeof it.name, "Radar array", _TRUNCATE);
     } else if (icon == ICON_WINDOW) {
-        it.kind = SCAN_INTERACT;
+        it.kind = SCAN_WINDOWS;
         strncpy_s(it.name, sizeof it.name, "Window", _TRUNCATE);
     } else if (icon == ICON_BUTTON) {
-        it.kind = SCAN_INTERACT;
+        it.kind = panel_objective(actor) ? SCAN_OBJECTIVES : SCAN_INTERACT;
         strncpy_s(it.name, sizeof it.name, "Panel", _TRUNCATE);
     } else {
         it.kind = SCAN_DOORS;
         strncpy_s(it.name, sizeof it.name, "Door", _TRUNCATE);
+        int shut = world_door_shut(actor, NULL, 0);
+        if (shut >= 0)
+            strcpy_s(it.detail, sizeof it.detail, shut ? "closed" : "open");
     }
 
     float world[3];
@@ -267,7 +390,7 @@ static void scan_describe_window(WorldActor* wa)
     void* actor = wa->actor;
     ScanItem it;
     memset(&it, 0, sizeof it);
-    it.kind = SCAN_INTERACT;
+    it.kind = SCAN_WINDOWS;
     strncpy_s(it.name, sizeof it.name, "Window", _TRUNCATE);
     float world[3];
     if (!actor_location(actor, &g_window_loc, world)) return;

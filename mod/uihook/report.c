@@ -12,6 +12,7 @@
 #include "game.h"
 #include "log.h"
 #include "cursor.h"
+#include "move.h"
 #include "nav.h"
 #include "tile.h"
 #include "props.h"
@@ -627,6 +628,19 @@ int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     if (reach == 0 && with_dash == TILE_DASH_FELL_SHORT && moves == 0) reach = 1;
     r.dash = reach == 1;
     r.turns = reach == 2 ? turns : 0;
+    // Past reach, and the path stops short with moves to spare: no route.
+    float end[3];
+    if (reach == 2 && g_path_pawn && path_end(g_path_pawn, end)) {
+        int ex = grid_x(&g, end[0]), ey = grid_y(&g, end[1]);
+        int short_of = ex != tx || ey != ty ||
+                       fabsf(end[2] - NAVH_LIFT - floor) > PATH_END_Z_SLACK;
+        if (short_of && tile_no_route(ex - tx, ey - ty, cost, maxc)) {
+            r.no_route = 1;
+            logf_("tile: %d, %d floor %.1f: no route within reach -- the path stops on "
+                  "%d, %d (z %.1f) at cost %d of %d\n", tx, ty, floor, ex, ey, end[2],
+                  cost, maxc);
+        }
+    }
 
     // Who is standing there comes first: it is what the tile *is*.
     char who[TILE_MAX_TEXT] = "", what[TILE_MAX_TEXT];

@@ -22,6 +22,10 @@ const ScanItem* world_items(int* n);
 // of the last world_refresh; how many.
 int world_doors_near(int tx, int ty, int tz, void** out, int max);
 
+// Whether a door is shut: 1 shut, 0 open (or broken), -1 unknown. `how`, if
+// given, gets what decided it, for the log ("state _Inactive").
+int world_door_shut(void* door, char* how, size_t how_sz);
+
 // Whether `actor` is a destructible that blows up (as of the last refresh).
 int world_explodes(const void* actor);
 

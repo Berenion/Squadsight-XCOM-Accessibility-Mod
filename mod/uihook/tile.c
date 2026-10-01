@@ -112,7 +112,9 @@ void tile_describe(const TileReport* r, char* out, size_t out_sz)
     if (!out || !out_sz) return;
     out[0] = 0;
 
-    if (r->turns >= 2) {
+    if (r->no_route) {
+        append(out, out_sz, &used, "No route within reach. ");
+    } else if (r->turns >= 2) {
         char t[32];
         _snprintf_s(t, sizeof t, _TRUNCATE, "%d turns. ", r->turns);
         append(out, out_sz, &used, t);
@@ -225,6 +227,14 @@ int tile_turns(int cost, int this_turn, int standard)
     if (cost <= this_turn) return 1;
     int per_turn = 2 * standard;
     return 1 + (cost - this_turn + per_turn - 1) / per_turn;
+}
+
+int tile_no_route(int dx, int dy, int cost, int max)
+{
+    if (cost < 0 || max <= 0) return 0;
+    int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
+    int steps = ax > ay ? ax : ay;
+    return max - cost > steps + TILE_NO_ROUTE_SLACK;
 }
 
 void tile_offset_text(int dx, int dy, char* out, size_t out_sz)

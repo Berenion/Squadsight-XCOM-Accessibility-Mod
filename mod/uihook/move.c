@@ -251,6 +251,10 @@ static void door_bool(void* door, const char* name, char* out, size_t out_sz)
     _snprintf_s(out + used, out_sz - used, _TRUNCATE, " %s %d", name, b);
 }
 
+// Only a shut door counts (world_door_shut). An opened one stays a Door
+// beside the path, and the 2026-10-01 (11:46) log said "stops at a closed
+// door" of XComInteractiveLevelActor_3 on 60, 15 after Hagen had opened it
+// with V. Unknown counts as shut, as before.
 static int door_at_end(const CursorGrid* g, const float* end)
 {
     int ok = 0;
@@ -260,6 +264,7 @@ static int door_at_end(const CursorGrid* g, const float* end)
     float feet[3] = { end[0], end[1], end[2] - NAVH_LIFT };
     void* doors[4];
     int n = world_doors_near(ex, ey, floor_of(feet), doors, 4);
+    int shut = 0;
     for (int i = 0; i < n; i++) {
         void* d = doors[i];
         char name[80] = "?", cls[80] = "?", sock[64] = "-", flags[256] = "";
@@ -279,11 +284,15 @@ static int door_at_end(const CursorGrid* g, const float* end)
         door_bool(d, "bHidden", flags, sizeof flags);
         float w[3] = { 0 };
         if (field_ptr(d, "Location", &g_mv_loc, 3 * sizeof(float), &v)) memcpy(w, v, sizeof w);
+        char how[80] = "";
+        int is_shut = world_door_shut(d, how, sizeof how);
+        if (is_shut != 0) shut++;
         logf_("move: the path ends by door %s (%s) at %.1f, %.1f, %.1f, tile %d, %d:%s, "
-              "socket %s, %d interaction sockets\n", name, cls, w[0], w[1], w[2],
-              grid_x(g, w[0]), grid_y(g, w[1]), flags, sock, points);
+              "socket %s, %d interaction sockets -- %s by %s\n", name, cls, w[0], w[1], w[2],
+              grid_x(g, w[0]), grid_y(g, w[1]), flags, sock, points,
+              is_shut != 0 ? "shut" : "open, not the reason", how);
     }
-    return n > 0;
+    return shut > 0;
 }
 
 // For the log only, when a confirm is held: whether the game counts the
@@ -391,11 +400,30 @@ int move_confirmed(int tx, int ty, float floor)
                 const void* v;
                 if (field_ptr(unit, "m_kPathingPawn", &g_mv_ppawn, sizeof(void*), &v))
                     oor = path_out_of_range(*(void* const*)v);
+                // Out of reach with moves to spare is no route at all
+                // (tile_no_route): the 2026-10-01 (11:46) log, Hagen sent to
+                // the roof over his own tile, told "Out of reach this turn"
+                // with a path that went nowhere. A path that does go
+                // somewhere is still offered.
+                int cost, std, max, moves, turns, none = 0;
+                if (oor == 1 && tile_dash(&cost, &std, &max, &moves, &turns) >= 0)
+                    none = tile_no_route(g_move.tx - tx, g_move.ty - ty, cost, max);
+                int goes = g_move.tx != grid_x(&g, loc[0]) || g_move.ty != grid_y(&g, loc[1]);
+                if (none)
+                    logf_("move: no route within reach -- cost %d of %d, the path %s\n",
+                          cost, max, goes ? "goes somewhere" : "stays on the soldier's tile");
                 if (door)
                     _snprintf_s(say, sizeof say, _TRUNCATE,
                                 "The path stops at a closed door, %d, %d. "
                                 "Numpad 0 again to go to it, then open it with V.",
                                 g_move.tx, g_move.ty);
+                else if (none && !goes)
+                    strcpy_s(say, sizeof say, "No route there within reach.");
+                else if (none)
+                    _snprintf_s(say, sizeof say, _TRUNCATE,
+                                "No route there within reach. The path stops at %s%s%s, "
+                                "%d, %d. Numpad 0 again to go there.",
+                                where, where[0] ? " " : "", off, g_move.tx, g_move.ty);
                 else if (oor == 1)
                     _snprintf_s(say, sizeof say, _TRUNCATE,
                                 "Out of reach this turn. The path stops short. %s%s%s, %d, %d. "

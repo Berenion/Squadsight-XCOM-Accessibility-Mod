@@ -81,6 +81,20 @@ const unsigned char* tile_direct_target(const unsigned char* code, size_t n,
 // `standard` -- the rest needs. 0 when the numbers make no sense.
 int tile_turns(int cost, int this_turn, int standard);
 
+// Whether a path that stops (dx, dy) tiles short of its tile -- 0, 0 when it
+// stops on the right tile but the wrong storey -- stopped for want of a route
+// rather than of moves. The pathfinder searches only as far as MaxPathCost
+// (ComputePath2 with bObeyUnitMaxCost), and a path cut by that ends with its
+// cost at the allowance: 23 and 24 of 24 in the 2026-09-29 (10:47) log. The
+// 2026-10-01 (11:46) one: Hagen on 60, 15, every path to the roof above him
+// ending under it at a cost of 5 or 7 of 24 -- moves to spare, and a tile
+// cost at least one per step, so whatever was left would have reached it if
+// any route did. TILE_NO_ROUTE_SLACK is room for diagonals and climbs.
+// Only "within reach": a route longer than this turn's allowance is never
+// searched, so it cannot be told from none.
+#define TILE_NO_ROUTE_SLACK 4
+int tile_no_route(int dx, int dy, int cost, int max);
+
 // What the player hears about a tile.
 //
 // The three exposure fields go together and are only ever set as a group.
@@ -92,6 +106,7 @@ int tile_turns(int cost, int this_turn, int standard);
 typedef struct {
     int dash;           // the move there is a dash
     int turns;          // past this turn's reach: how many turns it takes (2+)
+    int no_route;       // no route there within reach (tile_no_route): said instead
     int cover_flags;    // 0 when GetCoverPoint found none
     int smoke;
     int poison;

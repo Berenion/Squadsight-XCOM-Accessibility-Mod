@@ -43,7 +43,8 @@ typedef enum {
     SCAN_TARGETS,           // what the soldier can shoot, best shot first
     SCAN_EXPLOSIVES,        // cars, tanks, anything that blows up when destroyed
     SCAN_CIVILIANS,
-    SCAN_DOORS,
+    SCAN_DOORS,             // detail "open" or "closed"
+    SCAN_WINDOWS,
     SCAN_OBJECTIVES,
     SCAN_MELD,              // EW's Meld canisters, one entry each
     SCAN_INTERACT,

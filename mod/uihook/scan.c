@@ -34,6 +34,7 @@ const char* scan_category_name(ScanCategory c)
     case SCAN_EXPLOSIVES: return "Explosives";
     case SCAN_CIVILIANS:  return "Civilians";
     case SCAN_DOORS:      return "Doors";
+    case SCAN_WINDOWS:    return "Windows";
     case SCAN_OBJECTIVES: return "Objectives";
     case SCAN_MELD:       return "Meld";
     case SCAN_INTERACT:   return "Interactables";

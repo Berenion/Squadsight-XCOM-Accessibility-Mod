@@ -1913,6 +1913,20 @@ int main(void)
         r.smoke = r.poison = 0;
         tile_describe(&r, say, sizeof say);
         check(strcmp(say, "3 turns. No cover.") == 0, "a move past this turn says its turns");
+        r.no_route = 1;
+        tile_describe(&r, say, sizeof say);
+        check(strcmp(say, "No route within reach. No cover.") == 0,
+              "no route is said instead of the turns");
+        r.no_route = 0;
+
+        // The 2026-10-01 (11:46) log: the roof over Hagen's own tile, the
+        // path ending under it at 5 of 24; cut paths end at 23 or 24 of 24.
+        check(tile_no_route(0, 0, 5, 24), "moves to spare under the roof is no route");
+        check(!tile_no_route(-1, 0, 23, 24) && !tile_no_route(0, 0, 24, 24),
+              "a path cut at the allowance is just far");
+        check(!tile_no_route(-12, 0, 8, 24), "a stop far short with little left is far");
+        check(!tile_no_route(0, 0, -1, 24) && !tile_no_route(0, 0, 5, 0),
+              "unreadable costs are not a verdict");
 
         // Costs from the second mission run: standard move 12, dash 24.
         check(tile_turns(10, 24, 12) == 1, "within this turn's reach is one turn");

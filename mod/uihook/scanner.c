@@ -556,8 +556,8 @@ static int scan_rebuild(void)
     // Its own category only: "Everything" already has these enemies once,
     // under Enemies.
     if (c == SCAN_TARGETS) scan_add_targets();
-    if (c == SCAN_ALL || c == SCAN_DOORS || c == SCAN_OBJECTIVES || c == SCAN_INTERACT ||
-        c == SCAN_EXPLOSIVES || c == SCAN_MELD)
+    if (c == SCAN_ALL || c == SCAN_DOORS || c == SCAN_WINDOWS || c == SCAN_OBJECTIVES ||
+        c == SCAN_INTERACT || c == SCAN_EXPLOSIVES || c == SCAN_MELD)
         scan_add_world();
     // Three field reads and no walk, so it costs nothing outside a tutorial
     // -- and inside one it is the only objective that matters.

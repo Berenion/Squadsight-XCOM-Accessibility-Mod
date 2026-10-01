@@ -320,7 +320,7 @@ static void doors_refresh(const CursorGrid* g, int tx, int ty, int doors, int wi
         int nd = 0, nw = 0;
         for (int i = 0; i < nitems; i++) {
             if (items[i].kind == SCAN_DOORS) nd++;
-            else if (items[i].kind == SCAN_INTERACT && strcmp(items[i].name, "Window") == 0) nw++;
+            else if (items[i].kind == SCAN_WINDOWS) nw++;
         }
         logf_("doors: %d doors and %d windows placed on this map\n", nd, nw);
     }
@@ -328,8 +328,7 @@ static void doors_refresh(const CursorGrid* g, int tx, int ty, int doors, int wi
         const ScanItem* it = &items[i];
         int kind;
         if (it->kind == SCAN_DOORS && doors) kind = HEART_DOOR;
-        else if (it->kind == SCAN_INTERACT && windows && strcmp(it->name, "Window") == 0)
-            kind = HEART_WINDOW;
+        else if (it->kind == SCAN_WINDOWS && windows) kind = HEART_WINDOW;
         else continue;
         int dx = it->tx - tx, dy = it->ty - ty;
         if (dx * dx + dy * dy > DOOR_RANGE * DOOR_RANGE) continue;
