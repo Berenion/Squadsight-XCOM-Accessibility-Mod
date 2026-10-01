@@ -60,6 +60,7 @@
 #include "info.h"
 #include "sight.h"
 #include "mission.h"
+#include "counters.h"
 #include "abar.h"
 #include "hq.h"
 #include "cursor.h"
@@ -4524,6 +4525,9 @@ static void capture_body(const char* tag, LONG n, void* stack)
     // update): 9,110 of the Gateway run's 10,807 lines. Nothing here reads
     // them -- the scanner's Meld category asks the canisters themselves --
     // so a call is logged only when it is not one of the last few sent.
+    // A counter's text is read off the panel when asked (counters.c); this
+    // is where the panels are found.
+    if (strncmp(obj_name, "UISpecialMissionHUD_TurnCounter", 31) == 0) counters_note(object);
     if (strncmp(obj_name, "UISpecialMissionHUD_TurnCounter", 31) == 0 ||
         strncmp(obj_name, "UISpecialMissionHUD_Arrows", 26) == 0) {
         static struct { void* obj; char fn[48]; char last[160]; } s_seen[24];

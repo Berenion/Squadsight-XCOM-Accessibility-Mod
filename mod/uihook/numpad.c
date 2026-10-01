@@ -18,6 +18,7 @@
 #include "soldier.h"
 #include "sight.h"
 #include "mission.h"
+#include "counters.h"
 #include "abar.h"
 #include "hq.h"
 #include "cursor.h"
@@ -1826,6 +1827,16 @@ static void nav_poll(void)
         if (mission_visible() == 0) {
             logf_("mission: M, the list hidden: \"%s\"\n", say);
             strcpy_s(say, sizeof say, "No objectives on screen.");
+        }
+        // The turn counters top right after the list: "Turns until Air
+        // Strike, 8." They are drawn whether the list is or not, so they
+        // stand in for "No objectives on screen." when it is hidden.
+        char counters[MISSION_TEXT / 2];
+        counters_text(counters, sizeof counters);
+        if (counters[0]) {
+            if (mission_visible() == 0) say[0] = 0;
+            size_t n = strlen(say);
+            _snprintf_s(say + n, sizeof say - n, _TRUNCATE, "%s%s", n ? " " : "", counters);
         }
         logf_("mission: M -> \"%s\"\n", say);
         speech_cancel_pending();

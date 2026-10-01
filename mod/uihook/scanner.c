@@ -9,6 +9,7 @@
 #include "units.h"
 #include "world.h"
 #include "where.h"
+#include "counters.h"
 #include "sounds.h"
 #include "game.h"
 #include "log.h"
@@ -400,6 +401,26 @@ static void scan_add_civilian_count(void)
     scan_add(&it);
 }
 
+// The mission's turn counters top right (counters.c), under Objectives:
+// "Turns until Air Strike, 8." Unplaced, like the civilian count. A Meld
+// canister's counter is left to the Meld category, which says the same of
+// the canister itself.
+static void scan_add_counters(void)
+{
+    Counter c[COUNTERS_MAX];
+    int n = counters_read(c, COUNTERS_MAX);
+    for (int i = 0; i < n; i++) {
+        if (c[i].meld) continue;
+        ScanItem it;
+        memset(&it, 0, sizeof it);
+        it.kind = SCAN_OBJECTIVES;
+        it.unplaced = 1;
+        strncpy_s(it.name, sizeof it.name, c[i].label[0] ? c[i].label : "Counter", _TRUNCATE);
+        strncpy_s(it.detail, sizeof it.detail, c[i].detail, _TRUNCATE);
+        scan_add(&it);
+    }
+}
+
 static void scan_add_tutorial(void)
 {
     void* pawn = NULL;
@@ -584,6 +605,7 @@ static int scan_rebuild(void)
     if (c == SCAN_ALL || c == SCAN_OBJECTIVES) scan_add_tutorial();
     if (c == SCAN_ALL || c == SCAN_OBJECTIVES) scan_add_evac();
     if (c == SCAN_ALL || c == SCAN_OBJECTIVES) scan_add_civilian_count();
+    if (c == SCAN_ALL || c == SCAN_OBJECTIVES) scan_add_counters();
     // The climb scan is a query per tile, so it runs only when its own
     // category is showing: "Everything" would pay for it on every press, and
     // a hundred ledges would bury the doors and the people in it anyway.
