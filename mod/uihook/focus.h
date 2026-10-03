@@ -20,6 +20,15 @@
 #define FOCUS_MAX_LABELS 256
 #define FOCUS_MAX_LABEL  256
 
+// How long one screen's list may grow. Not FOCUS_MAX_LABELS, which bounds the
+// strings of a single call: the load screen sends one AS_AddListItem per save
+// (UILoadGame.BuildMenu) with no cap, and the 2026-10-03 (12:11) log had 259
+// of them. Ids 256 and up fell through to the unindexed path, which restarted
+// the list per call, so it ended as the oldest save and its image path: the
+// cursor on save 0 read "6/24/2018 ... Game 1", save 1 an "img:///" path, and
+// every later save "unresolved".
+#define FOCUS_MAX_ITEMS  4096
+
 // Starts a fresh list for `obj` (a screen republishing its contents).
 void focus_begin(void* obj);
 

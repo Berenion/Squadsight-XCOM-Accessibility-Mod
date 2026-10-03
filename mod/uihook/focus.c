@@ -8,6 +8,7 @@
 #include "focus.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 // Enough that a long walk through the base does not push the base's own
 // menus out: each soldier list, loadout (two lists), item card and alert is a
@@ -16,11 +17,18 @@
 #define FOCUS_SLOTS 32
 
 typedef struct {
+    char label[FOCUS_MAX_LABEL];
+    char value[FOCUS_MAX_LABEL];
+} Row;
+
+typedef struct {
     void*     obj;
     ULONGLONG touched;
     int       count;
-    char      labels[FOCUS_MAX_LABELS][FOCUS_MAX_LABEL];
-    char      values[FOCUS_MAX_LABELS][FOCUS_MAX_LABEL];
+    // Grown on demand up to FOCUS_MAX_ITEMS. A fixed 256 rows per slot was
+    // already 4 MB across the table, and the load screen needs more than 256.
+    Row*      rows;
+    int       cap;
     char      detail[FOCUS_MAX_DETAIL];     // the panel describing the choice
     ULONGLONG detail_at;
     char      title[FOCUS_MAX_LABEL];       // the screen's heading, said once
@@ -46,11 +54,28 @@ static void ensure_init(void)
 // under a new object's label -- "Shadows: 1920 x 1080".
 static void slot_clear(Slot* s)
 {
-    for (int i = 0; i < FOCUS_MAX_LABELS; i++) {
-        s->labels[i][0] = 0;
-        s->values[i][0] = 0;
+    for (int i = 0; i < s->cap; i++) {
+        s->rows[i].label[0] = 0;
+        s->rows[i].value[0] = 0;
     }
     s->count = 0;
+}
+
+// Makes room for rows [0, n). The rows are kept once grown: a screen that
+// published a long list will publish it again on its next visit.
+static int slot_reserve(Slot* s, int n)
+{
+    if (n <= s->cap) return 1;
+    if (n > FOCUS_MAX_ITEMS) return 0;
+    int cap = s->cap ? s->cap : 32;
+    while (cap < n) cap *= 2;
+    if (cap > FOCUS_MAX_ITEMS) cap = FOCUS_MAX_ITEMS;
+    Row* rows = (Row*)realloc(s->rows, (size_t)cap * sizeof *rows);
+    if (!rows) return 0;
+    memset(rows + s->cap, 0, (size_t)(cap - s->cap) * sizeof *rows);
+    s->rows = rows;
+    s->cap = cap;
+    return 1;
 }
 
 static Slot* slot_for(void* obj, int create)
@@ -91,9 +116,9 @@ void focus_add(void* obj, const char* text)
     ensure_init();
     EnterCriticalSection(&g_lock);
     Slot* s = slot_for(obj, 1);
-    if (s->count < FOCUS_MAX_LABELS) {
-        strncpy_s(s->labels[s->count], FOCUS_MAX_LABEL, text, _TRUNCATE);
-        s->values[s->count][0] = 0;
+    if (slot_reserve(s, s->count + 1)) {
+        strncpy_s(s->rows[s->count].label, FOCUS_MAX_LABEL, text, _TRUNCATE);
+        s->rows[s->count].value[0] = 0;
         s->count++;
     }
     s->touched = GetTickCount64();
@@ -108,14 +133,18 @@ void focus_set(void* obj, int index, const char* text)
 int focus_set_part(void* obj, int index, int part, const char* text)
 {
     if (!obj || !text || !*text) return 0;
-    if (index < 0 || index >= FOCUS_MAX_LABELS) return 0;
+    if (index < 0 || index >= FOCUS_MAX_ITEMS) return 0;
     ensure_init();
     EnterCriticalSection(&g_lock);
     Slot* s = slot_for(obj, 1);
+    if (!slot_reserve(s, index + 1)) {
+        LeaveCriticalSection(&g_lock);
+        return 0;
+    }
     // Slots skipped over stay empty rather than shifting anything: the index
     // is the screen's own, so it must map straight through.
-    for (int i = s->count; i < index; i++) { s->labels[i][0] = 0; s->values[i][0] = 0; }
-    char* dst = (part == FOCUS_PART_VALUE) ? s->values[index] : s->labels[index];
+    for (int i = s->count; i < index; i++) { s->rows[i].label[0] = 0; s->rows[i].value[0] = 0; }
+    char* dst = (part == FOCUS_PART_VALUE) ? s->rows[index].value : s->rows[index].label;
     // Populating an empty slot is not a change; replacing one value with a
     // different one is.
     int changed = dst[0] && strcmp(dst, text) != 0;
@@ -222,12 +251,12 @@ int focus_label_at(void* obj, int index, char* out, size_t out_sz)
     int ok = 0;
     EnterCriticalSection(&g_lock);
     Slot* s = slot_for(obj, 0);
-    if (s && index < s->count && (s->labels[index][0] || s->values[index][0])) {
+    if (s && index < s->count && (s->rows[index].label[0] || s->rows[index].value[0])) {
         // "Mode:" + "Fullscreen" -> "Mode: Fullscreen".  A control with only
         // one of the two (a button, a slider whose value never arrives as
         // text) still reads correctly, so no special case is needed.
-        const char* lab = s->labels[index];
-        const char* val = s->values[index];
+        const char* lab = s->rows[index].label;
+        const char* val = s->rows[index].value;
         if (lab[0] && val[0])
             _snprintf_s(out, out_sz, _TRUNCATE, "%s %s", lab, val);
         else

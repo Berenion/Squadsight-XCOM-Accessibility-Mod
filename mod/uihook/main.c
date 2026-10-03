@@ -5209,7 +5209,7 @@ static void capture_body(const char* tag, LONG n, void* stack)
     // the control's value, beside the name the label call stored.
     if (is_checkbox_state_fn(fn_name) && p->nnumbers && p->nbools) {
         int idx = (int)p->numbers[0];
-        if (idx >= 0 && idx < FOCUS_MAX_LABELS) {
+        if (idx >= 0 && idx < FOCUS_MAX_ITEMS) {
             const char* state = p->bools[0] ? "checked" : "unchecked";
             int changed = focus_set_part(object, idx, FOCUS_PART_VALUE, state);
             logf_("[%ld] %s %s.%s  SLOT %d value = \"%s\"%s\n",
@@ -5232,7 +5232,7 @@ static void capture_body(const char* tag, LONG n, void* stack)
     // are first, and they are what the function was called with.
     if (is_slider_value_fn(fn_name) && p->nnumbers >= 2 && !p->nstrings) {
         int idx = (int)p->numbers[0];
-        if (idx >= 0 && idx < FOCUS_MAX_LABELS) {
+        if (idx >= 0 && idx < FOCUS_MAX_ITEMS) {
             char value[32];
             _snprintf_s(value, sizeof value, _TRUNCATE, "%d percent",
                         (int)p->numbers[1]);
@@ -5325,7 +5325,7 @@ static void capture_body(const char* tag, LONG n, void* stack)
                          (strcmp(fn_name, g_last_fn) == 0) &&
                          (now - g_last_at < LIST_WINDOW_MS);
 
-    if (p->nstrings && p->nnumbers && p->numbers[0] >= 0 && p->numbers[0] < FOCUS_MAX_LABELS) {
+    if (p->nstrings && p->nnumbers && p->numbers[0] >= 0 && p->numbers[0] < FOCUS_MAX_ITEMS) {
         // The call carries its own slot number, so place the label there
         // rather than inferring order from arrival:
         //     AS_SetCheckboxLabel(int Index, string strText)

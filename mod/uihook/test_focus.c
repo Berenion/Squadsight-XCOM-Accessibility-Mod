@@ -112,6 +112,22 @@ int main(void)
           strcmp(buf, "third") == 0, "out-of-order slot 2");
     check(!focus_label_at(screenD, 1, buf, sizeof buf), "gap stays empty");
 
+    // The load screen lists every save, one AS_AddListItem each: the
+    // 2026-10-03 (12:11) log had 259, and past 256 the list was lost.
+    void* saves = (void*)0x5000;
+    for (int i = 0; i < 300; i++) {
+        char name[32];
+        sprintf_s(name, sizeof name, "save %d", i);
+        focus_set(saves, i, name);
+    }
+    check(focus_count(saves) == 300, "a list past 256 keeps every row");
+    check(focus_label_at(saves, 0, buf, sizeof buf) &&
+          strcmp(buf, "save 0") == 0, "row 0 still the first save");
+    check(focus_label_at(saves, 299, buf, sizeof buf) &&
+          strcmp(buf, "save 299") == 0, "row 299 resolves");
+    check(!focus_set_part(saves, FOCUS_MAX_ITEMS, FOCUS_PART_LABEL, "x") &&
+          focus_count(saves) == 300, "an index past the cap is refused");
+
     // A settings widget names itself and states its value in two calls that
     // carry the same index. Filing both as labels let the value overwrite the
     // name, so the options screen said "Fullscreen" without saying of what.
