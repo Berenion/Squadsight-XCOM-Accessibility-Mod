@@ -14,7 +14,7 @@ pushd "%OUT%"
 
 cl /nologo /W3 /O2 /MT /LD ^
    "%HERE%main.c" "%HERE%natives.c" "%HERE%names.c" "%HERE%speech.c" "%HERE%focus.c" "%HERE%dialog.c" "%HERE%help.c" "%HERE%shot.c" "%HERE%combat.c" "%HERE%history.c" "%HERE%soldier.c" "%HERE%info.c" "%HERE%sight.c" "%HERE%mission.c" "%HERE%abar.c" "%HERE%hq.c" "%HERE%cursor.c" "%HERE%nav.c" "%HERE%tile.c" "%HERE%sonar.c" "%HERE%audio.c" "%HERE%learn.c" ^
-   "%HERE%props.c" "%HERE%input.c" "%HERE%scan.c" "%HERE%objects.c" "%HERE%settings.c" "%HERE%heart.c" "%HERE%mouse.c" "%HERE%log.c" "%HERE%game.c" "%HERE%units.c" "%HERE%report.c" "%HERE%where.c" "%HERE%world.c" "%HERE%fog.c" "%HERE%sounds.c" "%HERE%scanner.c" "%HERE%menus.c" "%HERE%numpad.c" "%HERE%move.c" "%HERE%counters.c" ^
+   "%HERE%props.c" "%HERE%input.c" "%HERE%scan.c" "%HERE%objects.c" "%HERE%settings.c" "%HERE%heart.c" "%HERE%mouse.c" "%HERE%log.c" "%HERE%game.c" "%HERE%units.c" "%HERE%report.c" "%HERE%where.c" "%HERE%world.c" "%HERE%fog.c" "%HERE%sounds.c" "%HERE%scanner.c" "%HERE%menus.c" "%HERE%numpad.c" "%HERE%move.c" "%HERE%counters.c" "%HERE%countries.c" ^
    /Fe:xcom_uihook.dll ^
    /link /OUT:xcom_uihook.dll /MAP:xcom_uihook.map ole32.lib oleaut32.lib sapi.lib user32.lib winmm.lib
 if errorlevel 1 (popd & echo DLL BUILD FAILED & exit /b 1)

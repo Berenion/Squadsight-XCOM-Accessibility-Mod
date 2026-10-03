@@ -9,6 +9,7 @@
 #include "cursor.h"
 #include "props.h"
 #include "objects.h"
+#include "names.h"
 #include "ue3.h"
 
 // The natives' slots, -1 until tile_arm (main.c) finds them.
@@ -101,6 +102,50 @@ void* tile_vfn(void* obj, int slot)
     uint8_t* fn = *(uint8_t**)(vt + slot);
     if (fn < g_image_lo || fn >= g_image_hi) return NULL;
     return fn;
+}
+
+// UStructProperty::Struct: the first guess, the bool's BitMask offset, found
+// nothing live. So a short window past UProperty's own fields is searched for
+// the one pointer whose class is ScriptStruct, and the answer is kept. Moved
+// here from main.c's struct_bool for the countries (countries.c).
+static uint32_t g_struct_ptr_off;
+
+const void* field_struct(const void* obj, const char* field, uint32_t* field_off)
+{
+    const uint8_t* sp = (const uint8_t*)object_field_prop(obj, field);
+    if (!sp || !readable(sp + UPROPERTY_OFFSET, sizeof(uint32_t))) return NULL;
+    if (!g_struct_ptr_off) {
+        for (uint32_t off = UPROPERTY_OFFSET + 4; off <= 0x90 && !g_struct_ptr_off; off += 4) {
+            if (!readable(sp + off, sizeof(void*))) break;
+            void* cand = *(void* const*)(sp + off);
+            char cls[64];
+            if (cand && readable(cand, 0x40) &&
+                object_class_name(cand, cls, sizeof cls) && strcmp(cls, "ScriptStruct") == 0)
+                g_struct_ptr_off = off;
+        }
+        if (!g_struct_ptr_off) return NULL;
+        logf_("struct: UStructProperty::Struct at +0x%X\n", g_struct_ptr_off);
+    }
+    if (!readable(sp + g_struct_ptr_off, sizeof(void*))) return NULL;
+    if (field_off) *field_off = *(const uint32_t*)(sp + UPROPERTY_OFFSET);
+    return *(void* const*)(sp + g_struct_ptr_off);
+}
+
+int struct_member(const void* st, const char* member, uint32_t* off, const void** prop)
+{
+    void* m = st && readable((const uint8_t*)st + USTRUCT_CHILDREN, sizeof(void*))
+                  ? *(void* const*)((const uint8_t*)st + USTRUCT_CHILDREN) : NULL;
+    for (int guard = 0; m && guard < MAX_FIELDS; guard++) {
+        char name[64];
+        if (!readable(m, 0x68)) return 0;
+        if (object_name(m, name, sizeof name) && strcmp(name, member) == 0) {
+            if (off) *off = *(const uint32_t*)((const uint8_t*)m + UPROPERTY_OFFSET);
+            if (prop) *prop = m;
+            return 1;
+        }
+        m = *(void**)((uint8_t*)m + UFIELD_NEXT);
+    }
+    return 0;
 }
 
 // How many lookups missed every slot and walked the class chain; the perf

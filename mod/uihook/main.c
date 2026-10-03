@@ -63,6 +63,7 @@
 #include "counters.h"
 #include "abar.h"
 #include "hq.h"
+#include "countries.h"
 #include "cursor.h"
 #include "nav.h"
 #include "tile.h"
@@ -426,6 +427,10 @@ static volatile ULONGLONG g_sitroom_left_at;
 // queue Delete reads there.
 static volatile ULONGLONG g_eng_at;
 static volatile ULONGLONG g_eng_left_at;
+// The same for the abduction choice (site_up), where Delete adds every
+// country's panic to the base's status.
+static volatile ULONGLONG g_site_at;
+static volatile ULONGLONG g_site_left_at;
 // When Build Items and an order last drew. The strategy HUD's help bar and a
 // widget helper belong to no screen by name, so a call arriving within a
 // moment of one of these is taken as that screen's.
@@ -3694,6 +3699,7 @@ static int screens_call(const Call* c)
             return 1;
         }
         if (strcmp(fn_name, "AS_SetData") == 0 && p->nnumbers) {
+            g_site_at = GetTickCount64();
             frame_args(node, locals, &a);
             char say[512];
             hq_abduction_line(s_labels[0], (int)p->numbers[0], s_labels[1],
@@ -5590,6 +5596,36 @@ static void eng_key_reached(const char* screen)
     g_eng_left_at = GetTickCount64();
 }
 
+// The abduction choice: open from its draw (g_site_at, at every site the
+// cursor lands on, AS_SetData) until a key reaches a screen that is not
+// Mission Control's or the strategy HUD's -- they see the same keystrokes --
+// or Enter or Escape is pressed on the choice itself (site_cmd). Its own keys
+// do not reopen it: the release of the Escape that closed it would.
+static void site_key_reached(const char* screen)
+{
+    if (strncmp(screen, "UIMissionControl", 16) == 0 ||
+        strncmp(screen, "UIObjectivesScreen", 18) == 0 ||
+        (strncmp(screen, "UIStrategyHUD_", 14) == 0 && screen[14] >= '0' && screen[14] <= '9'))
+        return;
+    g_site_left_at = GetTickCount64();
+}
+
+// Enter picks a site and Escape backs out; either way the choice is over.
+static void site_cmd(const char* screen, int cmd)
+{
+    if (strncmp(screen, "UIMissionControl_AbductionSelection", 35) != 0) return;
+    if (cmd == FXS_KEY_ESCAPE || cmd == FXS_KEY_ENTER || cmd == FXS_BUTTON_A ||
+        cmd == FXS_BUTTON_B)
+        g_site_left_at = GetTickCount64() + 1;
+}
+
+// Whether Delete should add every country's panic.
+static int site_up(void)
+{
+    return g_site_at && g_site_at > g_site_left_at &&
+           g_seen_strategy_at && g_seen_tactical_at <= g_seen_strategy_at;
+}
+
 // Whether Delete should read Engineering's queue: as sitroom_up.
 static int eng_up(void)
 {
@@ -5637,6 +5673,7 @@ static int rewrite_cmd(LONG n, void* stack)
     object_name(object, screen, sizeof screen);
     sitroom_key_reached(screen);
     eng_key_reached(screen);
+    site_key_reached(screen);
     alert_flush(n, "Input       ", object);
 
     void* prop = NULL;
@@ -5903,6 +5940,8 @@ static int rewrite_cmd(LONG n, void* stack)
         g_summary_obj = NULL;
     }
 
+    if (press) site_cmd(screen, cmd);
+
     int to = input_remap(screen, cmd);
     if (to) {
         *cmd_slot = to;
@@ -6025,69 +6064,39 @@ static void hq_locked_note(LONG n, void* sub, const char* screen)
 
 // A bool inside a struct field of an object: `owner.field.member`, e.g.
 // XGSoldierUI.m_kLocker.bIsSelected. Returns a pointer to the dword holding
-// the bit and its mask, or NULL -- and says, once, which step failed.
-//
-// UStructProperty::Struct is not at a known offset: the first guess, the
-// bool's BitMask offset, found nothing live. So a short window past
-// UProperty's own fields is searched for the one pointer whose class is
-// ScriptStruct, and the answer is kept.
-static uint32_t g_struct_ptr_off;
-static int      g_struct_logged;
+// the bit and its mask, or NULL -- and says, once, which step failed. The
+// struct and its member are found by game.c's field_struct / struct_member.
+static int g_struct_logged;
 static uint32_t* struct_bool(void* owner, const char* field, const char* member,
                              uint32_t* mask_out)
 {
     const char* why = NULL;
     uint32_t* result = NULL;
-    const uint8_t* sp = (const uint8_t*)object_field_prop(owner, field);
-    void* st = NULL;
-    uint32_t moff = 0;
-    if (!sp) why = "no such field";
-    if (!why && !g_struct_ptr_off) {
-        for (uint32_t off = UPROPERTY_OFFSET + 4; off <= 0x90 && !g_struct_ptr_off; off += 4) {
-            if (!readable(sp + off, sizeof(void*))) break;
-            void* cand = *(void* const*)(sp + off);
-            char cls[64];
-            if (cand && readable(cand, 0x40) &&
-                object_class_name(cand, cls, sizeof cls) && strcmp(cls, "ScriptStruct") == 0)
-                g_struct_ptr_off = off;
-        }
-        if (!g_struct_ptr_off) why = "no ScriptStruct pointer on the field";
-        else logf_("struct: UStructProperty::Struct at +0x%X\n", g_struct_ptr_off);
-    }
+    uint32_t field_off = 0, off = 0, moff = 0;
+    const void* m = NULL;
+    const void* st = field_struct(owner, field, &field_off);
+    if (!st) why = "no such field, or no ScriptStruct pointer on it";
     if (!why) {
-        st = *(void* const*)(sp + g_struct_ptr_off);
         // The struct's own bool members teach the mask if nothing has yet.
         if (!props_mask_offset() && props_learn_mask(st))
             logf_("props: BitMask +0x%X, learned from %s\n", props_mask_offset(), field);
         moff = props_mask_offset();
         if (!moff) why = "no bool mask offset";
     }
+    if (!why && !struct_member(st, member, &off, &m)) why = "no such member";
+    if (!why && !readable(m, moff + sizeof(uint32_t))) why = "member unreadable";
     if (!why) {
-        uint32_t field_off = *(const uint32_t*)(sp + UPROPERTY_OFFSET);
-        void* m = readable((uint8_t*)st + USTRUCT_CHILDREN, sizeof(void*))
-                      ? *(void**)((uint8_t*)st + USTRUCT_CHILDREN) : NULL;
-        why = "no such member";
-        for (int guard = 0; m && guard < MAX_FIELDS; guard++) {
-            char name[64];
-            if (!readable(m, moff + sizeof(uint32_t))) { why = "member unreadable"; break; }
-            if (object_name(m, name, sizeof name) && strcmp(name, member) == 0) {
-                uint32_t off = *(const uint32_t*)((const uint8_t*)m + UPROPERTY_OFFSET);
-                uint32_t mask = *(const uint32_t*)((const uint8_t*)m + moff);
-                uint32_t* word = (uint32_t*)((uint8_t*)owner + field_off + off);
-                if (!mask || (mask & (mask - 1))) why = "member is not a one-bit bool";
-                else if (!writable(word, sizeof *word)) why = "member not writable";
-                else {
-                    why = NULL;
-                    *mask_out = mask;
-                    result = word;
-                    if (!g_struct_logged)
-                        logf_("struct: %s.%s at +0x%X+0x%X, mask 0x%X\n",
-                              field, member, field_off, off, mask);
-                    g_struct_logged = 1;
-                }
-                break;
-            }
-            m = *(void**)((uint8_t*)m + UFIELD_NEXT);
+        uint32_t mask = *(const uint32_t*)((const uint8_t*)m + moff);
+        uint32_t* word = (uint32_t*)((uint8_t*)owner + field_off + off);
+        if (!mask || (mask & (mask - 1))) why = "member is not a one-bit bool";
+        else if (!writable(word, sizeof *word)) why = "member not writable";
+        else {
+            *mask_out = mask;
+            result = word;
+            if (!g_struct_logged)
+                logf_("struct: %s.%s at +0x%X+0x%X, mask 0x%X\n",
+                      field, member, field_off, off, mask);
+            g_struct_logged = 1;
         }
     }
     if (why) logf_("struct: %s.%s not found -- %s\n", field, member, why);
@@ -7311,6 +7320,27 @@ static void status_poll(void)
     if (history_page_is_open()) { review_end("Delete"); return; }
     if (history_is_open()) return;
     if (!g_seen_strategy_at || g_seen_tactical_at > g_seen_strategy_at) return;
+    // Choosing an abduction site: the base's status, then every country's
+    // panic by continent, since a site left unhelped panics its continent.
+    // Read from the game, not the Situation Room's last drawing (countries.c).
+    if (site_up()) {
+        static char lines[HISTORY_PAGE_MAX][HISTORY_PAGE_TEXT];
+        static char say[HISTORY_PAGE_TEXT + 64];
+        int n = 0;
+        if (hq_status_line(lines[0], sizeof lines[0])) n = 1;
+        int k = 0;
+        GUARDED("countries: read",
+                k = countries_lines(lines[n], sizeof lines[0], HISTORY_PAGE_MAX - n), k = 0);
+        n += k;
+        menu_polled();
+        int opened = history_page_open("Countries", (const char (*)[HISTORY_PAGE_TEXT])lines,
+                                       n, say, sizeof say);
+        logf_("sites: %s, %d entries, %d continents \"%s\"\n",
+              opened ? "opened" : "nothing to open", n, k, say);
+        speech_cancel_pending();
+        if (g_speak) speech_say_now(say);
+        return;
+    }
     if (sitroom_up()) {
         typedef char page_fits_room[HQ_SIT_TEXT == HISTORY_PAGE_TEXT ? 1 : -1];
         static char lines[HISTORY_PAGE_MAX][HISTORY_PAGE_TEXT];

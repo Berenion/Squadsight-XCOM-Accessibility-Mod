@@ -76,6 +76,17 @@ typedef struct {
 // Class" once per class that lacks it.
 int field_ptr(void* obj, const char* name, FieldSlot* slot, size_t size, const void** out);
 
+// The ScriptStruct behind obj's struct field `field`, and the field's offset
+// in *field_off; NULL when there is no such field or its struct cannot be
+// found. UStructProperty::Struct is not at a known offset, so the first call
+// searches for it and keeps the answer (log "struct: UStructProperty::Struct
+// at +0x..").
+const void* field_struct(const void* obj, const char* field, uint32_t* field_off);
+
+// Where `member` sits inside a ScriptStruct, and its UProperty; 0 when the
+// struct has no such member.
+int struct_member(const void* st, const char* member, uint32_t* off, const void** prop);
+
 // How many lookups missed every slot and walked the class chain, and how
 // many were settled instead by climbing to a known declaring class, for the
 // perf line.
