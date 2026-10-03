@@ -84,6 +84,9 @@ int  help_menu_open(const char* screen, char* out, size_t out_sz);
 
 int  help_menu_is_open(void);
 
+// The screen the open menu belongs to; "" when none is open.
+const char* help_menu_screen(void);
+
 // Closes the menu.  Silent: the caller decides whether that needs saying.
 void help_menu_close(void);
 

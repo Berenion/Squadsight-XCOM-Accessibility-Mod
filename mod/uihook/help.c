@@ -265,6 +265,8 @@ static char g_screen[128];
 
 int help_menu_is_open(void) { return g_open; }
 
+const char* help_menu_screen(void) { return g_open ? g_screen : ""; }
+
 void help_menu_close(void)
 {
     g_open = 0;

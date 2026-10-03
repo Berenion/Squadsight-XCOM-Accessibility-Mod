@@ -528,6 +528,29 @@ static ULONGLONG g_quiet_until;
 static int g_fired_key;
 static int g_fired_cmd;
 
+// The panels one 0 press reached. A view built of several panels hands each
+// keystroke to all of them in turn -- the Situation Room's map to
+// UIObjectivesScreen, UISituationRoom, then UIStrategyHUD -- and each opened
+// the menu over the last, so the 2026-10-03 (12:23) log's covert ops 0 said
+// the base's "Mission Control: 6. Gollop chamber: 7", and the next arrow,
+// reaching UIObjectivesScreen first, closed it as "screen changed". The
+// panel with the most to offer keeps the menu (ties to the earlier), and the
+// others let its keys pass.
+#define MENU_PEERS   6
+#define MENU_PEER_MS 20
+static char      g_peers[MENU_PEERS][64];
+static int       g_npeers;
+static ULONGLONG g_zero_at;
+static int       g_zero_best = -1;
+static char      g_zero_screen[64];
+
+static int menu_peer(const char* screen)
+{
+    for (int i = 0; i < g_npeers; i++)
+        if (strcmp(g_peers[i], screen) == 0) return 1;
+    return 0;
+}
+
 // What a swallowed command is turned into.  Every FXS range ends well below
 // this -- controller 379, mouse 424, keyboard 700 -- so no switch anywhere has
 // a case for it and no range test claims it.  Rewriting the command is the
@@ -3043,8 +3066,17 @@ static int base_call(const Call* c)
         }
         if (strcmp(fn_name, "AS_SetLaunchButton") == 0 ||
             strcmp(fn_name, "AS_SetAccuseButton") == 0) {
+            // The letter after "AS_Set". It was [5], the 't' of both names,
+            // so every call filed as the launch button and the accuse button
+            // -- drawn straight after, and empty unless a raid is offered --
+            // blanked it: covert ops never said why Enter was refused
+            // (2026-10-03, 12:23).
+            int which = fn_name[6] == 'A';
             frame_args(node, locals, &a);
-            hq_sat_button(fn_name[5] == 'A', a.ns > 1 ? a.s[1] : "", a.nb > 0 && a.b[0]);
+            hq_sat_button(which, a.ns > 1 ? a.s[1] : "", a.nb > 0 && a.b[0]);
+            logf_("[%ld] %s %s.%s  BUTTON %s \"%s\"%s\n", n, tag, obj_name, fn_name,
+                  which ? "accuse" : "launch", a.ns > 1 ? a.s[1] : "",
+                  a.nb > 0 && a.b[0] ? "" : " (off)");
             return 1;
         }
     }
@@ -3053,6 +3085,17 @@ static int base_call(const Call* c)
         g_sitroom_at = GetTickCount64();
         if (strcmp(fn_name, "AS_SetSatellites") == 0 && p->nnumbers >= 3) {
             hq_sat_count((int)p->numbers[0], (int)p->numbers[1], (int)p->numbers[2]);
+            return 1;
+        }
+        // Covert ops' intel scan: AS_SetIntel(txt, buttonLabel, icon). It
+        // went down the general path as a lone line, the cost or "Insufficient
+        // cash to sweep", with nothing to say what it belonged to.
+        if (strcmp(fn_name, "AS_SetIntel") == 0) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            hq_sat_intel(a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "");
+            logf_("[%ld] %s %s.%s  INTEL \"%s\" button \"%s\"\n", n, tag, obj_name, fn_name,
+                  a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "");
             return 1;
         }
         if (strcmp(fn_name, "RealizeSelected") == 0) {
@@ -5566,6 +5609,20 @@ static int sitroom_up(void)
 // Up and Down in a lab with soldier slots. See slots_select.
 static void slots_walk(LONG n, int down);
 
+// Y reaching the covert ops map when no scan can be run. OnSweepDialogue
+// returns without a sound unless CanPerformSweep, so 2 (or the menu's
+// "Intel scan") did nothing audible in the 2026-10-03 (12:31) log; a sighted
+// player has the reason beside the map all along. It is said again here.
+static void sweep_refused(LONG n, const char* screen, int cmd)
+{
+    if (cmd != FXS_BUTTON_Y || strncmp(screen, "UISituationRoom_", 16) != 0) return;
+    const char* why = hq_sat_intel_refused();
+    if (!why) return;
+    logf_("[%ld] Input        %s  SCAN refused \"%s\"\n", n, screen, why);
+    speech_cancel_pending();
+    if (g_speak && !muted()) speech_say_now(why);
+}
+
 static int rewrite_cmd(LONG n, void* stack)
 {
     g_ui_key_at = GetTickCount64();
@@ -5679,6 +5736,16 @@ static int rewrite_cmd(LONG n, void* stack)
         g_fired_key = 0;               // a different key: the moment has passed
     }
 
+    // A panel that shared the 0 press with the menu's owner (see menu_peer)
+    // sees each menu key before or after it. It must neither close the menu
+    // as "screen changed" nor act on the key.
+    if (help_menu_is_open() && strcmp(screen, help_menu_screen()) != 0 &&
+        menu_peer(screen)) {
+        *cmd_slot = CMD_INERT;
+        g_quiet_until = GetTickCount64() + QUIET_MS;
+        return SUPPRESS;
+    }
+
     // While the menu is up the player is talking to it, not to the screen.
     if (help_menu_is_open()) {
         char say[512];
@@ -5711,6 +5778,7 @@ static int rewrite_cmd(LONG n, void* stack)
                       input_cmd_name(fire) ? input_cmd_name(fire) : "?",
                       fire, cmd);
                 g_quiet_until = 0;
+                sweep_refused(n, screen, fire);
                 return DELIVER;
             default:
                 // Stale -- the screen changed under it. Fall through and treat
@@ -5789,10 +5857,31 @@ static int rewrite_cmd(LONG n, void* stack)
     if (cmd == FXS_KEY_0) {
         if (press) {
             char say[512];
+            ULONGLONG now = GetTickCount64();
+            int same_press = now - g_zero_at <= MENU_PEER_MS && g_npeers > 0;
+            if (!same_press) {
+                g_npeers = 0;
+                g_zero_best = -1;
+                g_zero_screen[0] = 0;
+            }
+            g_zero_at = now;
+            if (g_npeers < MENU_PEERS)
+                strncpy_s(g_peers[g_npeers++], sizeof g_peers[0], screen, _TRUNCATE);
             int count = help_menu_open(screen, say, sizeof say);
-            logf_("[%ld] Input        %s  MENU open (%d) \"%s\"\n",
-                  n, screen, count, say);
-            if (g_speak) speech_say_now(say);
+            if (same_press && count <= g_zero_best) {
+                // A panel with no more to offer than one before it: the
+                // earlier stands, reopened since collecting this one replaced
+                // its list.
+                help_menu_open(g_zero_screen, say, sizeof say);
+                logf_("[%ld] Input        %s  MENU (%d) kept %s's (%d)\n",
+                      n, screen, count, g_zero_screen, g_zero_best);
+            } else {
+                g_zero_best = count;
+                strncpy_s(g_zero_screen, sizeof g_zero_screen, screen, _TRUNCATE);
+                logf_("[%ld] Input        %s  MENU open (%d) \"%s\"\n",
+                      n, screen, count, say);
+                if (g_speak) speech_say_now(say);
+            }
         }
         *cmd_slot = CMD_INERT;
         // An inert command still runs the handler to its end, and
@@ -5821,6 +5910,7 @@ static int rewrite_cmd(LONG n, void* stack)
         logf_("[%ld] Input        %s  %s(%d) -> %s(%d)\n", n, screen,
               from_name ? from_name : "?", cmd,
               to_name ? to_name : "?", to);
+        if (press) sweep_refused(n, screen, to);
     } else {
         // Every command is logged, not only the remapped ones. With only the
         // remaps visible there was no way to tell a key that never arrived

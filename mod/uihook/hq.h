@@ -309,6 +309,15 @@ void hq_sat_continent(const char* name, const char* body);
 // which: 0 the launch button (Enter), 1 accuse.
 void hq_sat_button(int which, const char* label, int enabled);
 void hq_sat_count(int available, int in_orbit, int max);
+// Covert ops: the intel scan beside the map (UISituationRoom.AS_SetIntel,
+// InfiltratorState.UpdateHUD): its cost and button, or why there is none --
+// "Insufficient cash to sweep", "Global intel up to date". Said when it
+// changes, as the continent is.
+void hq_sat_intel(const char* text, const char* button);
+// The intel line when the scan cannot be run (no button drawn), else NULL:
+// what to say when Y reaches the map, since OnSweepDialogue then returns
+// without a sound or a dialogue.
+const char* hq_sat_intel_refused(void);
 // The state was left: the next entry says the satellite count again.
 void hq_sat_reset(void);
 // What to say for the country now selected. The continent is said only when

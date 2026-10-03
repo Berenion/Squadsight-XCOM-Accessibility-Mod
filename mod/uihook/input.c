@@ -78,6 +78,17 @@ static const Remap g_remaps[] = {
     { "UIStrategyHUD",     FXS_KEY_6,   FXS_BUTTON_Y,       "Mission Control" },
     { "UIStrategyHUD",     FXS_KEY_7,   FXS_BUTTON_X,       "Gollop chamber" },
 
+    // The Situation Room's map (UISituationRoom.OnUnrealCommand): in covert
+    // ops, X (302) or the letter X (538) accuses the selected country -- the
+    // raid on EXALT's base -- and Y (303) or the letter Y (539) is the intel
+    // scan (OnSweepDialogue). No letter reaches the headquarters, so with
+    // a keyboard neither could be done. Neither the room nor the HUD and
+    // objectives panels that see the key first have a case for a digit.
+    // Accuse is a no-op unless the game drew its button (txtAccuse.iState
+    // == 2), and the country readout says "1:" only then (hq_sat_say).
+    { "UISituationRoom",   FXS_KEY_1,   FXS_BUTTON_X,       "Raid on EXALT, when offered" },
+    { "UISituationRoom",   FXS_KEY_2,   FXS_BUTTON_Y,       "Intel scan" },
+
     // The loadout removes the item in the selected slot on X (302,
     // OnUnequip) or the letter X (538), and neither arrives from a keyboard
     // in the headquarters. The screen has no case for any digit.

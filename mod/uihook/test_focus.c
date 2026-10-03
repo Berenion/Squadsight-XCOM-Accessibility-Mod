@@ -2818,6 +2818,38 @@ int main(void)
                   "the report a sentence at a time, not split at Dr. or an ellipsis");
         }
 
+        // Covert ops' country readout, as the EW log of 2026-10-03 (12:15)
+        // drew Brazil with an operative already out: the greyed launch
+        // button's reason is said, and the intel line once.
+        {
+            static char say[2 * HQ_SIT_TEXT];
+            hq_sat_reset();
+            hq_sat_country("BRAZIL", "EXALT cell present!", 3);
+            hq_sat_button(0, "Operative already engaged (in Nigeria)", 0);
+            hq_sat_button(1, "", 0);
+            hq_sat_intel("Insufficient cash to sweep", "");
+            hq_sat_continent("", "Execute covert operations");
+            check(hq_sat_say(say, sizeof say) &&
+                  strcmp(say, "BRAZIL, panic 3 of 5. EXALT cell present! "
+                              "Operative already engaged (in Nigeria). "
+                              "Insufficient cash to sweep. Execute covert operations") == 0,
+                  "covert ops: the greyed button's reason and the intel line");
+            hq_sat_country("EGYPT", "Unknown cell presence", 2);
+            hq_sat_button(0, "", 0);
+            check(hq_sat_say(say, sizeof say) &&
+                  strcmp(say, "EGYPT, panic 2 of 5. Unknown cell presence") == 0,
+                  "the intel line and the clues not again");
+            hq_sat_button(0, "COVERT OPERATION", 1);
+            hq_sat_button(1, "ATTEMPT RAID ON EXALT HQ", 1);
+            hq_sat_intel("Cost: \xC2\xA7" "50", "Intel Scan");
+            check(hq_sat_say(say, sizeof say) &&
+                  strcmp(say, "EGYPT, panic 2 of 5. Unknown cell presence. "
+                              "Enter: COVERT OPERATION. 1: ATTEMPT RAID ON EXALT HQ. "
+                              "2: Intel Scan, Cost: \xC2\xA7" "50") == 0,
+                  "the keys for launch, raid and scan");
+            hq_sat_reset();
+        }
+
         // The Situation Room, as the EW log of 2026-09-24 drew it.
         {
             static char sit[HQ_SIT_LINES][HQ_SIT_TEXT];

@@ -712,6 +712,9 @@ static struct {
     int  available, in_orbit, max;      // available -1: not drawn
     int  said_count;
     char said_cont[64 + HQ_SIT_TEXT];
+    char intel[160];
+    char said_intel[160];
+    int  intel_button;
 } g_sat = { .available = -1 };
 
 void hq_sat_country(const char* name, const char* body, int panic)
@@ -732,6 +735,23 @@ void hq_sat_button(int which, const char* label, int enabled)
     if (which < 0 || which > 1) return;
     strncpy_s(g_sat.button[which], sizeof g_sat.button[which], label ? label : "", _TRUNCATE);
     g_sat.button_on[which] = enabled && label && *label;
+}
+
+const char* hq_sat_intel_refused(void)
+{
+    return g_sat.intel[0] && !g_sat.intel_button ? g_sat.intel : NULL;
+}
+
+void hq_sat_intel(const char* text, const char* button)
+{
+    g_sat.intel_button = button && *button;
+    // "2: Intel Scan, Cost: §50", or the line alone when there is no button.
+    // The key is input.c's for UISituationRoom.
+    if (button && *button)
+        _snprintf_s(g_sat.intel, sizeof g_sat.intel, _TRUNCATE, "2: %s%s%s", button,
+                    text && *text ? ", " : "", text ? text : "");
+    else
+        strncpy_s(g_sat.intel, sizeof g_sat.intel, text ? text : "", _TRUNCATE);
 }
 
 void hq_sat_count(int available, int in_orbit, int max)
@@ -782,8 +802,25 @@ int hq_sat_say(char* out, size_t out_sz)
     if (g_sat.button_on[0]) {
         _snprintf_s(part, sizeof part, _TRUNCATE, "Enter: %s", g_sat.button[0]);
         sat_put(out, out_sz, &w, part);
+    } else {
+        // Covert ops draw the button greyed with the reason in place of its
+        // label (XGInfiltratorSitRoomUI.UpdateCountryHelp): "Operative
+        // already engaged (in Brazil)", "No soldiers eligible for covert
+        // ops". Dropped with the button, so Enter on a country with a cell
+        // only played the refusal sound -- the 2026-10-03 (12:15) log, on
+        // Brazil with an operative already out.
+        sat_put(out, out_sz, &w, g_sat.button[0]);
     }
-    if (g_sat.button_on[1]) sat_put(out, out_sz, &w, g_sat.button[1]);
+    // Accuse is X (302) or the letter X, neither of which reaches the
+    // headquarters; 1 is sent as X there (input.c).
+    if (g_sat.button_on[1]) {
+        _snprintf_s(part, sizeof part, _TRUNCATE, "1: %s", g_sat.button[1]);
+        sat_put(out, out_sz, &w, part);
+    }
+    if (g_sat.intel[0] && strcmp(g_sat.intel, g_sat.said_intel) != 0) {
+        sat_put(out, out_sz, &w, g_sat.intel);
+        strncpy_s(g_sat.said_intel, sizeof g_sat.said_intel, g_sat.intel, _TRUNCATE);
+    }
     char cont[sizeof g_sat.said_cont];
     _snprintf_s(cont, sizeof cont, _TRUNCATE, "%s%s%s", g_sat.continent,
                 g_sat.continent[0] && g_sat.cont_body[0] ? ": " : "", g_sat.cont_body);
