@@ -11,6 +11,7 @@
 #include "log.h"
 #include "speech.h"
 #include "ue3.h"
+#include "input.h"
 
 // Keys still owed to a mod menu that just closed: the key that closed it has
 // events left to come, and they must not reach whatever is underneath.
@@ -63,11 +64,20 @@ static void abar_say_entry(void)
 }
 
 // The menu's keys, as last seen: numpad ., numpad 8, numpad 2, numpad 5, Up,
-// Down, Escape, Enter, Space.
-#define MENU_KEYS 9
+// Down, Escape, Enter, Space, and the key two right of P, which opens and
+// closes the menu as numpad . does on a keyboard without a numpad.
+//
+// That last one is taken by where it is, not by what it types (input.h,
+// input_key_at): scan 0x1B, ] on a US layout, u acute on a Hungarian one, +
+// on a German one. None of the names UE3 gives what it can be -- RightBracket,
+// Equals, Semicolon and the like -- is bound in [XComGame.XComTacticalInput],
+// so it never becomes an InputEvent and nothing has to be swallowed.
+#define MENU_KEYS 10
+#define MENU_KEY_ALT   9
+#define MENU_ALT_SCAN  0x1B
 static const int g_menu_vk[MENU_KEYS] = {
     VK_DECIMAL, VK_NUMPAD8, VK_NUMPAD2, VK_NUMPAD5, VK_UP, VK_DOWN, VK_ESCAPE,
-    VK_RETURN, VK_SPACE
+    VK_RETURN, VK_SPACE, 0
 };
 static int g_menu_was[MENU_KEYS];
 
@@ -141,15 +151,25 @@ int abar_menu_poll(void)
     g_menu_polled_at = GetTickCount64();
     int now[MENU_KEYS], pressed[MENU_KEYS];
     for (int k = 0; k < MENU_KEYS; k++) {
-        now[k] = (GetAsyncKeyState(g_menu_vk[k]) & 0x8000) != 0;
+        now[k] = k == MENU_KEY_ALT
+                     ? input_key_at_down(MENU_ALT_SCAN, "the key two right of P")
+                     : (GetAsyncKeyState(g_menu_vk[k]) & 0x8000) != 0;
         pressed[k] = now[k] && !g_menu_was[k];
         g_menu_was[k] = now[k];
     }
 
     if (!abar_menu_is_open()) {
-        if (!pressed[0] || history_is_open()) return 0;
+        if (!(pressed[0] || pressed[MENU_KEY_ALT]) || history_is_open()) return 0;
+        // Not under a pause menu, a dialog or a popup: the menu would take
+        // the arrows and Enter from the screen the player is actually in.
+        if (!hud_has_keys()) {
+            logf_("abar: %s with another screen first -- not opened\n",
+                  pressed[0] ? "numpad ." : "the key two right of P");
+            return 0;
+        }
         abar_menu_open();
-        logf_("abar: menu opened, %d abilities\n", abar_count());
+        logf_("abar: menu opened (%s), %d abilities\n",
+              pressed[0] ? "numpad ." : "the key two right of P", abar_count());
         if (abar_count() <= 0) {
             abar_menu_close();
             speech_cancel_pending();
@@ -161,6 +181,7 @@ int abar_menu_poll(void)
     }
 
     if (pressed[0]) { abar_menu_end("numpad ."); return 0; }
+    if (pressed[MENU_KEY_ALT]) { abar_menu_end("the key two right of P"); return 0; }
     if (pressed[6]) { abar_menu_end("Escape"); return 0; }
     if (pressed[7] || pressed[8]) {
         int i = abar_menu_index();

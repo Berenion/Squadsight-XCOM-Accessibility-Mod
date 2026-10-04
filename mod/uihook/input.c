@@ -2,6 +2,7 @@
 
 #include "input.h"
 #include <string.h>
+#include "log.h"
 
 // The UI_FxsInput constants live in input.h, so that help.c can name the same
 // commands coming the other way -- off a screen's help bar.
@@ -201,4 +202,36 @@ const char* input_cmd_name(int cmd)
         case FXS_KEY_7:          return "7";
         default:                 return NULL;
     }
+}
+
+// The answers last logged, one per position asked about: a handful at most.
+#define KEY_AT_SLOTS 8
+static struct { int scan; HKL hkl; int vk; } g_key_at[KEY_AT_SLOTS];
+static int g_key_at_n;
+
+int input_key_at(int scan, const char* what)
+{
+    HKL hkl = GetKeyboardLayout(0);
+    int vk = (int)MapVirtualKeyExW((UINT)scan, MAPVK_VSC_TO_VK_EX, hkl);
+    int i;
+    for (i = 0; i < g_key_at_n && g_key_at[i].scan != scan; i++) {}
+    if (i == g_key_at_n) {
+        if (g_key_at_n == KEY_AT_SLOTS) return vk;
+        g_key_at_n++;
+        g_key_at[i].scan = scan;
+        g_key_at[i].vk = -1;
+    }
+    if (g_key_at[i].hkl != hkl || g_key_at[i].vk != vk) {
+        g_key_at[i].hkl = hkl;
+        g_key_at[i].vk = vk;
+        logf_("keys: %s (scan 0x%02X) is virtual key 0x%02X on layout %p\n",
+              what, scan, vk, (void*)hkl);
+    }
+    return vk;
+}
+
+int input_key_at_down(int scan, const char* what)
+{
+    int vk = input_key_at(scan, what);
+    return vk && (GetAsyncKeyState(vk) & 0x8000) != 0;
 }

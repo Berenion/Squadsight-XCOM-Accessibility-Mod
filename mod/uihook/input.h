@@ -104,3 +104,15 @@ int input_added_key(const char* screen, int index, int* key, int* cmd,
 // Names a command for the log, e.g. "X" or "RB"; NULL if it is not one we
 // deal in.
 const char* input_cmd_name(int cmd);
+
+// The virtual key at a keyboard position (a scan code) under the layout the
+// calling thread types with, so a key can be taken by where it is rather than
+// by what it types: scan 0x1A is [ on a US layout and o double acute on a
+// Hungarian one. Called from the game thread, so the layout is the game's,
+// and looked up on every call, so a layout switched mid-game is followed.
+// `what` names the key for the log line written when the answer changes.
+// 0 when the layout has nothing there.
+int input_key_at(int scan, const char* what);
+
+// Whether that key is down now.
+int input_key_at_down(int scan, const char* what);

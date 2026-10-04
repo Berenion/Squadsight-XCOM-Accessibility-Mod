@@ -167,8 +167,10 @@ static CursorGrid g_grid_last;
 // while a battle cursor exists, and only while the game has the foreground.
 //
 // Num Lock must be on. With it off, Windows reports numpad 8 as the Up arrow
-// -- which pans the camera -- and NVDA's desktop layout takes the numpad for
-// its own review commands.
+// -- which steps north as well now, but numpad 5 is then Clear and the
+// diagonals are Home, End, Page Up and Page Down, the scanner's -- and NVDA's
+// desktop layout takes the numpad for its own review commands. The arrows and
+// Space stand in for the numpad on a keyboard without one (g_alt_vk).
 //
 // A move is not written into the cursor. In mouse mode Mouse_CheckForPathing
 // puts the cursor under the mouse on every frame, so a written Location would
@@ -797,6 +799,107 @@ static int       g_glide_digit;      // the direction being held, 0 for none
 static int       g_glide_steps;      // repeats taken, for the ramp
 static ULONGLONG g_glide_next;       // when the next step is due
 static ULONGLONG g_numpad_at[10];    // when each key last went down
+
+// The arrows, Space and the key right of P, for a keyboard without a numpad:
+// the four straight directions, numpad 5 and numpad 0. They are read as the
+// digit itself, so a tap steps, a hold glides and rolling from one to the next
+// turns, exactly as on the numpad. No diagonals.
+//
+// Unlike the numpad the arrows and Space are bound in
+// [XComGame.XComTacticalInput]: the arrows to Arrow_Up/Down/Left/Right
+// (InputEvent 500-503, which pan the camera through XComTacticalInput.ArrowUp
+// and its siblings), Space to SpaceBar_Key_Press (513, whose release is
+// Key_Spacebar -> OpenShotHUD). So hook_moviecheck takes them from the game
+// while the navigation has them -- see nav_keys_swallow.
+//
+// The key right of P is taken by where it is, not by what it types: [ on a US
+// layout, o double acute on a Hungarian one, u umlaut on a German one, ^ on a
+// French one.
+// Its scan code, 0x1A, is the position; the virtual key it gives under the
+// layout the game is typing with is looked up each poll (input_key_at), so a
+// layout switched mid-game is followed. Whatever it maps to, it is
+// unbound in a mission -- [XComGame.XComTacticalInput] binds none of
+// LeftBracket, Semicolon, Quote, Tilde, Equals, Slash, Backslash, Comma or
+// Period, the names UE3 gives those keys -- so like the numpad it never
+// becomes an InputEvent and nothing has to be swallowed.
+#define ALT_KEYS 6
+#define ALT_MOVE 5                      // the key right of P
+#define ALT_MOVE_SCAN 0x1A
+static const int   g_alt_vk[ALT_KEYS]    = { VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_SPACE, 0 };
+static const int   g_alt_digit[ALT_KEYS] = { 8, 2, 4, 6, 5, 0 };
+static const char* g_alt_name[ALT_KEYS]  = { "Up", "Down", "Left", "Right", "Space",
+                                             "the key right of P" };
+static int         g_alt_down[ALT_KEYS];
+// Held when the ability menu, F1 or Insert gave the keys back. Space picks
+// an ability, and the Space still held as the menu closes is not a numpad 5;
+// it counts again once it has been let go.
+static int         g_alt_held_over[ALT_KEYS];
+static int         g_alt_logged[ALT_KEYS];
+// The last frame the navigation read its keys, for the swallow: a poll that
+// has stopped (no battle cursor, a menu holding the keys) leaves the arrows
+// and Space to the game.
+static ULONGLONG   g_alt_polled_at;
+#define ALT_STALE_MS 250
+// The input object of the last InputEvent (XComTacticalInput), set by the
+// hook, for asking which screen takes input first; see hud_has_keys.
+static void* g_ui_input;
+int          hud_has_keys(void);
+
+// The key right of P by its position (input_key_at), the rest as they are.
+static int alt_key_down(int k)
+{
+    if (k == ALT_MOVE) return input_key_at_down(ALT_MOVE_SCAN, g_alt_name[k]);
+    return (GetAsyncKeyState(g_alt_vk[k]) & 0x8000) != 0;
+}
+
+// The keys given back to a menu: a key down now is held over until let go.
+static void alt_keys_hand_over(void)
+{
+    for (int k = 0; k < ALT_KEYS; k++) {
+        g_alt_held_over[k] = alt_key_down(k);
+        g_alt_down[k] = 0;
+    }
+}
+
+// The numpad digits, the same way, while another screen takes input first: a
+// digit down now is not read until it has been let go, so one still held as
+// the pause menu closes neither steps nor glides. A glide under way is dropped
+// without the arrival it would say on release -- the tile is not what the
+// player is looking at.
+static int g_pad_held_over[10];
+
+static void pad_hand_over(void)
+{
+    for (int d = 0; d <= 9; d++) {
+        int down = (GetAsyncKeyState(VK_NUMPAD0 + d) & 0x8000) != 0;
+        if (down && !g_pad_held_over[d] && !g_numpad_down[d])
+            logf_("nav: numpad %d with another screen first -- not read\n", d);
+        g_pad_held_over[d] = down;
+        g_numpad_down[d] = 0;
+    }
+    g_glide_digit = 0;
+    g_glide_steps = 0;
+}
+
+// Whether another screen -- a pause menu, a dialog, a popup -- takes input
+// first, so none of the mod's mission keys is read: not the numpad, not the
+// keys standing in for it, nor *, M, F, C, X, Delete or the scanner's. The
+// 2026-10-04 log had the arrows stepping the cursor behind the pause menu;
+// every other key here did the same. Asked at most every KEYS_CHECK_MS: the
+// walk reads a dozen fields, each behind VirtualQuery, on the game's thread.
+#define KEYS_CHECK_MS 100
+
+static int keys_blocked(void)
+{
+    static ULONGLONG at;
+    static int blocked;
+    ULONGLONG t = GetTickCount64();
+    if (!at || t - at >= KEYS_CHECK_MS) {
+        at = t;
+        blocked = !hud_has_keys();
+    }
+    return blocked;
+}
 
 static int glide_interval(int steps)
 {
@@ -1612,6 +1715,7 @@ static void nav_poll(void)
     if (learn_active()) {
         if (nav_active()) nav_stop("sound practice");
         memset(g_numpad_down, 0, sizeof g_numpad_down);
+        alt_keys_hand_over();
         scan_keys_forget();
         g_radar_down[0] = g_radar_down[1] = 0;
         g_walls_down = 0;
@@ -1711,6 +1815,8 @@ static void nav_poll(void)
         // Forget what was held, so a key released while the game was in the
         // background does not read as a fresh press on return.
         memset(g_numpad_down, 0, sizeof g_numpad_down);
+        memset(g_alt_down, 0, sizeof g_alt_down);
+        memset(g_alt_held_over, 0, sizeof g_alt_held_over);
         scan_keys_forget();
         g_radar_down[0] = g_radar_down[1] = 0;
         g_walls_down = 0;
@@ -1729,20 +1835,53 @@ static void nav_poll(void)
     if (msum_screen_up()) {
         if (nav_active()) nav_stop("the mission summary");
         memset(g_numpad_down, 0, sizeof g_numpad_down);
+        alt_keys_hand_over();
         g_glide_digit = 0;
         g_glide_steps = 0;
         return;
     }
     if (info_poll() || abar_menu_poll() || history_is_open()) {
         memset(g_numpad_down, 0, sizeof g_numpad_down);
+        alt_keys_hand_over();
         g_glide_digit = 0;
         g_glide_steps = 0;
         return;
     }
 
     ULONGLONG now = GetTickCount64();
+    g_alt_polled_at = now;
+    // A screen over the HUD -- the pause menu, a dialog -- has the keys: the
+    // arrows and Space for its own list, the rest for nothing. The digits and
+    // their stand-ins are held over, as for the ability menu, so one still
+    // down when the screen closes is not a step; the other keys below keep
+    // their down state but do nothing.
+    int blocked = keys_blocked();
+    if (blocked) {
+        alt_keys_hand_over();
+        pad_hand_over();
+    }
+    for (int k = 0; k < ALT_KEYS; k++) {
+        int down = alt_key_down(k);
+        if (g_alt_held_over[k]) {
+            if (!down) g_alt_held_over[k] = 0;
+            down = 0;
+        }
+        // Once per key per session: enough to show in the log that the key
+        // was read as its digit, without a line for every step.
+        if (down && !g_alt_down[k] && !g_alt_logged[k]) {
+            g_alt_logged[k] = 1;
+            logf_("nav: %s read as numpad %d\n", g_alt_name[k], g_alt_digit[k]);
+        }
+        g_alt_down[k] = down;
+    }
     for (int d = 0; d <= 9; d++) {
         int down = (GetAsyncKeyState(VK_NUMPAD0 + d) & 0x8000) != 0;
+        if (g_pad_held_over[d]) {
+            if (!down) g_pad_held_over[d] = 0;
+            down = 0;
+        }
+        for (int k = 0; k < ALT_KEYS; k++)
+            if (g_alt_digit[k] == d && g_alt_down[k]) down = 1;
         if (down && !g_numpad_down[d]) {
             g_numpad_at[d] = now;
             nav_press(d, 0);
@@ -1790,18 +1929,42 @@ static void nav_poll(void)
     // The radar: numpad + for enemies, numpad - for the squad. Neither key is
     // bound in [XComGame.XComTacticalInput], so, like the digits, they never
     // reach the game and need no swallowing.
+    //
+    // On a keyboard without a numpad, the two keys right of L stand in, taken
+    // by where they are (input_key_at): scan 0x28 for enemies (' on a US
+    // layout, a acute on a Hungarian one) and 0x2B for the squad (\ on US,
+    // u double acute on Hungarian). Unbound in a mission whatever they type:
+    // Quote, Backslash, Slash and Tilde are bound nowhere in
+    // [XComGame.XComTacticalInput].
+    //
+    // None of the four is read while another screen takes input first -- a
+    // pause menu over the battle is no place for a readout of it.
     static const int radar_keys[2] = { VK_ADD, VK_SUBTRACT };
+    static const int radar_scan[2] = { 0x28, 0x2B };
+    static const char* const radar_name[2] = { "the key right of L",
+                                               "the key two right of L" };
     for (int k = 0; k < 2; k++) {
-        int down = (GetAsyncKeyState(radar_keys[k]) & 0x8000) != 0;
+        int pad = (GetAsyncKeyState(radar_keys[k]) & 0x8000) != 0;
+        int alt = input_key_at_down(radar_scan[k], radar_name[k]);
+        int down = pad || alt;
         if (down && !g_radar_down[k]) {
-            GUARDED("radar", radar(k == 1));
+            if (blocked) {
+                logf_("radar: %s with another screen first -- not read\n",
+                      pad ? (k ? "numpad -" : "numpad +") : radar_name[k]);
+            } else {
+                if (!pad) logf_("radar: %s read as %s\n", radar_name[k],
+                                k ? "numpad -" : "numpad +");
+                GUARDED("radar", radar(k == 1));
+            }
         }
         g_radar_down[k] = down;
     }
     // Numpad *: the wall field off and on. Answered in words, because a
     // feature that has just gone quiet cannot announce itself with a sound.
     int walls = (GetAsyncKeyState(VK_MULTIPLY) & 0x8000) != 0;
-    if (walls && !g_walls_down) {
+    if (walls && !g_walls_down && blocked) {
+        logf_("walls: numpad * with another screen first -- not read\n");
+    } else if (walls && !g_walls_down) {
         int on = settings_step(SET_FIELD, 1);
         logf_("walls: field %s\n", on ? "on" : "off");
         speech_say_now(on ? "Wall sound on." : "Wall sound off.");
@@ -1813,7 +1976,10 @@ static void nav_poll(void)
     static const int floor_keys[FLOOR_KEYS] = { 'F', 'C' };
     for (int k = 0; k < FLOOR_KEYS; k++) {
         int down = (GetAsyncKeyState(floor_keys[k]) & 0x8000) != 0;
-        if (down && !g_floor_down[k]) nav_floor(k == 0 ? 1 : -1);
+        if (down && !g_floor_down[k]) {
+            if (blocked) logf_("nav: %c with another screen first -- not read\n", floor_keys[k]);
+            else nav_floor(k == 0 ? 1 : -1);
+        }
         g_floor_down[k] = down;
     }
     // M: the mission's objectives, as the HUD lists them. M is bound in no
@@ -1821,7 +1987,9 @@ static void nav_poll(void)
     // game.
     static int mission_key_down;
     int mkey = (GetAsyncKeyState('M') & 0x8000) != 0;
-    if (mkey && !mission_key_down) {
+    if (mkey && !mission_key_down && blocked) {
+        logf_("mission: M with another screen first -- not read\n");
+    } else if (mkey && !mission_key_down) {
         char say[MISSION_TEXT];
         mission_list(say, sizeof say);
         if (mission_visible() == 0) {
@@ -1847,7 +2015,9 @@ static void nav_poll(void)
     // X: the game's weapon switch. Only noted; the change it makes is said
     // when the HUD redraws the equipped weapon (weapon_note).
     int x = (GetAsyncKeyState('X') & 0x8000) != 0;
-    if (x && !g_weapon_x_down) weapon_x_pressed();
+    // Not under another screen: the game does not switch there either, and a
+    // press noted would wait for a change that never comes.
+    if (x && !g_weapon_x_down && !blocked) weapon_x_pressed();
     g_weapon_x_down = x;
 
     if (g_floor_check_at && GetTickCount64() >= g_floor_check_at) {
@@ -1860,7 +2030,9 @@ static void nav_poll(void)
     // Insert it never reaches the game.
     static int soldier_key_down;
     int soldier_key = (GetAsyncKeyState(VK_DELETE) & 0x8000) != 0;
-    if (soldier_key && !soldier_key_down) {
+    if (soldier_key && !soldier_key_down && blocked) {
+        logf_("soldier: Delete with another screen first -- not read\n");
+    } else if (soldier_key && !soldier_key_down) {
         GUARDED("soldier: readout", soldier_readout());
     }
     soldier_key_down = soldier_key;
@@ -1868,7 +2040,7 @@ static void nav_poll(void)
     // The scanner: Page Up, Page Down, Home, End. Read here rather than in a
     // poll of its own so it shares the guards this one already applies --
     // practice has taken the keys, the game has the foreground.
-    scan_poll();
+    scan_poll(!blocked);
 
     // Last, so a step taken this frame is already in the target the field
     // listens from. The hearts listen from the same tile. Both timed for the
@@ -2686,6 +2858,119 @@ static int input_is_our_end(int cmd)
 
 static int g_end_swallowed;
 
+// The arrows and Space, taken from the game while they are navigation's
+// (g_alt_vk above). Only presses: a press swallowed here returns before
+// InputEvent's ActivateTracker, so PreProcessEventMatching drops its release
+// (see menus.c) -- which is what keeps Space's release, the one that opens
+// the shot HUD, from arriving on its own.
+//
+// Space shares 513 with Enter, whose binding in [XComGame.XComTacticalInput]
+// is the same SpaceBar_Key_Press, so the key decides, as for End and
+// Backspace: Space down and Enter up. Enter still opens the shot HUD.
+#define INPUT_CMD_ARROW_FIRST 500   // Up 500, Right 501, Down 502, Left 503
+#define INPUT_CMD_ARROW_LAST  503
+#define INPUT_CMD_SPACE       513
+
+// Whether the tactical HUD is the first screen to be offered input, the walk
+// UIFxsMovieMgr.OnInput makes over m_arrScreenInputStack: a screen that does
+// not accept input is passed over, and the first that does gets the key. A
+// pause menu, a dialog or a narrative popup pushed over the HUD comes first
+// and keeps the arrows and Space for its own list. AcceptsInput,
+// EvaluatesInput and ConsumesInput are native, so e_InputState stands in for
+// them: None is passed over, as the enum says. The dialog box sits in the
+// stack all mission and is Evaluate while hidden -- UIDialogueBox.Hide sets 1,
+// Show sets 2 -- so a hidden one is passed over too.
+//
+// From the input object up: XComTacticalInput.Outer is the controller,
+// m_Pres its presentation layer, m_kUIMovieMgr what GetUIMgr returns.
+static FieldSlot g_ui_outer, g_ui_pres, g_ui_mgr, g_ui_stack, g_ui_state;
+
+static int ui_hud_first(void* input, char* who, size_t who_sz)
+{
+    const void* v;
+    strcpy_s(who, who_sz, "nothing readable");
+    if (!input || !unit_is_live(input) ||
+        !field_ptr(input, "Outer", &g_ui_outer, sizeof(void*), &v)) return 0;
+    void* pc = *(void* const*)v;
+    if (!pc || !unit_is_live(pc) ||
+        !field_ptr(pc, "m_Pres", &g_ui_pres, sizeof(void*), &v)) return 0;
+    void* pres = *(void* const*)v;
+    if (!pres || !unit_is_live(pres) ||
+        !field_ptr(pres, "m_kUIMovieMgr", &g_ui_mgr, sizeof(void*), &v)) return 0;
+    void* mgr = *(void* const*)v;
+    if (!mgr || !unit_is_live(mgr) ||
+        !field_ptr(mgr, "m_arrScreenInputStack", &g_ui_stack, sizeof(FArray), &v)) return 0;
+    const FArray* arr = (const FArray*)v;
+    if (arr->Num <= 0 || arr->Num > 64 ||
+        !readable(arr->Data, arr->Num * sizeof(void*))) {
+        strcpy_s(who, who_sz, "an empty input stack");
+        return 0;
+    }
+    for (int i = 0; i < arr->Num; i++) {
+        void* scr = ((void* const*)arr->Data)[i];
+        if (!scr || !unit_is_live(scr) ||
+            !field_ptr(scr, "e_InputState", &g_ui_state, 1, &v)) continue;
+        uint8_t state = *(const uint8_t*)v;
+        if (state == 0) continue;
+        char cls[64];
+        if (!object_class_name(scr, cls, sizeof cls)) continue;
+        if (strcmp(cls, "UITacticalHUD") == 0) {
+            strcpy_s(who, who_sz, cls);
+            return 1;
+        }
+        if (state == 1 && strcmp(cls, "UIDialogueBox") == 0) continue;
+        _snprintf_s(who, who_sz, _TRUNCATE, "%s (input state %d)", cls, state);
+        return 0;
+    }
+    strcpy_s(who, who_sz, "no screen taking input");
+    return 0;
+}
+
+// Whether the arrows and Space are navigation's right now, asked of the
+// input object InputEvent last ran on. Both sides ask: the swallow, so the
+// game does not pan the camera, and nav_poll, so a key a pause menu is using
+// does not step the cursor behind it -- the 2026-10-04 log had the pause menu
+// moving down its list and the cursor stepping south with every press. Before
+// any InputEvent has been seen there is nothing to ask, and the keys are
+// navigation's, as they were before the check. The ability menu's key and the
+// radar's ask too (menus.h): neither has anything to say over a pause menu.
+int hud_has_keys(void)
+{
+    void* input = g_ui_input;
+    if (!input || !unit_is_live(input)) return 1;
+    char who[96];
+    int ours = ui_hud_first(input, who, sizeof who);
+    // Said when the answer changes, so the log shows which screen kept the
+    // keys when a press did not move the cursor.
+    static int last = -1;
+    static char last_who[96];
+    if (ours != last || strcmp(who, last_who) != 0) {
+        last = ours;
+        strcpy_s(last_who, sizeof last_who, who);
+        logf_("nav: the mission keys are %s -- %s takes input first\n",
+              ours ? "navigation's" : "left to the screen", who);
+    }
+    return ours;
+}
+
+static int nav_keys_swallow(void* stack, int cmd, int mask)
+{
+    void* input = readable(stack, 0x20) ? *(void**)((uint8_t*)stack + FFRAME_OBJECT) : NULL;
+    if (input) g_ui_input = input;
+
+    if (cmd >= INPUT_CMD_ARROW_FIRST && cmd <= INPUT_CMD_ARROW_LAST) {
+        if (mask & 32) return 0;
+    } else if (cmd == INPUT_CMD_SPACE) {
+        if (!(mask & 1)) return 0;
+        if (!(GetAsyncKeyState(VK_SPACE) & 0x8000)) return 0;
+        if (GetAsyncKeyState(VK_RETURN) & 0x8000) return 0;
+    } else {
+        return 0;
+    }
+    if (GetTickCount64() - g_alt_polled_at > ALT_STALE_MS) return 0;
+    return hud_has_keys();
+}
+
 static void nav_watch_input(void* stack)
 {
     if (!nav_confirm_window()) return;
@@ -2727,6 +3012,8 @@ void __fastcall hook_moviecheck(void* self, void* edx, void* stack, void* result
         swallow = input_is_our_end(cmd);
         if (!swallow && abar_menu_swallow(cmd, mask))
             swallow = 2;
+        if (!swallow && nav_keys_swallow(stack, cmd, mask))
+            swallow = 3;
         if (swallow == 1 && !g_end_swallowed) {
             g_end_swallowed = 1;
             logf_("scan: End taken from the game (cmd %d, mask %d) -- "

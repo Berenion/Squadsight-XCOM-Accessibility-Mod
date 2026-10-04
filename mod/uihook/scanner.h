@@ -8,7 +8,7 @@
 
 // Reads the keys; every frame from nav_poll, while the game has the
 // foreground and practice does not have the keys.
-void scan_poll(void);
+void scan_poll(int act);
 
 // Forgets which keys were down, so one released elsewhere is not a press.
 void scan_keys_forget(void);

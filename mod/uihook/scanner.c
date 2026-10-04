@@ -746,7 +746,7 @@ static void scan_distance(int shift)
 // hook_moviecheck, which is the only reason it can be used here.
 static int g_scan_down[4];      // Page Up, Page Down, Home, End
 
-void scan_poll(void)
+void scan_poll(int act)
 {
     static const int keys[4] = { VK_PRIOR, VK_NEXT, VK_HOME, VK_END };
     int ctrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -755,7 +755,9 @@ void scan_poll(void)
 
     for (int k = 0; k < 4; k++) {
         int down = (GetAsyncKeyState(keys[k]) & 0x8000) != 0;
-        if (down && !g_scan_down[k]) {
+        if (down && !g_scan_down[k] && !act) {
+            logf_("scan: key %d with another screen first -- not read\n", k);
+        } else if (down && !g_scan_down[k]) {
             Fault f;
             __try {
                 switch (k) {

@@ -27,6 +27,11 @@ int  menu_grace(void);
 // A menu opened from elsewhere (Delete's pages): its keys are being read now.
 void menu_polled(void);
 
+// ---- provided by numpad.c ------------------------------------------------------
+// Whether the tactical HUD is the first screen to take input, so the mod's
+// mission keys are its own; 0 under a pause menu, a dialog or a popup.
+int  hud_has_keys(void);
+
 // ---- provided by main.c --------------------------------------------------------
 void*    abar_container(void);          // UITacticalHUD_AbilityContainer, as captured
 void     strip_markup(char* s);         // Flash markup out of a string, in place
