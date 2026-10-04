@@ -5360,6 +5360,24 @@ static void capture_body(const char* tag, LONG n, void* stack)
         }
         return;
     }
+    // The floating combat text, likewise: its words are said by
+    // combat_message (tactical_call, above) from CreateNewMessage and
+    // UpdateExistingMessageContents. Everything else it sends carries only a
+    // slot's id -- AS_HideMessage / AS_ShowMessage / UpdateMessages with
+    // "worldMessageBox0".."7", the pool UIWorldMessageMgr.OnInit builds -- and
+    // as a lone string the hide that ends each message was held and said once
+    // nothing followed it: NVDA read "world message box 5" during play
+    // (reported 2026-10-04; AS_HideMessage "worldMessageBox7" nine times in
+    // the 2026-09-25 log). Logged, not said.
+    if (strncmp(obj_name, "UIWorldMessageMgr", 17) == 0) {
+        static int told;
+        if (!told) {
+            told = 1;
+            logf_("worldmsg: %s.%s and every world message call after it carry only "
+                  "slot ids, never spoken\n", obj_name, fn_name);
+        }
+        return;
+    }
 
     ULONGLONG now = GetTickCount64();
     // Compare against the last call that actually carried text, not the last
