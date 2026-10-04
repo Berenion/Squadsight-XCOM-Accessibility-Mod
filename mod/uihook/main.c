@@ -64,6 +64,7 @@
 #include "abar.h"
 #include "hq.h"
 #include "countries.h"
+#include "customize.h"
 #include "cursor.h"
 #include "nav.h"
 #include "tile.h"
@@ -291,8 +292,21 @@ static int       g_focus_had_panel;
 // UIMissionControl_MissionList.RealizeSelected re-sends "0" on every
 // geoscape refresh, three times in the first seconds at the base.
 static ULONGLONG g_ui_key_at;
+// And which command it was, so a redraw can be told from the change a key
+// asked for (spinner_stepped).
+static int       g_ui_key_cmd;
 
 #define REDRAW_QUIET_MS 1000
+
+// Whether the last key stepped a spinner: Left or Right, or the pad's
+// equivalents -- the six UISoldierCustomize.OnUnrealCommand turns into
+// OnSpinnerDecrease (356, 503, 372) and OnSpinnerIncrease (352, 501, 373).
+static int spinner_stepped(void)
+{
+    int c = g_ui_key_cmd;
+    return GetTickCount64() - g_ui_key_at < REDRAW_QUIET_MS &&
+           (c == 501 || c == 503 || c == 352 || c == 356 || c == 372 || c == 373);
+}
 #define NARRATIVE_REPEAT_MS 30000  // a comm-link line re-sent within this is one line
 
 // The base's facility menu, once it has published.
@@ -5446,6 +5460,22 @@ static void capture_body(const char* tag, LONG n, void* stack)
         // announcement this very call schedules.
         speech_cancel_pending();
 
+        // The customisation screen's spinners send a bare number for race,
+        // hair colour, armour tint and the rest; customize.c turns it into
+        // what the number stands for, read off the soldier's pawn. The slot
+        // then holds the words, so the focus and every change say them.
+        if (joined[0] && strncmp(obj_name, "UIWidgetHelper", 14) == 0 &&
+            strstr(fn_name, "SpinnerValue")) {
+            char desc[FOCUS_MAX_LABEL];
+            int described = 0;
+            GUARDED("customize", described = customize_describe(object, idx, joined,
+                                                                desc, sizeof desc));
+            if (described) {
+                logf_("[%ld] customize: spinner %d \"%s\" -> \"%s\"\n", n, idx, joined, desc);
+                strncpy_s(joined, sizeof joined, desc, _TRUNCATE);
+            }
+        }
+
         if (is_option_list_fn(fn_name)) {
             // The items belong to the widget at `idx`, not to the screen's
             // slot list. The trailing entry is the raw string Flash is handed
@@ -5475,7 +5505,25 @@ static void capture_body(const char* tag, LONG n, void* stack)
             logf_("[%ld] %s %s.%s  SLOT %d %s \"%s\"%s\n", n, tag, obj_name, fn_name,
                   idx, part == FOCUS_PART_VALUE ? "value =" : "label =", joined,
                   changed ? "  (changed)" : "");
-            if (changed) speak_slot(object, idx);
+            if (changed && part == FOCUS_PART_VALUE && spinner_stepped() &&
+                object == g_focus_obj) {
+                // A spinner stepped with Left or Right. The screen then redraws
+                // every widget it has (UISoldierCustomize.UpdateData ->
+                // RefreshAllWidgets), and each later call opens with
+                // speech_cancel_pending -- so the held announcement of the
+                // new value was cancelled by the next spinner's redraw, and
+                // the 2026-10-04 log has "SLOT 3 value = "French" (changed)"
+                // with nothing said. The focused one is said at once, value
+                // alone; a neighbour the step changed along with it (a new
+                // language picks a new voice) is not the one the player moved.
+                if (idx == g_focus_idx) {
+                    logf_("[%ld] %s %s.%s  SPINNER %d now \"%s\"\n", n, tag, obj_name,
+                          fn_name, idx, joined);
+                    if (g_speak && !muted()) speech_say_now(joined);
+                }
+            } else if (changed) {
+                speak_slot(object, idx);
+            }
         }
     } else if (p->nstrings == 1 && is_title_fn(fn_name)) {
         // A heading. Kept apart from the list, which it used to open -- and
@@ -5753,6 +5801,7 @@ static int rewrite_cmd(LONG n, void* stack)
     }
 
     int cmd = *cmd_slot;
+    g_ui_key_cmd = cmd;
     const char* from_name = input_cmd_name(cmd);
 
     // A single keystroke arrives here several times -- press, hold, release --
