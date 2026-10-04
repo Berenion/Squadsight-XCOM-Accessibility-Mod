@@ -53,8 +53,9 @@ static WhereVolume g_where_vol[WHERE_VOLUMES];
 static int         g_where_n, g_where_next, g_where_full;
 static void*       g_where_world;
 static const void* g_where_cls;
-static const void* g_where_walk[3];      // XComFloorVolume, XComBuildingVolume,
-                                         // SeqAct_GetExtractionVolume
+static const void* g_where_walk[4];      // XComFloorVolume, XComBuildingVolume,
+                                         // SeqAct_GetExtractionVolume,
+                                         // XComCapturePointVolume
 
 // The evac zone: a level's XComBuildingVolume with IsDropShip, which is what
 // SeqAct_GetExtractionVolume hands the mission scripts ("Get Extraction
@@ -83,6 +84,12 @@ static void*       g_evac_seq[EVAC_SEQ];
 static int         g_evac_seq_idx[EVAC_SEQ], g_evac_seq_n;
 static FieldSlot   g_seq_extraction;
 static int where_bool(void* bv, const char* name, int dflt);
+
+// The capture zones of the covert data recovery (XGBattle_SPCaptureAndHold):
+// one XComCapturePointVolume each, kept off the same walk. See capture_at.
+#define CAPTURE_MAX 4
+static WhereVolume g_capture[CAPTURE_MAX];
+static int         g_capture_n;
 static FieldSlot   g_fv_brush, g_fv_number, g_fv_building, g_brush_bounds, g_bv_floors;
 static TileWhere   g_where_heard;    // what the player last heard, for the crossing
 static void where_storeys_forget(void);
@@ -98,6 +105,7 @@ static int where_collect(void* obj, int which, int idx, void* ctx)
         return 1;
     }
     if (which == 0 && g_where_n >= WHERE_VOLUMES) { g_where_full = 1; return 0; }
+    if (which == 3 && g_capture_n >= CAPTURE_MAX) return 1;
     if (which == 1 && (g_evac_n >= EVAC_MAX || !where_bool(obj, "IsDropShip", 0))) return 1;
     const void* v;
     if (!field_ptr(obj, "BrushComponent", &g_fv_brush, sizeof(void*), &v) || !*(void* const*)v)
@@ -108,7 +116,8 @@ static int where_collect(void* obj, int which, int idx, void* ctx)
     // A dropship volume with no brush size (the Zhang map's soldier spawn, 0..0)
     // holds no tile, and would count as on the map at the origin.
     if (which == 1 && b[3] <= 0.0f && b[4] <= 0.0f) return 1;
-    WhereVolume* w = which == 1 ? &g_evac[g_evac_n++] : &g_where_vol[g_where_n++];
+    WhereVolume* w = which == 1 ? &g_evac[g_evac_n++]
+                   : which == 3 ? &g_capture[g_capture_n++] : &g_where_vol[g_where_n++];
     w->v = obj;
     w->idx = idx;
     for (int k = 0; k < 3; k++) {
@@ -121,6 +130,12 @@ static int where_collect(void* obj, int which, int idx, void* ctx)
         logf_("where: dropship volume %d, %s, spans %.0f..%.0f, %.0f..%.0f, %.0f..%.0f\n",
               g_evac_n, name, w->lo[0], w->hi[0], w->lo[1], w->hi[1], w->lo[2], w->hi[2]);
     }
+    if (which == 3) {
+        char name[64] = "?";
+        object_name(obj, name, sizeof name);
+        logf_("where: capture zone %d, %s, spans %.0f..%.0f, %.0f..%.0f, %.0f..%.0f\n",
+              g_capture_n, name, w->lo[0], w->hi[0], w->lo[1], w->hi[1], w->lo[2], w->hi[2]);
+    }
     return 1;
 }
 
@@ -131,19 +146,20 @@ static int where_volumes(void)
     if (!objects_ready()) return 0;
     if (!g_where_cls) {
         static const char* const names[] = { "XComFloorVolume", "XComBuildingVolume",
-                                             "SeqAct_GetExtractionVolume" };
-        objects_classes(names, g_where_walk, 3);
+                                             "SeqAct_GetExtractionVolume",
+                                             "XComCapturePointVolume" };
+        objects_classes(names, g_where_walk, 4);
         g_where_cls = g_where_walk[0];
     }
     if (!g_where_cls) return 0;
     // The list stops at the first class not found, so each one keeps its index.
     int nwalk = 1;
-    while (nwalk < 3 && g_where_walk[nwalk]) nwalk++;
+    while (nwalk < 4 && g_where_walk[nwalk]) nwalk++;
     void* world = cursor_world();
     if (world != g_where_world || g_where_next > objects_count()) {
         g_where_world = world;
         g_where_n = g_where_next = g_where_full = 0;
-        g_evac_n = g_evac_seq_n = 0;
+        g_evac_n = g_evac_seq_n = g_capture_n = 0;
         where_storeys_forget();
         memset(&g_where_heard, 0, sizeof g_where_heard);
         objects_each_from(g_where_walk, nwalk, 0, &g_where_next, where_collect, NULL);
@@ -151,8 +167,9 @@ static int where_volumes(void)
         int entries;
         objects_last_walk(&ms, &entries);
         logf_("where: %d floor volumes on this map%s, %d dropship volumes, %d Get Extraction "
-              "Volume actions (%d entries, %u ms)\n", g_where_n,
-              g_where_full ? ", the list is full" : "", g_evac_n, g_evac_seq_n, entries, ms);
+              "Volume actions, %d capture zones (%d entries, %u ms)\n", g_where_n,
+              g_where_full ? ", the list is full" : "", g_evac_n, g_evac_seq_n, g_capture_n,
+              entries, ms);
     } else if (!g_where_full) {
         int had = g_where_n;
         objects_each_from(g_where_walk, nwalk, g_where_next, &g_where_next, where_collect, NULL);
@@ -615,6 +632,94 @@ int evac_at(int tx, int ty, float floor)
             if (inside(w->v, NULL, x, y, floor + up, 0.0f, 0.0f, 0.0f)) return 1;
     }
     return 0;
+}
+
+// Which capture zone the tile whose floor is at `floor` lies in, as the HUD
+// names it, or NULL. The objective is "Block EXALT's hack attempts by
+// occupying the capture zone", and the 2026-10-04 (18:47) log had nothing on
+// a step to say a soldier stood in one. The game counts a unit in by the
+// volume's TouchingActors (XComCapturePointVolume.UpdateCaptureState), the
+// same touch of the collision cylinder as the evac zone's, so the brush is
+// asked at the same points up a unit's body.
+//
+// Only a zone the screen shows: UpdateBorderEffect draws the border only
+// while IsActive -- not captured, and the one before it in the sequence
+// captured or none -- and one captured has its arrow taken away
+// (UpdateIndicatorArrow). The one waiting its turn keeps a grey arrow and no
+// border: said with "not yet active". The volume with
+// m_iCaptureSequenceIndex 0 is ENCODER, any other TRANSMITTER
+// (UISpecialMissionHUD_CapturePointStats.UpdatePanel).
+static FieldSlot g_cp_progress, g_cp_turns, g_cp_prev, g_cp_next, g_cp_seq;
+
+// XComCapturePointVolume.IsCaptured: its progress reached its turns, or the
+// next one in the sequence is captured. -1 unread.
+static int capture_captured(void* v, int depth)
+{
+    const void* f;
+    if (!v || depth > CAPTURE_MAX || !objects_live(v)) return -1;
+    if (!field_ptr(v, "m_iCaptureProgress", &g_cp_progress, sizeof(int32_t), &f)) return -1;
+    int progress = *(const int32_t*)f;
+    if (!field_ptr(v, "m_iTurnsToCapture", &g_cp_turns, sizeof(int32_t), &f)) return -1;
+    if (progress >= *(const int32_t*)f) return 1;
+    if (!field_ptr(v, "m_kNextCapturePoint", &g_cp_next, sizeof(void*), &f)) return -1;
+    void* next = *(void* const*)f;
+    return next ? capture_captured(next, depth + 1) : 0;
+}
+
+// XComCapturePointVolume.IsActive, read: 1 active, 0 waiting its turn,
+// 2 captured, -1 unread.
+static int capture_state(void* v)
+{
+    const void* f;
+    int cap = capture_captured(v, 0);
+    if (cap < 0) return -1;
+    if (cap) return 2;
+    if (!field_ptr(v, "m_kPreviousCapturePoint", &g_cp_prev, sizeof(void*), &f)) return -1;
+    void* prev = *(void* const*)f;
+    if (!prev) return 1;
+    int pc = capture_captured(prev, 0);
+    return pc < 0 ? -1 : pc ? 1 : 0;
+}
+
+const char* capture_at(int tx, int ty, float floor, int* waiting)
+{
+    CursorGrid g;
+    EncompassFn inside = (EncompassFn)g_volume_fn_encompass;
+    *waiting = 0;
+    if (!inside || !where_volumes() || !g_capture_n || !cursor_grid(&g)) return NULL;
+    float x = grid_centre_x(&g, tx);
+    float y = grid_centre_y(&g, ty);
+    for (int i = 0; i < g_capture_n; i++) {
+        const WhereVolume* w = &g_capture[i];
+        if (x < w->lo[0] || x > w->hi[0] || y < w->lo[1] || y > w->hi[1] ||
+            floor + EVAC_REACH < w->lo[2] || floor + WHERE_LIFT > w->hi[2])
+            continue;
+        if (!objects_still(w->v, w->idx, &g_where_walk[3], 1)) continue;
+        int in = 0;
+        for (float up = WHERE_LIFT; up <= EVAC_REACH + 0.5f && !in; up += WHERE_LIFT)
+            in = inside(w->v, NULL, x, y, floor + up, 0.0f, 0.0f, 0.0f);
+        if (!in) continue;
+        int st = capture_state(w->v);
+        const void* f;
+        int seq = field_ptr(w->v, "m_iCaptureSequenceIndex", &g_cp_seq, sizeof(int32_t), &f)
+                      ? *(const int32_t*)f : -1;
+        // Once per zone and state, not per step.
+        static void* said_v;
+        static int said_st = -9;
+        if (w->v != said_v || st != said_st) {
+            said_v = w->v;
+            said_st = st;
+            char name[64] = "?";
+            object_name(w->v, name, sizeof name);
+            logf_("where: %d, %d floor %.1f is in capture zone %s, sequence %d, %s\n", tx, ty,
+                  floor, name, seq, st < 0 ? "state unread" : st == 0 ? "waiting its turn"
+                  : st == 1 ? "active" : "captured -- not said");
+        }
+        if (st == 2) continue;
+        *waiting = st == 0;
+        return seq == 0 ? "Encoder capture zone" : "Transmitter capture zone";
+    }
+    return NULL;
 }
 
 // The tile of the evac zone nearest (ox, oy) that has a floor in it, and that

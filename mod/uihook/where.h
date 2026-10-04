@@ -34,6 +34,10 @@ void floor_missed(int tx, int ty, float from, int found, float to, int dir,
 // mentions evac.
 int  evac_at(int tx, int ty, float floor);
 
+// The capture zone (tx, ty) at `floor` lies in, "Encoder capture zone" or
+// "Transmitter capture zone", or NULL; `waiting` set for one not yet active.
+const char* capture_at(int tx, int ty, float floor, int* waiting);
+
 // The evac zone's tile nearest (ox, oy) with a floor, and that floor.
 int  evac_nearest(int ox, int oy, int* nx, int* ny, float* nz);
 

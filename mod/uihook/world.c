@@ -284,6 +284,40 @@ static int panel_objective(void* actor)
     return live && !joke;
 }
 
+static int arrow_on(const void* actor);
+
+// What a comm array is to the player. XGBattle_SPCovertOpsExtraction.
+// InitRadarArrays switches two of the map's arrays on with their objective
+// visuals on the operative's extraction (mission type 5) -- a waypoint and an
+// arrow, XComRadarArrayActor.SetActive -- and on the data recovery (type 6,
+// XGBattle_SPCaptureAndHold) switches every one on with none, so there they
+// are props a sighted player finds by looking. The operative's hack
+// (OnExaltHackingArrayInteraction -> SetActive(false)) leaves one used. The
+// 2026-10-04 (18:47) log, a data recovery, listed all four from the start,
+// through the fog, as "Radar array": the game's own hint calls them "EXALT
+// comm arrays". -1 unread (the bool mask unknown), 0 never switched on, 1 on,
+// 2 used.
+static int radar_array_state(void* actor)
+{
+    if (!props_mask_offset()) return -1;
+    static const void* s_cls;
+    static const void* s_active;
+    static const void* s_ever;
+    uint32_t class_off = props_class_offset();
+    const void* cls = class_off && readable((uint8_t*)actor + class_off, sizeof(void*))
+                          ? *(void* const*)((uint8_t*)actor + class_off) : NULL;
+    if (cls && cls != s_cls) {
+        s_cls = cls;
+        s_active = object_field_prop(actor, "m_bActive");
+        s_ever = object_field_prop(actor, "m_bWasEverActive");
+    }
+    int active = 0, ever = 0;
+    if (!s_active || !s_ever || !props_read_object_bool(s_active, actor, &active) ||
+        !props_read_object_bool(s_ever, actor, &ever))
+        return -1;
+    return active ? 1 : ever ? 2 : 0;
+}
+
 static void scan_describe_interactive(WorldActor* wa)
 {
     void* actor = wa->actor;
@@ -295,12 +329,33 @@ static void scan_describe_interactive(WorldActor* wa)
     if (field_ptr(actor, "IconSocket", &g_icon, 1, &v))
         icon = *(const uint8_t*)v;
 
-    // The radar array is the objective on the missions that have one, and it
+    // The comm array is the objective on the missions that have one, and it
     // is an interactive actor like any other -- so it is named and filed
-    // before the icon gets a say.
+    // before the icon gets a say. Only one with an arrow on it shows through
+    // the fog (radar_array_state).
+    int marked = 0;
     if (object_is_a(actor, "XComRadarArrayActor")) {
+        int st = radar_array_state(actor);
+        marked = arrow_on(actor);
+        static struct { void* actor; int st, marked; } said[8];
+        static int nsaid;
+        int k;
+        for (k = 0; k < nsaid && said[k].actor != actor; k++) {}
+        if (k == nsaid || said[k].st != st || said[k].marked != marked) {
+            if (k == nsaid && nsaid < 8) nsaid++;
+            if (k < 8) { said[k].actor = actor; said[k].st = st; said[k].marked = marked; }
+            char name[80] = "?";
+            object_name(actor, name, sizeof name);
+            logf_("world: comm array %s is %s, %s\n", name,
+                  st < 0 ? "of unread state" : st == 0 ? "never switched on"
+                  : st == 1 ? "on" : "used",
+                  marked ? "an arrow on it -- listed through the fog" : "no arrow -- once seen");
+        }
+        // One never switched on is a decoy on the extraction map, no objective.
+        if (st == 0 && !marked) return;
         it.kind = SCAN_OBJECTIVES;
-        strncpy_s(it.name, sizeof it.name, "Radar array", _TRUNCATE);
+        strncpy_s(it.name, sizeof it.name, "Comm array", _TRUNCATE);
+        if (st == 2) strcpy_s(it.detail, sizeof it.detail, "used");
     } else if (icon == ICON_WINDOW) {
         it.kind = SCAN_WINDOWS;
         strncpy_s(it.name, sizeof it.name, "Window", _TRUNCATE);
@@ -318,11 +373,12 @@ static void scan_describe_interactive(WorldActor* wa)
     float world[3];
     if (!actor_location(actor, &g_ilact_loc, world)) return;
     if (!world_item_at(&it, world)) return;
-    // The radar array is not held back: the two the mission switches on
-    // (XGBattle_SPCovertOpsExtraction.InitRadarArrays) carry a waypoint and
-    // the HUD's arrows (XComRadarArrayActor.SetActive), which show through
-    // the fog.
-    if (it.kind != SCAN_OBJECTIVES && world_unseen(wa, &it, FOG_REACH_WALL, FOG_UP_LAYERS))
+    // A comm array with an arrow is not held back: the arrow and the
+    // waypoint show through the fog. A wired panel under Objectives keeps
+    // the rule it had.
+    int through = it.kind == SCAN_OBJECTIVES &&
+                  (marked || !object_is_a(actor, "XComRadarArrayActor"));
+    if (!through && world_unseen(wa, &it, FOG_REACH_WALL, FOG_UP_LAYERS))
         return;
     world_keep(&it);
 }
@@ -578,6 +634,42 @@ static int arrow_stand(const CursorGrid* g, const float* at, float* out, int* mo
     return 0;
 }
 
+// Whether one of the HUD's arrows points at this actor.
+static int arrow_on(const void* actor)
+{
+    if (!g_arrows || !unit_is_live(g_arrows)) return 0;
+    const void* v;
+    if (!field_ptr(g_arrows, "arr3DArrows", &g_arrows_3d, sizeof(FArray), &v)) return 0;
+    const FArray* a = (const FArray*)v;
+    if (a->Num <= 0 || a->Num > ARROWS_MAX ||
+        !readable(a->Data, (size_t)a->Num * ARROW_STRIDE))
+        return 0;
+    for (int i = 0; i < a->Num; i++)
+        if (*(void* const*)((const uint8_t*)a->Data + i * ARROW_STRIDE + ARROW_ACTOR) == actor)
+            return 1;
+    return 0;
+}
+
+// The capture zone an arrow marks, by the counter's name for it. On the data
+// recovery the arrows point at each XComCapturePointVolume's
+// m_kActorBeingCaptured (UpdateIndicatorArrow), and the HUD names the volume
+// with m_iCaptureSequenceIndex 0 ENCODER, any other TRANSMITTER
+// (UISpecialMissionHUD_CapturePointStats.UpdatePanel). The 2026-10-04 (18:47)
+// log listed both as "Objective marker", which said neither which was which
+// nor that it is a zone to hold.
+static FieldSlot g_cp_volume, g_cp_index;
+
+static const char* capture_zone_name(void* actor)
+{
+    if (!object_is_a(actor, "XComCapturePointActor")) return NULL;
+    const void* v;
+    if (!field_ptr(actor, "m_kCapturePointVolume", &g_cp_volume, sizeof(void*), &v)) return NULL;
+    void* vol = *(void* const*)v;
+    if (!vol || !unit_is_live(vol)) return NULL;
+    if (!field_ptr(vol, "m_iCaptureSequenceIndex", &g_cp_index, sizeof(int32_t), &v)) return NULL;
+    return *(const int32_t*)v == 0 ? "Encoder capture zone" : "Transmitter capture zone";
+}
+
 static void scan_add_arrows(void)
 {
     if (!g_arrows || !unit_is_live(g_arrows)) return;
@@ -612,7 +704,8 @@ static void scan_add_arrows(void)
         ScanItem it;
         memset(&it, 0, sizeof it);
         it.kind = SCAN_OBJECTIVES;
-        strncpy_s(it.name, sizeof it.name, "Objective marker", _TRUNCATE);
+        const char* zone = capture_zone_name(actor);
+        strncpy_s(it.name, sizeof it.name, zone ? zone : "Objective marker", _TRUNCATE);
         if (!world_item_at(&it, world)) continue;
 
         // The transponders' arrows hang over their panels, which are listed

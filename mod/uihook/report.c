@@ -650,8 +650,16 @@ int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     // before what it offers. "Evac zone. Low cover. Seen by 1."
     int evac = 0;
     GUARDED("tile: evac", evac = evac_at(tx, ty, floor), evac = 0);
-    _snprintf_s(say, say_sz, _TRUNCATE, "%s%s%s%s", who, who[0] ? " " : "",
-                evac ? "Evac zone. " : "", what);
+    // A capture zone in the same place: "Encoder capture zone. Low cover."
+    const char* zone = NULL;
+    int waiting = 0;
+    GUARDED("tile: capture zone", zone = capture_at(tx, ty, floor, &waiting), zone = NULL);
+    char zone_say[64] = "";
+    if (zone)
+        _snprintf_s(zone_say, sizeof zone_say, _TRUNCATE, "%s%s. ", zone,
+                    waiting ? ", not yet active" : "");
+    _snprintf_s(say, say_sz, _TRUNCATE, "%s%s%s%s%s", who, who[0] ? " " : "",
+                evac ? "Evac zone. " : "", zone_say, what);
 
     // The cover point carries its own tile, which is the check on the one
     // asked about -- and on the layer this file worked out for smoke.
@@ -665,6 +673,6 @@ int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
           r.reach[0] ? ", rings " : "", r.reach,
           r.height_over[0] ? ", height on " : "", r.height_over,
           r.height_under[0] ? ", below " : "", r.height_under,
-          evac ? ", evac zone" : "", say);
+          evac ? ", evac zone" : zone ? ", capture zone" : "", say);
     return 1;
 }

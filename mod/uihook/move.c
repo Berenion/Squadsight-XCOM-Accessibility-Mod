@@ -528,7 +528,7 @@ static struct { void* unit; void* actor; ULONGLONG next; int v_down; } g_ia;
 
 // What the actor is, for the words: the level designer's icon
 // (XComInteractiveLevelActor.IconSocket: door 0, window 1, button 2), the
-// radar array by class. 0 for a Meld canister's lid, which the canister's own
+// comm array (XComRadarArrayActor) by class. 0 for a Meld canister's lid, which the canister's own
 // prompt says (main.c, the world messages).
 static int interact_words(void* actor, const char** what, const char** verb)
 {
@@ -541,7 +541,7 @@ static int interact_words(void* actor, const char** what, const char** verb)
     int icon = 0;
     if (field_ptr(actor, "IconSocket", &g_mv_icon, 1, &v)) icon = *(const uint8_t*)v;
     *verb = "open";
-    if (object_is_a(actor, "XComRadarArrayActor")) { *what = "Radar array"; *verb = "use"; }
+    if (object_is_a(actor, "XComRadarArrayActor")) { *what = "Comm array"; *verb = "use"; }
     else if (icon == 1) *what = "Window";
     else if (icon == 2) { *what = "Panel"; *verb = "use"; }
     else *what = "Door";
