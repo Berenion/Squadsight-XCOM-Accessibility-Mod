@@ -603,9 +603,118 @@ static void interact_poll(void)
     if (g_speak) speech_say(say);
 }
 
+// ---- a move that never finishes -----------------------------------------------
+//
+// The cost of a move is paid at its very end: XGAction_EndMove's
+// InternalCompleteAction runs GetMoveAbility().ApplyCost() (a dash adds 2 to
+// m_iMovesActionsPerformed) and EndTurnCheck, and clears the pathing pawn's
+// path. Until then UIUnitFlag.RealizeMoves has nothing to watch change and the
+// pips -- and so "2 actions." -- stay as they were. The 2026-10-05 log: Skinner
+// dashed to the comm array on the extraction mission, two EXALT reaction shots
+// were announced and never fired, and she stayed in XGAction_EndMove_17 for
+// the rest of the session; reselected she read "2 actions.", and no path was
+// built for anyone again (the dash's path was still held). EndMove's Executing
+// state marks its progress in m_iActionHangDebugging: 2 before the waits for
+// doors and visibility, 3 before the tile rebuild, 4 before the wait on
+// IsSuppressionExecuting (reaction fire), 5-6 before the AI pod waits, 7-9
+// after. Logged when a move ends still in an action, and again when that
+// changes, so the next such log says where it hangs.
+#define STALL_POLL_MS  1000
+#define STALL_WATCH_MS 600000
+
+static FieldSlot g_st_hang, g_st_moves, g_st_mdone, g_st_fdone;
+static struct {
+    void*     unit;
+    void*     action;
+    char      name[64];
+    int       mark;
+    ULONGLONG since, until, next;
+} g_stall;
+
+static int read_int(void* obj, const char* field, FieldSlot* slot, int fallback)
+{
+    const void* v;
+    return field_ptr(obj, field, slot, 4, &v) ? *(const int*)v : fallback;
+}
+
+static void* current_action(void* unit, char* name, size_t name_sz)
+{
+    const void* v;
+    name[0] = 0;
+    if (!field_ptr(unit, "m_kCurrAction", &g_mv_action, sizeof(void*), &v)) return NULL;
+    void* action = *(void* const*)v;
+    if (!action || !unit_is_live(action) || !object_name(action, name, name_sz)) return NULL;
+    return action;
+}
+
+static int hang_mark(void* action, const char* name)
+{
+    if (!action || strncmp(name, "XGAction_EndMove", 16) != 0) return -1;
+    return read_int(action, "m_iActionHangDebugging", &g_st_hang, -1);
+}
+
+static void stall_note(const char* what)
+{
+    char action[64];
+    void* a = current_action(g_stall.unit, action, sizeof action);
+    logf_("move: %s %s -- action %s, hang mark %d; moves %d, move actions %d, "
+          "fire actions %d\n", g_stall.name, what, action[0] ? action : "none",
+          hang_mark(a, action),
+          read_int(g_stall.unit, "m_iMoves", &g_st_moves, -1),
+          read_int(g_stall.unit, "m_iMovesActionsPerformed", &g_st_mdone, -1),
+          read_int(g_stall.unit, "m_iFireActionsPerformed", &g_st_fdone, -1));
+}
+
+static void stall_begin(void)
+{
+    char action[64];
+    void* a = current_action(g_move.unit, action, sizeof action);
+    ULONGLONG now = GetTickCount64();
+    g_stall.unit = g_move.unit;
+    g_stall.action = a;
+    g_stall.mark = hang_mark(a, action);
+    g_stall.since = now;
+    g_stall.until = now + STALL_WATCH_MS;
+    g_stall.next = now + STALL_POLL_MS;
+    strcpy_s(g_stall.name, sizeof g_stall.name, g_move.name);
+    stall_note("is held at the end of the move");
+}
+
+static void stall_poll(void)
+{
+    if (!g_stall.unit) return;
+    ULONGLONG now = GetTickCount64();
+    if (now < g_stall.next) return;
+    g_stall.next = now + STALL_POLL_MS;
+    if (!unit_is_live(g_stall.unit)) {
+        g_stall.unit = NULL;
+        return;
+    }
+    char action[64];
+    void* a = current_action(g_stall.unit, action, sizeof action);
+    int mark = hang_mark(a, action);
+    if (a != g_stall.action) {
+        char what[64];
+        _snprintf_s(what, sizeof what, _TRUNCATE, "is free after %u s",
+                    (unsigned)((now - g_stall.since) / 1000));
+        stall_note(what);
+        g_stall.unit = NULL;
+        return;
+    }
+    if (mark != g_stall.mark) {
+        g_stall.mark = mark;
+        stall_note("moved on in the end of the move");
+    }
+    if (now >= g_stall.until) {
+        stall_note("is still held -- not watched any more");
+        g_stall.unit = NULL;
+    }
+}
+
 void move_poll(void)
 {
     GUARDED("move: interact", interact_poll());
+    GUARDED("move: stall", stall_poll());
     if (!g_move.on) return;
     ULONGLONG now = GetTickCount64();
     float loc[3];
@@ -642,7 +751,10 @@ void move_poll(void)
     if (g_move.started) {
         ULONGLONG still = now - g_move.moved_at;
         if (idle && still >= MOVE_SETTLE_MS) move_finish(loc, "idle");
-        else if (still >= MOVE_STILL_MS) move_finish(loc, "still, not idle");
+        else if (still >= MOVE_STILL_MS) {
+            move_finish(loc, "still, not idle");
+            stall_begin();
+        }
     } else if (now - g_move.at >= MOVE_START_MS) {
         logf_("move: %s never moved (action %s)\n", g_move.name,
               action[0] ? action : "none");
