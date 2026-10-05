@@ -1678,7 +1678,9 @@ static CallFamily call_family(const char* o)
         if (name_is(o, "UIInfiltratorMission") || name_is(o, "UIItemCards")) return FAM_SCREENS;
         break;
     case 'M':
-        if (name_is(o, "UIManufacturing") || name_is(o, "UIMedals")) return FAM_BASE;
+        if (name_is(o, "UIManufacturing") || name_is(o, "UIMedals") ||
+            name_is(o, "UIMECInventory") || name_is(o, "UIMECUpgrade"))
+            return FAM_BASE;
         if (name_is(o, "UIMessageMgr_Container")) return FAM_TACTICAL;
         if (name_is(o, "UIMissionControl_") || name_is(o, "UIMissionSummary")) return FAM_SCREENS;
         break;
@@ -1716,6 +1718,110 @@ static CallFamily call_family(const char* o)
         break;
     }
     return FAM_OTHER;
+}
+
+// The MEC inventory and the build / upgrade grid as they last drew. See the
+// handlers in base_call.
+static struct {
+    void*     obj;            // the UIMECInventory, whose widget helper is claimed
+    int       fresh;          // nothing said yet on this visit
+    int       build_off;      // the BUILD NEW MEC button is disabled
+    char      title[64], sub[64], build[64], build_cost[192];
+    char      name[128], cost[256], perk[3][512], soldier[96], status[48];
+    char      said[1536];     // the item last said, without the arrival's lead
+    ULONGLONG said_at;
+} g_mec;
+
+static struct {
+    int  fresh;
+    char title[64], sub[96], cost[192];
+    char col[3][96];
+    int  state[3];            // AS_SetColumnData's highlight state, -1 unknown
+    int  has[3][2];           // the MEC already has that system
+    int  sel_col, sel_row, said_col;
+} g_mecup;
+
+// What a MEC costs, as said: "BUILD COST: 25 credits, 40 Meld". The Meld is
+// an icon and a bare number (UIMECInventory.GetCosts joins each cost's value
+// and label; the Meld's label is the <img>), so a bare number after the
+// first sum is the Meld. Red sums come out "(not enough)" (hq_cost_text).
+static void mec_cost(const char* raw, char* out, size_t out_sz)
+{
+    char c[256];
+    hq_cost_text(raw, c, sizeof c);
+    size_t w = 0;
+    out[0] = 0;
+    int piece = 0;
+    for (const char* r = c; *r && w + 8 < out_sz;) {
+        int start = r == c || (r >= c + 2 && r[-1] == ' ' && r[-2] == ',');
+        if (start && piece++ > 0 && *r >= '0' && *r <= '9') {
+            const char* d = r;
+            while (*d >= '0' && *d <= '9') d++;
+            if (!*d || *d == ',' || strncmp(d, " (not enough)", 13) == 0) {
+                while (r < d && w + 8 < out_sz) out[w++] = *r++;
+                w += (size_t)_snprintf_s(out + w, out_sz - w, _TRUNCATE, " Meld");
+                continue;
+            }
+        }
+        out[w++] = *r++;
+    }
+    out[w] = 0;
+}
+
+// Where the MEC inventory's cursor is, from its UIWidgetHelper: the widget
+// (0 the BUILD NEW MEC button, 1 the list), the list's row and how many
+// MECs it has. The panel cannot say it: on the empty list it draws the
+// button's (UpdateInfoPanelData takes iCurrentSelection -1, plus 1).
+static FieldSlot g_mec_helper, g_mec_cur, g_mec_widgets, g_mec_sel, g_mec_labels;
+static int mec_where(void* screen, int* widget, int* row, int* count)
+{
+    const void* v;
+    *widget = *row = -1;
+    *count = 0;
+    if (!screen || !unit_is_live(screen) ||
+        !field_ptr(screen, "m_hWidgetHelper", &g_mec_helper, sizeof(void*), &v))
+        return 0;
+    void* helper = *(void* const*)v;
+    if (!helper || !unit_is_live(helper) ||
+        !field_ptr(helper, "m_iCurrentWidget", &g_mec_cur, sizeof(int32_t), &v))
+        return 0;
+    *widget = *(const int32_t*)v;
+    if (!field_ptr(helper, "m_arrWidgets", &g_mec_widgets, 3 * sizeof(int32_t), &v)) return 1;
+    void* const* data = *(void* const* const*)v;
+    int n = ((const int32_t*)v)[1];
+    if (n < 2 || !data || !readable(data, 2 * sizeof(void*))) return 1;
+    void* list = data[1];
+    if (!list || !unit_is_live(list)) return 1;
+    if (field_ptr(list, "iCurrentSelection", &g_mec_sel, sizeof(int32_t), &v))
+        *row = *(const int32_t*)v;
+    if (field_ptr(list, "arrLabels", &g_mec_labels, 3 * sizeof(int32_t), &v))
+        *count = ((const int32_t*)v)[1];
+    return 1;
+}
+
+// A column of the build / upgrade grid in words, from its state.
+static const char* mecup_state_word(int state)
+{
+    switch (state) {
+    case 0:  return "the MEC has this level";
+    case 1:  return "available now";
+    case 2:  return "researched, a later upgrade";
+    case 3:  return "needs research";
+    default: return "";
+    }
+}
+
+// Adds `text` to a readout as a sentence: a space before it, a full stop
+// after unless it already ends in one ("...the first upgrade.." on the
+// 2026-10-05 (11:30) log, where the description brought its own).
+static void mec_sentence(char* out, size_t out_sz, size_t* w, const char* text)
+{
+    if (!text || !*text || *w + 2 >= out_sz) return;
+    size_t len = strlen(text);
+    int stop = !strchr(".!?:", text[len - 1]);
+    *w += (size_t)_snprintf_s(out + *w, out_sz - *w, _TRUNCATE, "%s%s%s", *w ? " " : "",
+                              text, stop ? "." : "");
+    if (*w >= out_sz) *w = out_sz - 1;
 }
 
 // The headquarters' screens: the status panels, Engineering, the
@@ -2779,6 +2885,266 @@ static int base_call(const Call* c)
             if (s_fresh) announce(say);
             else if (g_speak && !muted()) speech_say_now(say);
             s_fresh = 0;
+        }
+        return 1;
+    }
+
+    // The MEC inventory (UIMECInventory, EW: Engineering -> BUILD/UPGRADE
+    // MEC, or GO TO MEC INVENTORY on the augmentation alert). The 2026-10-05
+    // log: the screen said nothing but the widget helper's button label,
+    // "Unset Widget Name" (the screen never sets it; the button's text goes
+    // to AS_SetBuildButtonHelp), and with no MEC built Down went to the
+    // empty list and back without a word, so Enter was never tried.
+    // The screen is a UIWidgetHelper with two widgets: 0 the BUILD NEW MEC
+    // button, 1 the list of MECs. Up and Down move through them natively,
+    // and every move ends in UpdateWidgetSelection -> UpdateInfoPanelData:
+    //     AS_UpdateInfo(name, cost or strCantUpgradeReason, perk 0, 1, 2) --
+    //         for the button, its description in place of the cost
+    //     AS_SetBuildInfo(""), AS_SetSoldier(name, EQUIPPED / UNEQUIPPED)
+    //     AS_SetConfirmButtonHelp(REPAIR MEC / BUILD MEC / UPGRADE MEC / "")
+    // often twice for one key (OnUnrealCommand and the list's
+    // OnSelectionChanged both run it). It is said at the confirm label, the
+    // last call, unless that is what was said a moment ago. Enter on the
+    // button builds (OnBuildNewMec -> XGCyberneticsUI.OnMECInventoryAccept(0),
+    // the bad sound when it cannot be afforded); on a MEC, upgrades or
+    // repairs it. Log: `MEC w, r of n`.
+    if (strncmp(obj_name, "UIWidgetHelper", 14) == 0 && g_mec.obj) {
+        static FieldSlot owner_slot;
+        const void* v;
+        if (field_ptr(object, "Owner", &owner_slot, sizeof(void*), &v) &&
+            *(void* const*)v == g_mec.obj) {
+            // Only the button's state is wanted from it: EnableButton /
+            // DisableButton(0) as UpdateData draws (tMEC.iState).
+            if (p->nnumbers && (int)p->numbers[0] == 0) {
+                if (strcmp(fn_name, "EnableButton") == 0) g_mec.build_off = 0;
+                else if (strcmp(fn_name, "DisableButton") == 0) g_mec.build_off = 1;
+            }
+            return 1;
+        }
+    }
+    if (strncmp(obj_name, "UIMECInventory", 14) == 0) {
+        if (object != g_mec.obj) {
+            memset(&g_mec, 0, sizeof g_mec);
+            g_mec.obj = object;
+        }
+        if (strcmp(fn_name, "AS_SetTitle") == 0) {
+            frame_string(node, locals, 0, g_mec.title, sizeof g_mec.title);
+            g_mec.fresh = 1;
+        } else if (strcmp(fn_name, "AS_SetSubTitle") == 0) {
+            frame_string(node, locals, 0, g_mec.sub, sizeof g_mec.sub);
+        } else if (strcmp(fn_name, "AS_SetBuildButtonHelp") == 0) {
+            static char raw[FRAME_ARG_TEXT];
+            frame_string(node, locals, 0, g_mec.build, sizeof g_mec.build);
+            if (!frame_local_raw(node, locals, "sCost", raw, sizeof raw))
+                frame_string(node, locals, 1, raw, sizeof raw);
+            mec_cost(raw, g_mec.build_cost, sizeof g_mec.build_cost);
+            logf_("[%ld] MEC build \"%s\" cost raw \"%.200s\" -> \"%s\"\n", n, g_mec.build, raw,
+                  g_mec.build_cost);
+        } else if (strcmp(fn_name, "AS_UpdateInfo") == 0) {
+            static FrameArgs a;
+            static char raw[FRAME_ARG_TEXT];
+            frame_args(node, locals, &a);
+            strcpy_s(g_mec.name, sizeof g_mec.name, a.ns > 0 ? a.s[0] : "");
+            // A sum, or words: the button's description, or the red
+            // strCantUpgradeReason, which hq_cost_text would follow with
+            // "(not enough)" as if it were a sum ("Cannot upgrade: missing
+            // research (not enough)", the 2026-10-05 (11:30) log).
+            if (!frame_local_raw(node, locals, "Cost", raw, sizeof raw))
+                strcpy_s(raw, sizeof raw, a.ns > 1 ? a.s[1] : "");
+            if (strstr(raw, "\xC2\xA7")) mec_cost(raw, g_mec.cost, sizeof g_mec.cost);
+            else strcpy_s(g_mec.cost, sizeof g_mec.cost, a.ns > 1 ? a.s[1] : "");
+            for (int i = 0; i < 3; i++)
+                strcpy_s(g_mec.perk[i], sizeof g_mec.perk[i], a.ns > 2 + i ? a.s[2 + i] : "");
+            g_mec.soldier[0] = g_mec.status[0] = 0;
+        } else if (strcmp(fn_name, "AS_SetSoldier") == 0) {
+            frame_string(node, locals, 0, g_mec.soldier, sizeof g_mec.soldier);
+            frame_string(node, locals, 1, g_mec.status, sizeof g_mec.status);
+        } else if (strcmp(fn_name, "AS_SetConfirmButtonHelp") == 0 && g_mec.name[0]) {
+            // OnInit's own "CONFIRM" comes before any panel and is passed by.
+            char confirm[64];
+            frame_string(node, locals, 0, confirm, sizeof confirm);
+            int widget, row, count;
+            mec_where(object, &widget, &row, &count);
+            char item[1536] = "";
+            if (widget == 1 && count == 0) {
+                strcpy_s(item, sizeof item, "MEC list: no MECs built yet.");
+            } else if (widget == 1) {
+                char who[160] = "";
+                if (g_mec.status[0])
+                    _snprintf_s(who, sizeof who, _TRUNCATE, " %s%s%s.", g_mec.status,
+                                g_mec.soldier[0] ? ", " : "", g_mec.soldier);
+                size_t w = 0;
+                char line[640];
+                _snprintf_s(line, sizeof line, _TRUNCATE, "%s, MEC %d of %d", g_mec.name, row + 1,
+                            count);
+                mec_sentence(item, sizeof item, &w, line);
+                mec_sentence(item, sizeof item, &w, who);
+                // A perk per tech level, "NAME||description||icon label"
+                // (the 2026-10-05 (11:30) log): the name and description.
+                for (int i = 0; i < 3; i++) {
+                    if (!g_mec.perk[i][0]) continue;
+                    char part[512];
+                    strcpy_s(part, sizeof part, g_mec.perk[i]);
+                    char* desc = strstr(part, "||");
+                    if (desc) {
+                        *desc = 0;
+                        desc += 2;
+                        char* icon = strstr(desc, "||");
+                        if (icon) *icon = 0;
+                    }
+                    _snprintf_s(line, sizeof line, _TRUNCATE, "Level %d: %s", i + 1, part);
+                    mec_sentence(item, sizeof item, &w, line);
+                    if (desc) mec_sentence(item, sizeof item, &w, desc);
+                }
+                mec_sentence(item, sizeof item, &w, g_mec.cost);
+                if (confirm[0]) {
+                    _snprintf_s(line, sizeof line, _TRUNCATE, "Enter: %s", confirm);
+                    mec_sentence(item, sizeof item, &w, line);
+                } else if (!g_mec.cost[0]) {
+                    mec_sentence(item, sizeof item, &w, "Cannot be upgraded now");
+                }
+            } else {
+                size_t w = 0;
+                char line[128];
+                _snprintf_s(line, sizeof line, _TRUNCATE, "%s%s",
+                            g_mec.build[0] ? g_mec.build : g_mec.name,
+                            g_mec.build_off ? ", unavailable" : "");
+                mec_sentence(item, sizeof item, &w, line);
+                mec_sentence(item, sizeof item, &w, g_mec.build_cost);
+                mec_sentence(item, sizeof item, &w, g_mec.cost);
+                _snprintf_s(line, sizeof line, _TRUNCATE, "Enter: %s", confirm[0] ? confirm : "build");
+                mec_sentence(item, sizeof item, &w, line);
+            }
+            static char say[2048];
+            if (g_mec.fresh) {
+                char mecs[48];
+                if (count > 0) _snprintf_s(mecs, sizeof mecs, _TRUNCATE, "%d MEC%s. ", count,
+                                           count == 1 ? "" : "s");
+                else strcpy_s(mecs, sizeof mecs, "No MECs yet. ");
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s. %sUp and Down choose. %s",
+                            g_mec.title, g_mec.sub[0] ? ", " : "", g_mec.sub, mecs, item);
+            } else {
+                strcpy_s(say, sizeof say, item);
+            }
+            ULONGLONG now = GetTickCount64();
+            // The arrival is drawn twice in a row: the same item 5 ms
+            // apart on the 2026-10-05 (11:30) log.
+            if (!g_mec.fresh && strcmp(item, g_mec.said) == 0 && now - g_mec.said_at < 700)
+                return 1;
+            logf_("[%ld] %s %s.%s  MEC %d, %d of %d%s \"%s\"\n", n, tag, obj_name, fn_name,
+                  widget, row, count, g_mec.fresh ? " (arrival)" : "", say);
+            speech_cancel_pending();
+            if (g_mec.fresh) announce(say);
+            else if (g_speak && !muted()) speech_say_now(say);
+            strcpy_s(g_mec.said, sizeof g_mec.said, item);
+            g_mec.said_at = now;
+            g_mec.fresh = 0;
+        }
+        return 1;
+    }
+
+    // Building or upgrading a MEC (UIMECUpgrade, EW), from Enter on the
+    // inventory. A grid: three columns, the MEC's tech levels, of two
+    // tactical systems each. UpdateData draws, for each column,
+    //     AS_SetAbilityIcon(col, row, icon, highlighted: the MEC has it)
+    //     AS_SetColumnData(col, armor name or LOCKED, state)
+    // state 0 a level the MEC already has, 1 the one it can take now, 2 a
+    // later one already researched, 3 one not researched; then
+    //     AS_SetCost("COST: §.. <meld>..")
+    // and RealizeSelected only when there is no mouse. With one, nothing
+    // says where the cursor is (m_iCurrentMec 0, m_iCurrentAbility 1 by
+    // default), and on an upgrade Enter only plays the bad sound until the
+    // cursor is on the next level (OnAccept). So on arrival the cursor is put
+    // on the column the MEC can take (written into m_iCurrentMec, as
+    // slots_select does). Up and Down change the column, Left and Right the
+    // system; each runs RealizeSelected:
+    //     AS_SetSelectedIcon(col, row), AS_SetAbilityInfo(name, description)
+    // Enter on the level the MEC can take raises CONFIRM ABILITY (the
+    // dialog path says it), and the system under the cursor is the one
+    // built. Log: `MECUP c, r`.
+    if (strncmp(obj_name, "UIMECUpgrade", 12) == 0) {
+        if (strcmp(fn_name, "AS_SetLabels") == 0) {
+            memset(&g_mecup, 0, sizeof g_mecup);
+            for (int i = 0; i < 3; i++) g_mecup.state[i] = -1;
+            g_mecup.said_col = -1;
+            frame_string(node, locals, 0, g_mecup.title, sizeof g_mecup.title);
+            frame_string(node, locals, 1, g_mecup.sub, sizeof g_mecup.sub);
+            g_mecup.fresh = 1;
+        } else if (strcmp(fn_name, "AS_SetAbilityIcon") == 0 && p->nnumbers >= 2) {
+            int c = (int)p->numbers[0], r = (int)p->numbers[1];
+            if (c >= 0 && c < 3 && r >= 0 && r < 2) g_mecup.has[c][r] = p->nbools && p->bools[0];
+        } else if (strcmp(fn_name, "AS_SetColumnData") == 0 && p->nnumbers >= 2) {
+            int c = (int)p->numbers[0];
+            if (c >= 0 && c < 3) {
+                frame_string(node, locals, 0, g_mecup.col[c], sizeof g_mecup.col[c]);
+                g_mecup.state[c] = (int)p->numbers[1];
+            }
+        } else if (strcmp(fn_name, "AS_SetCost") == 0) {
+            // From the call's raw text, else the payload: frame_string read
+            // the augmentation screen's AS_SetCost empty (2026-09-29).
+            static char raw[FRAME_ARG_TEXT];
+            if (!frame_local_raw(node, locals, "Cost", raw, sizeof raw) || !raw[0])
+                strncpy_s(raw, sizeof raw, p->nstrings ? p->strings[0] : "", _TRUNCATE);
+            mec_cost(raw, g_mecup.cost, sizeof g_mecup.cost);
+            logf_("[%ld] MECUP cost raw \"%.200s\" -> \"%s\"\n", n, raw, g_mecup.cost);
+            if (!g_mecup.fresh) return 1;
+            // The cursor, onto the level the MEC can take.
+            static FieldSlot cur_slot, abil_slot;
+            const void* v;
+            int col = 0, row = 1;
+            if (field_ptr(object, "m_iCurrentMec", &cur_slot, sizeof(int32_t), &v)) {
+                col = *(const int32_t*)v;
+                for (int i = 0; i < 3; i++)
+                    if (g_mecup.state[i] == 1 && col != i) {
+                        if (writable(v, sizeof(int32_t))) *(int32_t*)v = i;
+                        col = i;
+                        break;
+                    }
+            }
+            if (field_ptr(object, "m_iCurrentAbility", &abil_slot, sizeof(int32_t), &v))
+                row = *(const int32_t*)v;
+            if (col < 0 || col > 2) col = 0;
+            g_mecup.sel_col = col;
+            g_mecup.sel_row = row;
+            g_mecup.said_col = col;
+            char levels[640] = "";
+            size_t w = 0;
+            for (int i = 0; i < 3; i++)
+                w += (size_t)_snprintf_s(levels + w, sizeof levels - w, _TRUNCATE,
+                                         " Level %d, %s, %s.", i + 1, g_mecup.col[i],
+                                         mecup_state_word(g_mecup.state[i]));
+            static char say[2048];
+            _snprintf_s(say, sizeof say, _TRUNCATE,
+                        "%s. %s. %s.%s On level %d. Up and Down choose the level, Left and "
+                        "Right the tactical system, Enter chooses it.",
+                        g_mecup.title, g_mecup.sub, g_mecup.cost, levels, col + 1);
+            logf_("[%ld] %s %s.%s  MECUP arrival %d, %d \"%s\"\n", n, tag, obj_name, fn_name,
+                  col, row, say);
+            speech_cancel_pending();
+            announce(say);
+            g_mecup.fresh = 0;
+        } else if (strcmp(fn_name, "AS_SetSelectedIcon") == 0 && p->nnumbers >= 2) {
+            g_mecup.sel_col = (int)p->numbers[0];
+            g_mecup.sel_row = (int)p->numbers[1];
+        } else if (strcmp(fn_name, "AS_SetAbilityInfo") == 0) {
+            char name[128], desc[1024];
+            frame_string(node, locals, 0, name, sizeof name);
+            frame_string(node, locals, 1, desc, sizeof desc);
+            int c = g_mecup.sel_col, r = g_mecup.sel_row;
+            if (c < 0 || c > 2) c = 0;
+            if (r < 0 || r > 1) r = 0;
+            char level[192] = "";
+            if (c != g_mecup.said_col)
+                _snprintf_s(level, sizeof level, _TRUNCATE, "Level %d, %s, %s. ", c + 1,
+                            g_mecup.col[c], mecup_state_word(g_mecup.state[c]));
+            static char say[2048];
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s, system %d of 2%s. %s", level, name,
+                        r + 1, g_mecup.has[c][r] ? ", installed" : "", desc);
+            g_mecup.said_col = c;
+            logf_("[%ld] %s %s.%s  MECUP %d, %d \"%s\"\n", n, tag, obj_name, fn_name, c, r,
+                  say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
         }
         return 1;
     }
