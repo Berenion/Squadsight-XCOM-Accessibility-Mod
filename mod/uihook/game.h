@@ -159,6 +159,21 @@ typedef int (__fastcall* FlankedByFn)(void* self, void* edx, void* enemy,
 typedef int (__fastcall* TileUnitBlockFn)(void* self, void* edx, const int* x, const int* y,
                                           const int* z, void* ignore);
 
+// XComWorldData.GetKineticStrikeInfoFromTargetLocation(XComUnitPawnNativeBase
+//     UnitPawn, const out Vector TargetLoc, out KineticStrikeAttackInfo
+//     AttackInfo): what a MEC's kinetic strike aimed at TargetLoc would hit,
+// as XGUnit's firing code asks it. Both `out`s go by pointer.
+typedef struct KineticStrikeInfo {
+    float   dir[3];             // AttackDirection
+    uint8_t cover_type;         // DestroyCoverType: 0 none, 1 standing (high), 2 mid (low)
+    uint8_t pad[3];
+    float   cover_loc[3];       // DestroyCoverLocation
+    void*   unit;               // AttackUnit, an XGUnitNativeBase
+    int32_t unit_dz;            // AttackUnitDeltaZ
+} KineticStrikeInfo;
+typedef void (__fastcall* KineticStrikeFn)(void* self, void* edx, void* pawn,
+                                           const float* target, KineticStrikeInfo* out);
+
 extern int   g_tile_slot_cover, g_tile_slot_smoke, g_tile_slot_poison;
 extern int   g_tile_slot_occupied;      // XComWorldData.IsTileOccupied
 extern int   g_tile_slot_unitblock;     // XComWorldData.IsTileBlockedByUnitFlag
@@ -172,6 +187,7 @@ extern int   g_panel_slot_visible;      // UI_FxsPanel.IsVisible
 extern int   g_cursor_slot_floor;       // XCom3DCursor.WorldZToCursorFloor
 extern int   g_world_slot_seetile;      // XComWorldData.CanSeeActorToTile
 extern int   g_world_slot_vismap;       // XComWorldData.GetVisibilityMapTileIndex
+extern int   g_world_slot_kinetic;      // XComWorldData.GetKineticStrikeInfoFromTargetLocation
 extern int   g_unit_slot_flanking;      // XGUnitNativeBase.IsFlankingCoverPoint
 extern void* g_unit_fn_flanking;        // ...which is final, so not virtual
 extern int   g_volume_slot_encompass;   // Volume.EncompassesPoint

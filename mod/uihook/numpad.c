@@ -82,7 +82,11 @@ static FieldSlot g_aim_action_slot, g_aim_shot_slot, g_aim_type_slot;
 
 static int ability_aims_at_ground(int type)
 {
-    static const int ground[] = { 15, 16, 17, 18, 23, 24, 56, 59, 61, 75, 76, 77, 79 };
+    // 81, the kinetic strike, aims at a direction, not a unit
+    // (DrawKineticStrikeUI picks the target from the cursor's feet), so it
+    // has no Tab cycling to protect. The flamethrower (80) came free already
+    // in the 2026-10-05 (14:44) log; this only matters if 81 does not.
+    static const int ground[] = { 15, 16, 17, 18, 23, 24, 56, 59, 61, 75, 76, 77, 79, 81 };
     for (size_t i = 0; i < sizeof ground / sizeof ground[0]; i++)
         if (ground[i] == type) return 1;
     return 0;
@@ -1539,6 +1543,83 @@ static int destructible_cover(void* a)
     return best;
 }
 
+// The kinetic strike (shot type 81) marks nothing to read back: the
+// targeting tick runs DrawKineticStrikeUI, which asks the native
+// XComWorldData.GetKineticStrikeInfoFromTargetLocation what a strike at the
+// cursor's feet would hit -- the unit next to the MEC that way, or else the
+// cover it would smash -- and only highlights it (UpdateShotTargetLocation,
+// half a tile) when there is something, so an empty aim leaves the last
+// highlight in m_arrMarkedTargets. So the native is asked here, as the
+// game's firing code asks it (XGUnit, the PrimaryTarget of a type 81 shot):
+// "Strikes: Sectoid." / "Strikes high cover." / "Nothing in reach." A unit
+// is named only while the squad sees them, as in a blast.
+static FieldSlot g_ks_collision, g_ks_height;
+static void kinetic_say(void* unit)
+{
+    void* world = cursor_world();
+    void* pawn = unit_pawn(unit);
+    KineticStrikeFn strike = world ? (KineticStrikeFn)tile_vfn(world, g_world_slot_kinetic) : NULL;
+    float feet[3];
+    if (!strike || !pawn || !unit_is_live(pawn) || !cursor_position(&feet[0], &feet[1], &feet[2])) {
+        logf_("blast: kinetic strike, %s -- not said\n",
+              !strike ? "no slot for GetKineticStrikeInfoFromTargetLocation" :
+              !pawn ? "no pawn" : "no cursor");
+        return;
+    }
+    // GetCursorFeetLocation: the cursor's Location less its cylinder's
+    // CollisionHeight.
+    const void* v;
+    void* cyl = NULL;
+    if (field_ptr(cursor_object(), "CollisionComponent", &g_ks_collision, sizeof(void*), &v))
+        cyl = *(void* const*)v;
+    if (cyl && field_ptr(cyl, "CollisionHeight", &g_ks_height, sizeof(float), &v))
+        feet[2] -= *(const float*)v;
+
+    struct { KineticStrikeInfo k; uint8_t spare[32]; } info;   // room past it, in case
+    memset(&info, 0, sizeof info);
+    strike(world, NULL, pawn, feet, &info.k);
+
+    char say[160] = "", who[64] = "";
+    int seen = 0, friendly = 0;
+    void* hit = info.k.unit;
+    if (hit && unit_is_live(hit)) {
+        void* squad = squad_player();
+        static SquadSight sight;
+        squad_sight_take(squad, &sight);
+        UnitName* u = unit_by_unit(hit);
+        UnitSeen s;
+        if (u && unit_seen(u, squad, &s)) {
+            friendly = s.friendly;
+            seen = squad_sees(&sight, s.unit, s.loc, s.friendly, s.who->name);
+            strcpy_s(who, sizeof who, s.who->name);
+        } else {
+            static FlaglessUnit found[COLUMN_FLAGLESS];
+            int nf = squad ? flagless_units(0, found, COLUMN_FLAGLESS) : 0;
+            for (int i = 0; i < nf; i++)
+                if (found[i].unit == hit) {
+                    seen = squad_sees(&sight, found[i].unit, found[i].loc, 0, found[i].name);
+                    strcpy_s(who, sizeof who, found[i].name);
+                }
+        }
+    }
+    if (seen && who[0])
+        _snprintf_s(say, sizeof say, _TRUNCATE,
+                    friendly ? "Strikes squadmate %s." : "Strikes: %s.", who);
+    else if (info.k.cover_type == 1)
+        strcpy_s(say, sizeof say, "Strikes high cover.");
+    else if (info.k.cover_type == 2)
+        strcpy_s(say, sizeof say, "Strikes low cover.");
+    else
+        strcpy_s(say, sizeof say, "Nothing in reach.");
+    logf_("blast: kinetic strike at %.0f, %.0f, %.0f -> unit %p (%s, %s), cover type %d at "
+          "%.0f, %.0f, %.0f, direction %.2f, %.2f -> \"%s\"\n",
+          feet[0], feet[1], feet[2], hit, who[0] ? who : "-",
+          !hit ? "none" : seen ? "seen" : "not seen", info.k.cover_type,
+          info.k.cover_loc[0], info.k.cover_loc[1], info.k.cover_loc[2],
+          info.k.dir[0], info.k.dir[1], say);
+    if (g_speak) speech_say(say);
+}
+
 static void blast_say(void)
 {
     void* unit = soldier_unit();
@@ -1549,9 +1630,25 @@ static void blast_say(void)
     if (!action || !unit_is_live(action) || !object_name(action, name, sizeof name) ||
         strncmp(name, "XGAction_Targeting", 18) != 0)
         return;
+    int type = -1;
+    {
+        void* shot = aim_shot();
+        if (shot && field_ptr(shot, "iType", &g_aim_type_slot, sizeof(int), &v))
+            type = *(const int*)v;
+    }
+    if (type == 81) { kinetic_say(unit); return; }
     if (!field_ptr(action, "m_fSplashRadiusCache", &g_splash_slot, sizeof(float), &v)) return;
     float radius = *(const float*)v;
-    if (!(radius > 0.0f)) return;                 // not an area attack
+    // The flamethrower (shot type 80) has no radius: the targeting tick runs
+    // DrawFlameThrowerUI instead of DrawSplashRadius, which has
+    // XComWorldData.DrawFlameThrowerUI fill the cone's units and hands them
+    // to the same MarkTargetedActors, without UpdateShotTargetLocation -- so
+    // m_fSplashRadiusCache stays at Init's -1. The 2026-10-05 (14:44) log
+    // aimed it across seven steps and the list never ran. Its marked list is
+    // read all the same, and said as flames rather than a blast.
+    int cone = type == 80;
+    if (!cone && !(radius > 0.0f)) return;        // not an area attack
+    const char* area = cone ? "the flames" : "the blast";
     if (!field_ptr(action, "m_arrMarkedTargets", &g_marked_slot, sizeof(FArray), &v)) return;
     const FArray* arr = (const FArray*)v;
     int num = arr->Num;
@@ -1666,15 +1763,15 @@ static void blast_say(void)
     if (tthem) {
         tile_names_counted(them, nthem, tthem, text, sizeof text);
         used += (size_t)_snprintf_s(say + used, sizeof say - used, _TRUNCATE,
-                                    "In the blast: %s.", text);
+                                    "In %s: %s.", area, text);
     }
     if (tours && used < sizeof say) {
         tile_names_counted(ours, nours, tours, text, sizeof text);
         used += (size_t)_snprintf_s(say + used, sizeof say - used, _TRUNCATE,
-                                    "%sSquad in the blast: %s.", used ? " " : "", text);
+                                    "%sSquad in %s: %s.", used ? " " : "", area, text);
     }
     if (!tthem && !tours) {
-        strcpy_s(say, sizeof say, "No one in the blast.");
+        _snprintf_s(say, sizeof say, _TRUNCATE, "No one in %s.", area);
         used = strlen(say);
     }
     static const char* heads[3] = { "Explodes", "High cover", "Low cover" };
@@ -1687,9 +1784,9 @@ static void blast_say(void)
     if (others && used < sizeof say)
         _snprintf_s(say + used, sizeof say - used, _TRUNCATE, " %d other object%s.", others,
                     others == 1 ? "" : "s");
-    logf_("blast: radius %.0f, %d marked, %d of them, %d of ours, %d explode, %d high cover, "
+    logf_("blast: %s, radius %.0f, %d marked, %d of them, %d of ours, %d explode, %d high cover, "
           "%d low cover, %d other objects (%d on a wall), %d wrecked -> \"%s\"  [%s]\n",
-          radius, num, tthem, tours, total[0], total[1], total[2], others, dressing, wrecked,
+          cone ? "flamethrower cone" : "splash", radius, num, tthem, tours, total[0], total[1], total[2], others, dressing, wrecked,
           say, meshes);
     if (g_speak) speech_say(say);
 }

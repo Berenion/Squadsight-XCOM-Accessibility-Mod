@@ -7055,6 +7055,8 @@ static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
                                               &g_tile_slot_standable, NULL },
         { "XComWorldDataexecCanSeeActorToTile",      &g_world_slot_seetile, NULL },
         { "XComWorldDataexecGetVisibilityMapTileIndex", &g_world_slot_vismap, NULL },
+        { "XComWorldDataexecGetKineticStrikeInfoFromTargetLocation",
+                                              &g_world_slot_kinetic, NULL },
         { "XGUnitNativeBaseexecIsFlankingCoverPoint", &g_unit_slot_flanking,
                                               &g_unit_fn_flanking },
         { "XGUnitNativeBaseexecIsPointWithinFiringRange", &g_unit_slot_range, NULL },
