@@ -309,6 +309,12 @@ void hq_sat_continent(const char* name, const char* body);
 // which: 0 the launch button (Enter), 1 accuse.
 void hq_sat_button(int which, const char* label, int enabled);
 void hq_sat_count(int available, int in_orbit, int max);
+// Covert ops: a country the intel has ruled out as the EXALT base, as the map
+// marks it (UISituationRoom.AS_SetCountryInfoInfiltrator's bClearedByClues,
+// from XGEXALT.IsCountryRuledOutByCurrentClues). Kept by the map's index;
+// hq_sat_select names the country the next hq_sat_say is for.
+void hq_sat_cleared(int index, int cleared);
+void hq_sat_select(int index);
 // Covert ops: the intel scan beside the map (UISituationRoom.AS_SetIntel,
 // InfiltratorState.UpdateHUD): its cost and button, or why there is none --
 // "Insufficient cash to sweep", "Global intel up to date". Said when it

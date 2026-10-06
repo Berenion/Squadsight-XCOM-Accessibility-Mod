@@ -2860,6 +2860,18 @@ int main(void)
                               "Enter: COVERT OPERATION. 1: ATTEMPT RAID ON EXALT HQ. "
                               "2: Intel Scan, Cost: \xC2\xA7" "50") == 0,
                   "the keys for launch, raid and scan");
+            // The 2026-10-06 (20:33) log: South Africa ruled out by the clues.
+            hq_sat_cleared(6, 1);
+            hq_sat_select(6);
+            hq_sat_country("SOUTH AFRICA", "Unknown cell presence", 1);
+            hq_sat_button(0, "", 0);
+            hq_sat_button(1, "", 0);
+            check(hq_sat_say(say, sizeof say) &&
+                  strcmp(say, "SOUTH AFRICA, panic 1 of 5. Unknown cell presence. "
+                              "Cleared by intel") == 0,
+                  "a country the intel ruled out");
+            hq_sat_cleared(6, 0);
+            hq_sat_select(-1);
             hq_sat_reset();
         }
 

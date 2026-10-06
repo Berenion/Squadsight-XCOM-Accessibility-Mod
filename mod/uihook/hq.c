@@ -761,6 +761,22 @@ void hq_sat_count(int available, int in_orbit, int max)
     g_sat.max = max;
 }
 
+// Outside g_sat: hq_sat_reset runs when the map's selection is left, and the
+// flags are drawn only when covert ops opens or its selection moves.
+#define SAT_COUNTRIES 32
+static unsigned char g_sat_cleared[SAT_COUNTRIES];
+static int g_sat_index = -1;
+
+void hq_sat_cleared(int index, int cleared)
+{
+    if (index >= 0 && index < SAT_COUNTRIES) g_sat_cleared[index] = (unsigned char)(cleared != 0);
+}
+
+void hq_sat_select(int index)
+{
+    g_sat_index = index;
+}
+
 void hq_sat_reset(void)
 {
     memset(&g_sat, 0, sizeof g_sat);
@@ -799,6 +815,13 @@ int hq_sat_say(char* out, size_t out_sz)
         strncpy_s(part, sizeof part, g_sat.country, _TRUNCATE);
     sat_put(out, out_sz, &w, part);
     sat_put(out, out_sz, &w, g_sat.body);
+    // The map greys a country the clues rule out, but nothing on the HUD
+    // says so: UISituationRoom.UpdateHUD hides the accuse button unless it is
+    // enabled, so its "Cleared by Intel" label is never drawn. The 2026-10-06
+    // (20:33) log, after "The EXALT base is not in North America": the United
+    // States and South Africa read "Unknown cell presence" and no more.
+    if (g_sat_index >= 0 && g_sat_index < SAT_COUNTRIES && g_sat_cleared[g_sat_index])
+        sat_put(out, out_sz, &w, "Cleared by intel");
     if (g_sat.button_on[0]) {
         _snprintf_s(part, sizeof part, _TRUNCATE, "Enter: %s", g_sat.button[0]);
         sat_put(out, out_sz, &w, part);

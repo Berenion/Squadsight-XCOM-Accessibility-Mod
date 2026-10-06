@@ -3570,6 +3570,7 @@ static int base_call(const Call* c)
                 return 1;
             }
             static char say[2 * HQ_SIT_TEXT];
+            hq_sat_select(idx);
             if (!hq_sat_say(say, sizeof say)) {
                 logf_("[%ld] %s %s.%s  MAP %d, no country drawn\n", n, tag, obj_name, fn_name,
                       idx);
@@ -3591,9 +3592,22 @@ static int base_call(const Call* c)
          obj_name[16] >= '0' && obj_name[16] <= '9') ||
         strncmp(obj_name, "UIObjectivesScreen_", 19) == 0) {
         g_sitroom_at = GetTickCount64();
-        if (strcmp(fn_name, "AS_SetCountryInfo") == 0 && p->nnumbers >= 2) {
+        if (strcmp(fn_name, "AS_SetCountryInfoInfiltrator") == 0 && p->nnumbers >= 1) {
+            // (iIndex, name, panic, bIsActive, bHasCell, cellState,
+            // bClearedByClues, bShowExaltBase): the third bool. Kept for the
+            // country readout (hq_sat_say); the slot table still files it.
             static FrameArgs a;
             frame_args(node, locals, &a);
+            int cleared = a.nb > 2 && a.b[2];
+            hq_sat_cleared((int)p->numbers[0], cleared);
+            if (cleared)
+                logf_("[%ld] %s %s.%s  COUNTRY %d \"%s\" cleared by intel\n", n, tag, obj_name,
+                      fn_name, (int)p->numbers[0], a.ns > 0 ? a.s[0] : "");
+        } else if (strcmp(fn_name, "AS_SetCountryInfo") == 0 && p->nnumbers >= 2) {
+            static FrameArgs a;
+            frame_args(node, locals, &a);
+            // The satellite view: no country is cleared there.
+            hq_sat_cleared((int)p->numbers[0], 0);
             hq_sit_country((int)p->numbers[0], a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
                            (int)p->numbers[1], a.nb > 0 ? a.b[0] : 1);
         } else if (strcmp(fn_name, "AS_SetTickerText") == 0) {
