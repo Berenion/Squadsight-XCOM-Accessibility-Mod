@@ -64,11 +64,64 @@
 // How far the scan reaches, in whole tiles: everything the range can hear.
 #define WALL_TILES ((int)SONAR_RANGE)
 
+// The mission area. The tile grid is the level volume's bounding box, but the
+// volume itself -- the red border -- is a shape inside it, and the scenery
+// beyond the border has walls and cover like any other: asked for, they
+// sounded past the edge of the map. The game's own rule for where the cursor
+// may go is the volume: UXComWorldData::GetClosestValidCursorPosition (vtable
+// +0x154 on EW) returns a point unchanged when AVolume::Encompasses(point,
+// zero extent) holds for it, and otherwise searches the tiles out to 8 rings
+// for the nearest centre that it does hold for. So a tile is in the area when
+// its centre is in XComWorldData.Volume, asked the same way.
+static FieldSlot g_wd_volume;
+
+typedef struct {
+    EncompassFn inside;
+    void*       volume;
+    float       z;
+} WallArea;
+
+// 0 when the area cannot be asked, or when the tile listened from is not in
+// it at this height -- the volume is a solid, and a floor read wrong would
+// otherwise silence every wall there is. Then nothing is filtered.
+static int wall_area(void* world, const CursorGrid* g, int tx, int ty, float z, WallArea* a)
+{
+    static int logged;
+    const void* v;
+    a->inside = (EncompassFn)g_volume_fn_encompass;
+    a->volume = field_ptr(world, "Volume", &g_wd_volume, sizeof(void*), &v)
+        ? *(void* const*)v : NULL;
+    a->z = z;
+    if (!a->inside || !a->volume || !readable(a->volume, 0x40)) {
+        if (logged != 1) { logged = 1; logf_("walls: no mission area to ask\n"); }
+        return 0;
+    }
+    if (!a->inside(a->volume, NULL, grid_centre_x(g, tx), grid_centre_y(g, ty), z,
+                   0.0f, 0.0f, 0.0f)) {
+        if (logged != 2) {
+            logged = 2;
+            logf_("walls: %d, %d z %.1f is not in the mission area -- not filtered\n",
+                  tx, ty, z);
+        }
+        return 0;
+    }
+    if (logged != 3) { logged = 3; logf_("walls: mission area %p filters the field\n", a->volume); }
+    return 1;
+}
+
+static int wall_in_area(const WallArea* a, const CursorGrid* g, int x, int y)
+{
+    if (x < 0 || y < 0 || x >= g->num_x || y >= g->num_y) return 0;
+    return a->inside(a->volume, NULL, grid_centre_x(g, x), grid_centre_y(g, y), a->z,
+                     0.0f, 0.0f, 0.0f) != 0;
+}
+
 static int walls_scan(const CursorGrid* g, int tx, int ty, float floor,
-                      SonarField* out)
+                      SonarField* out, int* dropped)
 {
     void* world = cursor_world();
     sonar_field_clear(out);
+    *dropped = 0;
     if (!world) return 0;
     TileCoverFn cover = (TileCoverFn)tile_vfn(world, g_tile_slot_cover);
     if (!cover) return 0;
@@ -77,14 +130,28 @@ static int walls_scan(const CursorGrid* g, int tx, int ty, float floor,
     float z = floor + 4.0f;
     int tz = grid_layer(g, z);
 
+    WallArea area;
+    int filter = wall_area(world, g, tx, ty, z, &area);
+    // Which tiles in range are in the area, asked once each: a face between
+    // two tiles needs both answers.
+    static unsigned char in[2 * WALL_TILES + 2][2 * WALL_TILES + 2];
+    if (filter)
+        for (int dy = -WALL_TILES; dy <= WALL_TILES + 1; dy++)
+            for (int dx = -WALL_TILES; dx <= WALL_TILES + 1; dx++)
+                in[dy + WALL_TILES][dx + WALL_TILES] =
+                    (unsigned char)wall_in_area(&area, g, tx + dx, ty + dy);
+#define IN_AREA(dx, dy) (!filter || in[(dy) + WALL_TILES][(dx) + WALL_TILES])
+
     for (int dy = -WALL_TILES; dy <= WALL_TILES; dy++) {
         for (int dx = -WALL_TILES; dx <= WALL_TILES; dx++) {
             int x = tx + dx, y = ty + dy;
             if (x < 0 || y < 0 || x >= g->num_x || y >= g->num_y) {
-                // Off the map. The edge stops a soldier as surely as a wall
-                // does, and a player walking towards it should hear it
-                // coming, so the tile that is not there sounds as solid.
-                sonar_block(out, (float)dx, (float)dy);
+                // Off the grid. Without the area this was the only edge
+                // known, and it sounded as solid so that a player walking
+                // towards it heard it coming. With the area known, the grid's
+                // edge lies beyond the border, outside the mission, and is
+                // silent like everything else out there.
+                if (!filter) sonar_block(out, (float)dx, (float)dy);
                 continue;
             }
 
@@ -96,20 +163,33 @@ static int walls_scan(const CursorGrid* g, int tx, int ty, float floor,
             // floor, and is worth less than no answer at all.
             if (cover(world, NULL, wx, wy, z, &cp) && cp.x == x && cp.y == y &&
                 !(cp.flags & TILE_COVER_DIAGONAL)) {
-                if (cp.flags & WALL_N_BIT)
-                    sonar_face(out, SONAR_AXIS_NS, (float)dx, (float)dy + 0.5f);
-                if (cp.flags & WALL_E_BIT)
-                    sonar_face(out, SONAR_AXIS_EW, (float)dx + 0.5f, (float)dy);
+                // A face is in the area when a tile on either side of it is:
+                // the wall the border runs along is still a wall to walk into.
+                if (cp.flags & WALL_N_BIT) {
+                    if (IN_AREA(dx, dy) || IN_AREA(dx, dy + 1))
+                        sonar_face(out, SONAR_AXIS_NS, (float)dx, (float)dy + 0.5f);
+                    else
+                        (*dropped)++;
+                }
+                if (cp.flags & WALL_E_BIT) {
+                    if (IN_AREA(dx, dy) || IN_AREA(dx + 1, dy))
+                        sonar_face(out, SONAR_AXIS_EW, (float)dx + 0.5f, (float)dy);
+                    else
+                        (*dropped)++;
+                }
             }
 
             // A solid tile sounds from where it stands, and has no side to it.
             // The tile being listened from is not one of them -- sonar_block
             // drops one with no bearing -- which is right: what fills the
             // cursor's own tile is not a wall around it.
-            if (occupied && occupied(world, NULL, x, y, tz))
-                sonar_block(out, (float)dx, (float)dy);
+            if (occupied && occupied(world, NULL, x, y, tz)) {
+                if (IN_AREA(dx, dy)) sonar_block(out, (float)dx, (float)dy);
+                else (*dropped)++;
+            }
         }
     }
+#undef IN_AREA
     sonar_field_finish(out);
     return 1;
 }
@@ -211,8 +291,9 @@ void walls_poll(void)
     g_walls_at = now;
 
     Fault flt;
+    int dropped = 0;
     __try {
-        if (!walls_scan(&g, tx, ty, floor, &g_walls_field)) { walls_quiet(); return; }
+        if (!walls_scan(&g, tx, ty, floor, &g_walls_field, &dropped)) { walls_quiet(); return; }
     }
     __except (fault_note(GetExceptionInformation(), &flt)) {
         fault_log("walls: scan", &flt, NULL);
@@ -228,10 +309,10 @@ void walls_poll(void)
     // second and a line for each would bury everything else in the log.
     if (!same && now - g_walls_logged >= WALLS_LOG_MS) {
         g_walls_logged = now;
-        logf_("walls: %d, %d floor %.1f -- W %.2f N %.2f S %.2f E %.2f\n",
+        logf_("walls: %d, %d floor %.1f -- W %.2f N %.2f S %.2f E %.2f, %d outside the area\n",
               tx, ty, floor,
               g_walls_field.level[SONAR_W], g_walls_field.level[SONAR_N],
-              g_walls_field.level[SONAR_S], g_walls_field.level[SONAR_E]);
+              g_walls_field.level[SONAR_S], g_walls_field.level[SONAR_E], dropped);
     }
 }
 
