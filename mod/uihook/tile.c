@@ -381,12 +381,15 @@ void tile_where_text(const TileWhere* before, const TileWhere* now, int force,
     else if (now->storeys == 0 && now->floor > 1)
         _snprintf_s(floor, sizeof floor, _TRUNCATE, "floor %d", now->floor);
 
+    // The building is taller somewhere else than over this tile.
+    const char* above = floor[0] && now->no_above ? " No floor above here." : "";
     if (force || moved_in) {
         const char* what = now->kind == TILE_UFO      ? "Inside the UFO"
                          : now->kind == TILE_DROPSHIP ? "Inside the dropship"
                          :                              "Inside building";
-        _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s.", what, floor[0] ? ", " : "", floor);
+        _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s.%s", what, floor[0] ? ", " : "", floor,
+                    above);
     } else if (floor[0]) {
-        _snprintf_s(out, out_sz, _TRUNCATE, "F%s.", floor + 1);
+        _snprintf_s(out, out_sz, _TRUNCATE, "F%s.%s", floor + 1, above);
     }
 }

@@ -54,6 +54,10 @@ UnitName* unit_by_unit(const void* unit);
 // its number, "Sectoid 2".
 void unit_label(const UnitName* u, char* out, size_t out_sz);
 
+// Whether a terror mission's civilian has been saved already (their
+// behaviour's m_eTerrorStatus is eTS_Saved); unit_label then adds ", saved".
+int  civilian_saved(void* unit);
+
 // The label with what the screen shows: "Sectoid, 3 of 4 HP, on overwatch".
 // Overwatch only when `enemy`.
 void unit_label_state(const UnitName* u, void* unit, int enemy,

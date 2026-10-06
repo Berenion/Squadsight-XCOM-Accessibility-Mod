@@ -1915,6 +1915,13 @@ int main(void)
             check(strcmp(say, "Inside building.") == 0, "one storey has no floor number");
             tile_where_text(&f1, &craft, 0, say, sizeof say);
             check(strcmp(say, "Inside the UFO.") == 0, "into another building, a UFO");
+            // A one-storey wing of a three-storey building (2026-10-06).
+            TileWhere wing = { TILE_WHERE_INSIDE, 1, 3, TILE_BUILDING, &shop, 1 };
+            tile_where_text(&out, &wing, 0, say, sizeof say);
+            check(strcmp(say, "Inside building, floor 1 of 3. No floor above here.") == 0,
+                  "a wing with no floor above");
+            tile_where_text(&wing, &f2, 0, say, sizeof say);
+            check(strcmp(say, "Floor 2 of 3.") == 0, "up from the wing");
         }
 
         // The checks below carry `r` on from here, so the exposure is put

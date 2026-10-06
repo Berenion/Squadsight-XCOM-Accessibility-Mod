@@ -233,6 +233,7 @@ typedef struct {
     int              storeys;   // the building's, roof left out; 0 when not known
     TileBuildingKind kind;
     const void*      building;
+    int              no_above;  // the storey above has no floor on this tile
 } TileWhere;
 
 // The words for arriving at `now` from `before`, said on the crossing only:

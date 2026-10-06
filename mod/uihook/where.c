@@ -378,6 +378,33 @@ static int where_storey_near(const void* bv, int num, int tx, int ty, int* nx, i
     return best >= 0;
 }
 
+// Whether `bv`'s storey with floor number `num` has a floor on (tx, ty)
+// itself: where_storey_near, asked of the one tile. 1 yes, 0 no, -1 when the
+// game could not be asked.
+static int where_storey_here(const void* bv, int num, int tx, int ty)
+{
+    WhereProbe p;
+    if (!where_probe_init(&p)) return -1;
+    for (int i = 0; i < g_where_n; i++) {
+        WhereVolume* w = &g_where_vol[i];
+        if (!objects_still(w->v, w->idx, &g_where_cls, 1)) continue;
+        const void* v;
+        if (!field_ptr(w->v, "CachedBuildingVolume", &g_fv_building, sizeof(void*), &v) ||
+            *(void* const*)v != bv)
+            continue;
+        if (!field_ptr(w->v, "FloorNumber", &g_fv_number, sizeof(int32_t), &v) ||
+            *(const int32_t*)v != num)
+            continue;
+        if (where_bool(w->v, "m_bNonEnterableBuildingPiece", 0)) continue;
+        int x0, x1, y0, y1, z0, z1;
+        if (!where_box(&p.g, w, &x0, &x1, &y0, &y1, &z0, &z1)) continue;
+        if (tx < x0 || tx > x1 || ty < y0 || ty > y1) continue;
+        float z;
+        if (where_tile_floor(&p, w, tx, ty, z0, z1, WHERE_LIFT, &z)) return 1;
+    }
+    return 0;
+}
+
 // The 1-based storey `floor_no` is of `bv`: how many of its real storeys are
 // at or below that band, so a stair landing in an empty band is said as the
 // storey under it. 0 when the building has none to count.
@@ -512,10 +539,24 @@ static int where_at(int tx, int ty, float floor, TileWhere* out)
     out->kind = ufo ? TILE_UFO : dropship ? TILE_DROPSHIP : TILE_BUILDING;
     out->building = bv;
 
+    // "Floor 1 of 3" counts the building's storeys, and a building is often
+    // taller in one part than another: the 2026-10-06 (11:31) log said
+    // "Inside building, floor 1 of 3." on 41, 17, a one-storey wing, and F
+    // there found nothing ("nearest on 37, 15") -- reported as floor 1 of 3
+    // with no floor above. So whether the storey above has a floor on this
+    // very tile is asked too, and said when it has not.
+    int above = -1;
+    if (out->state == TILE_WHERE_INSIDE && rank > 0 && out->floor < out->storeys &&
+        bv == g_where_bv) {
+        above = where_storey_here(bv, g_where_bv_nums[out->floor], tx, ty);
+        out->no_above = above == 0;
+    }
+
     logf_("where: %d, %d floor %.1f: %d volume%s, building %p (%d bands, inside %d, "
-          "internal %d, ufo %d, dropship %d), floor number %d, storey %d of %d -> %s\n",
+          "internal %d, ufo %d, dropship %d), floor number %d, storey %d of %d, "
+          "above here %d -> %s\n",
           tx, ty, floor, n, n == 1 ? "" : "s", bv, floors, is_inside, any_internal,
-          ufo, dropship, floor_no, out->floor, out->storeys,
+          ufo, dropship, floor_no, out->floor, out->storeys, above,
           out->state == TILE_WHERE_ROOF ? "roof" : out->state == TILE_WHERE_INSIDE
               ? "inside" : "outside (the building's IsInside is off)");
     return 1;

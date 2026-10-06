@@ -623,12 +623,57 @@ int squad_sees(const SquadSight* v, void* unit, const float* loc,
     return seen_has(&v->enemies, unit);
 }
 
+// Whether a terror mission's civilian has been saved already:
+// XGAIBehavior_Civilian.m_eTerrorStatus is eTS_Saved (1). A saved civilian
+// keeps their flag and walks for the dropship (RunToDropship), and
+// XGAIPlayer_Animal.OnUnitEndMove passes over them -- a soldier moved beside
+// one saves nobody. The 2026-10-06 (11:49) log: Leroy saved the civilian on
+// 36, 20 ("Civilian Saved."), who then stood on 39, 16 on the way out, was
+// said as "Civilian." there, and Robinson's move beside them saved no one --
+// reported as the last civilian not saying saved.
+static FieldSlot g_civ_behavior, g_civ_status;
+
+int civilian_saved(void* unit)
+{
+    const void* v;
+    if (!unit || unit_team(unit) != TEAM_NEUTRAL ||
+        !field_ptr(unit, "m_kBehavior", &g_civ_behavior, sizeof(void*), &v))
+        return 0;
+    void* behavior = *(void* const*)v;
+    int status = -1;
+    if (behavior && unit_is_live(behavior) && object_is_a(behavior, "XGAIBehavior_Civilian") &&
+        field_ptr(behavior, "m_eTerrorStatus", &g_civ_status, 1, &v))
+        status = *(const uint8_t*)v;
+    // Each civilian's status the first time it is asked and on every change,
+    // with the behaviour's class: the readouts ask many times a second.
+    static struct { void* unit; int status; } seen[48];
+    static int nseen;
+    int k = 0;
+    while (k < nseen && seen[k].unit != unit) k++;
+    if (k == nseen || seen[k].status != status) {
+        char cls[64] = "?";
+        if (behavior && unit_is_live(behavior)) object_class_name(behavior, cls, sizeof cls);
+        logf_("units: civilian %p, behaviour %s, terror status %d%s\n", unit, cls, status,
+              status == 1 ? " -- saved, labelled \", saved\"" : "");
+        if (k == nseen && nseen < 48) nseen++;
+        if (k < nseen) { seen[k].unit = unit; seen[k].status = status; }
+    }
+    return status == 1;
+}
+
 void unit_label(const UnitName* u, char* out, size_t out_sz)
 {
     char num[16] = "";
     if (u->number > 0) _snprintf_s(num, sizeof num, _TRUNCATE, " %d", u->number);
     _snprintf_s(out, out_sz, _TRUNCATE, u->nick[0] ? "%s%s, %s" : "%s%s", u->name, num,
                 u->nick);
+    // "Civilian, saved": one the squad has saved, who is no longer to save.
+    const void* v;
+    if (u->flag && field_ptr(u->flag, "m_kUnit", &g_flag_unit, sizeof(void*), &v) &&
+        civilian_saved(*(void* const*)v)) {
+        size_t used = strlen(out);
+        if (used < out_sz) _snprintf_s(out + used, out_sz - used, _TRUNCATE, ", saved");
+    }
 }
 
 // Whether a unit is on overwatch, asked of the game's own native. Only for
@@ -746,7 +791,7 @@ int soldier_aiming(void)
 // strLastName (and nickname), else the unit's behavior says what it is.
 static FieldSlot g_fl_char, g_fl_last, g_fl_nick, g_fl_behavior;
 
-static void flagless_name(void* unit, char* out, size_t out_sz)
+static void flagless_name_base(void* unit, char* out, size_t out_sz)
 {
     const void* v;
     out[0] = 0;
@@ -770,6 +815,18 @@ static void flagless_name(void* unit, char* out, size_t out_sz)
         strcpy_s(out, out_sz, "Survivor");
     else
         strcpy_s(out, out_sz, "Civilian");
+}
+
+// With ", saved" for a terror civilian already saved (civilian_saved). The
+// terror civilians are these, not the table's: they have no flag, so the
+// first build, which added it in unit_label only, never said it -- the
+// 2026-10-06 (12:02) log called the one on 39, 16 "Civilian." throughout.
+static void flagless_name(void* unit, char* out, size_t out_sz)
+{
+    flagless_name_base(unit, out, out_sz);
+    size_t used = strlen(out);
+    if (civilian_saved(unit) && used < out_sz)
+        _snprintf_s(out + used, out_sz - used, _TRUNCATE, ", saved");
 }
 
 int flagless_unit(void* unit, FlaglessUnit* out)
