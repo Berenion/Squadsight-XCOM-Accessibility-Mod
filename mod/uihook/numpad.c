@@ -41,6 +41,7 @@
 #include "scanner.h"
 #include "menus.h"
 #include "move.h"
+#include "objects.h"
 
 // The soldier's m_kCurrAction, which says whether they are aiming.
 static FieldSlot g_nav_curr_action;
@@ -1620,6 +1621,119 @@ static void kinetic_say(void* unit)
     if (g_speak) speech_say(say);
 }
 
+// Whether the grapple can go where it is aimed. XGAction_Targeting's tick
+// runs XGAbility_Grapple.ComputeGrapplePath(m_vTarget) on every update of the
+// aim, which keeps the native ComputeGrapplePath's answer in bIsValid and the
+// destination it worked out (its `out Destination`) in GrapplePoint, and
+// shows it as the cursor's mesh (SetCursorMesh 2 valid, 1 not) and the drawn
+// path; the shot can be fired only while bIsValid holds (the targeting
+// action's own check). The 2026-10-06 (09:36) log aimed the grapple twice,
+// 41, 20 and 28, 37, through 18 steps that said only coordinates and fired
+// neither time. Now each step adds "Can grapple, lands on 28, 40. On the
+// roof." or "Cannot grapple here."
+//
+// With the cover the screen shows there, as a move step says it: an aim step
+// says only its coordinates (nav_aim_landed), and the first build gave the
+// grapple's verdict alone, so a grapple aimed tile by tile -- a move, in
+// effect -- heard nothing of the cover it would end in (reported 2026-10-06).
+// The tile is the landing one when the grapple can go, the aimed one when it
+// cannot; tile_report without the move's reach, which is not this path's.
+// How far the grapple reaches: XGTacticalGameCoreNativeBase.GRAPPLE_DIST, a
+// config int (15 in DefaultGameCore.ini), read off the class default object
+// so it follows an edited ini. The native that applies it
+// (XComPathingPawn::ComputeGrapplePath, vtable +0x54c) was not located in the
+// exe, so whether it counts tiles, and flat or in 3D, is not known: the
+// 2026-10-06 runs had every aim 14 or more rows from the soldier refused
+// (09:43, 09:52) and 3 tiles away accepted (11:31). So "out of range" is said
+// only when the game itself refuses and the aim is past the reach counted in
+// flat tiles; every step logs the distance, so the rule can be checked
+// against what the game accepts. Read once: finding the default object is a
+// walk of the object table (~50 ms), retried at most every 10 s.
+static int grapple_reach(void)
+{
+    static int reach = -1;
+    static ULONGLONG tried;
+    static FieldSlot slot;
+    if (reach >= 0) return reach;
+    ULONGLONG now = GetTickCount64();
+    if (tried && now - tried < 10000) return -1;
+    tried = now;
+    void* core = (void*)objects_named("Default__XGTacticalGameCore");
+    const void* v;
+    if (core && field_ptr(core, "GRAPPLE_DIST", &slot, sizeof(int32_t), &v)) {
+        int r = *(const int32_t*)v;
+        if (r > 0 && r < 1000) reach = r;
+    }
+    logf_("grapple: reach %d (Default__XGTacticalGameCore %p)\n", reach, core);
+    return reach;
+}
+
+static FieldSlot g_grapple_point;
+static void grapple_say(void* shot)
+{
+    const void* prop = object_field_prop(shot, "bIsValid");
+    int valid = 0;
+    if (!prop || !props_read_object_bool(prop, (const uint8_t*)shot, &valid)) {
+        logf_("grapple: bIsValid unreadable\n");
+        return;
+    }
+    char verdict[256], cover[TILE_MAX_TEXT] = "";
+    const void* v;
+    CursorGrid g;
+    int tx, ty;
+    float floor = g_aim_floor;
+    int have_tile = nav_target(&tx, &ty);
+
+    // The distance from the soldier to the aim, flat, in tiles.
+    int sx = -1, sy = -1;
+    float sz, dist = -1.0f;
+    if (have_tile && cursor_grid(&g) && soldier_tile(&g, &sx, &sy, &sz)) {
+        float dx = (float)(tx - sx), dy = (float)(ty - sy);
+        dist = sqrtf(dx * dx + dy * dy);
+    }
+    int reach = grapple_reach();
+    logf_("grapple: aim %d, %d floor %.1f, soldier %d, %d, %.1f tiles, reach %d, valid %d\n",
+          tx, ty, floor, sx, sy, dist, reach, valid);
+
+    if (!valid && reach > 0 && dist > (float)reach) {
+        _snprintf_s(verdict, sizeof verdict, _TRUNCATE,
+                    "Cannot grapple here, out of range: %d tiles, the grapple reaches %d.",
+                    (int)(dist + 0.5f), reach);
+    } else if (!valid) {
+        strcpy_s(verdict, sizeof verdict, "Cannot grapple here.");
+    } else if (field_ptr(shot, "GrapplePoint", &g_grapple_point, 3 * sizeof(float), &v) &&
+               cursor_grid(&g)) {
+        const float* p = (const float*)v;
+        tx = grid_x(&g, p[0]);
+        ty = grid_y(&g, p[1]);
+        have_tile = 1;
+        // GrapplePoint is a position, not certainly the floor: the floor
+        // under it is looked for downwards from there, as the aim's is.
+        floor = aim_floor(&g, tx, ty, p[2]);
+        char where[128] = "";
+        where_is(tx, ty, floor, where, sizeof where);
+        _snprintf_s(verdict, sizeof verdict, _TRUNCATE, "Can grapple, lands on %d, %d.%s%s",
+                    tx, ty, where[0] ? " " : "", where);
+        logf_("grapple: valid, point %.1f, %.1f, %.1f, floor %.1f\n", p[0], p[1], p[2], floor);
+    } else {
+        strcpy_s(verdict, sizeof verdict, "Can grapple.");
+    }
+    if (have_tile) {
+        Fault f;
+        __try {
+            if (!tile_report(tx, ty, floor, 0, 0, cover, sizeof cover)) cover[0] = 0;
+        }
+        __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("grapple: tile report", &f, NULL);
+            cover[0] = 0;
+        }
+    }
+    char say[TILE_MAX_TEXT + 256];
+    _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s", cover, cover[0] ? " " : "", verdict);
+    logf_("grapple: %d, %d floor %.1f -> \"%s\"\n", tx, ty, floor, say);
+    if (g_speak) speech_say(say);
+}
+
 static void blast_say(void)
 {
     void* unit = soldier_unit();
@@ -1631,12 +1745,11 @@ static void blast_say(void)
         strncmp(name, "XGAction_Targeting", 18) != 0)
         return;
     int type = -1;
-    {
-        void* shot = aim_shot();
-        if (shot && field_ptr(shot, "iType", &g_aim_type_slot, sizeof(int), &v))
-            type = *(const int*)v;
-    }
+    void* shot = aim_shot();
+    if (shot && field_ptr(shot, "iType", &g_aim_type_slot, sizeof(int), &v))
+        type = *(const int*)v;
     if (type == 81) { kinetic_say(unit); return; }
+    if (shot && object_is_a(shot, "XGAbility_Grapple")) { grapple_say(shot); return; }
     if (!field_ptr(action, "m_fSplashRadiusCache", &g_splash_slot, sizeof(float), &v)) return;
     float radius = *(const float*)v;
     // The flamethrower (shot type 80) has no radius: the targeting tick runs
