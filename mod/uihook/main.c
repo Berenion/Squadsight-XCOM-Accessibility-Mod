@@ -2707,14 +2707,39 @@ static int base_call(const Call* c)
     //     AS_SetRequirements(meld, cash) -- empty the same way, and last.
     // Enter ticks or unticks the mod; Y opens the confirm dialogue, and Y
     // cannot be pressed in the headquarters, so 1 stands in for it (input.c).
+    //
+    // A mod the soldier already has is shown only by its icon's colour:
+    // UpdateAbilityData sends AS_SetIcon(row, col, image, bgColor, faded) for
+    // all ten before the first RealizeSelected, "yellow" for
+    // AlreadyHasGeneMod, "grey" for locked, "cyan" otherwise -- and
+    // RealizeSelected gives an installed mod an empty button and cost, the
+    // same as a locked one, so it said nothing of being installed. The
+    // colours are kept per cell: an installed mod says "Installed.", and the
+    // arrival (and each soldier change, which redraws the icons) lists them.
     if (strncmp(obj_name, "UISoldierGeneMods", 17) == 0) {
         static char s_title[64], s_rowname[5][48], s_name[96], s_desc[1024], s_button[96];
         static int  s_row = -1, s_col = -1, s_said_row = -1, s_said_col = -1, s_fresh;
         static char s_said_button[96];
+        static char s_image[5][2][48], s_cellname[5][2][96];
+        static int  s_installed[5][2], s_icons_new;
         if (strcmp(fn_name, "AS_InitializeTree") == 0) {
             frame_string(node, locals, 0, s_title, sizeof s_title);
             s_fresh = 1;
             s_said_row = s_said_col = -1;
+            memset(s_cellname, 0, sizeof s_cellname);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetIcon") == 0 && p->nnumbers >= 2) {
+            int r = (int)p->numbers[0], c = (int)p->numbers[1];
+            if (r < 0 || r >= 5 || c < 0 || c >= 2) return 1;
+            char color[32];
+            frame_string(node, locals, 0, s_image[r][c], sizeof s_image[r][c]);
+            frame_string(node, locals, 1, color, sizeof color);
+            s_installed[r][c] = strcmp(color, "yellow") == 0;
+            // The first icon of a redraw: Prev/NextSoldier redraw them all
+            // for the new soldier, whose list is then said again.
+            if (r == 0 && c == 0) s_icons_new = 1;
+            logf_("[%ld] GENEMODS icon %d, %d \"%s\" %s\n", n, r, c, s_image[r][c], color);
             return 1;
         }
         if (strcmp(fn_name, "AS_SetRowData") == 0 && p->nnumbers) {
@@ -2730,6 +2755,11 @@ static int base_call(const Call* c)
         if (strcmp(fn_name, "AS_SetDescription") == 0) {
             frame_string(node, locals, 0, s_name, sizeof s_name);
             frame_string(node, locals, 1, s_desc, sizeof s_desc);
+            // The game's own name for the cell, once it has been selected;
+            // a locked one's is "LOCKED" and not kept.
+            if (s_row >= 0 && s_row < 5 && s_col >= 0 && s_col < 2 &&
+                strcmp(s_image[s_row][s_col], "unknown") != 0)
+                strcpy_s(s_cellname[s_row][s_col], sizeof s_cellname[s_row][s_col], s_name);
             return 1;
         }
         if (strcmp(fn_name, "AS_SetImplantButtonHelp") == 0) {
@@ -2767,17 +2797,54 @@ static int base_call(const Call* c)
                 hire_text(cash, c, sizeof c);
                 _snprintf_s(cost, sizeof cost, _TRUNCATE, " Costs %s Meld, %s.", meld, c);
             }
-            const char* state = strstr(s_button, "REMOVE") ? "Chosen."
+            int here = s_row >= 0 && s_row < 5 && s_col >= 0 && s_col < 2;
+            const char* state = here && s_installed[s_row][s_col] ? "Installed."
+                              : strstr(s_button, "REMOVE") ? "Chosen."
                               : strstr(s_button, "INSUFFICIENT") ? "Not enough resources."
                               : s_button[0] ? "Not chosen." : "";
+            // The installed mods, on arrival and for a new soldier: named by
+            // the game's name when the cell has been selected this visit, by
+            // the icon's image name otherwise (BuildPerk in XComPerkManager:
+            // "SecondaryHeart", "MuscleDensity", ...), turned into the
+            // English name.
+            char installed[512] = "";
+            if (s_fresh || s_icons_new) {
+                static const char* const k_names[][2] = {
+                    { "SecondaryHeart", "Secondary Heart" },
+                    { "Adrenal", "Adrenal Neurosympathy" },
+                    { "NeuralDamping", "Neural Damping" },
+                    { "NeuralFeedback", "Neural Feedback" },
+                    { "ReactivePupils", "Hyper Reactive Pupils" },
+                    { "DepthPerception", "Depth Perception" },
+                    { "BioelectricSkin", "Bioelectric Skin" },
+                    { "MimeticSkin", "Mimetic Skin" },
+                    { "MuscleDensity", "Muscle Fiber Density" },
+                    { "BoneMarrow", "Adaptive Bone Marrow" },
+                };
+                int count = 0;
+                for (int r = 0; r < 5; r++)
+                    for (int c = 0; c < 2; c++) {
+                        if (!s_installed[r][c]) continue;
+                        const char* nm = s_cellname[r][c][0] ? s_cellname[r][c] : s_image[r][c];
+                        if (!s_cellname[r][c][0])
+                            for (int k = 0; k < (int)(sizeof k_names / sizeof k_names[0]); k++)
+                                if (strcmp(s_image[r][c], k_names[k][0]) == 0) nm = k_names[k][1];
+                        size_t len = strlen(installed);
+                        _snprintf_s(installed + len, sizeof installed - len, _TRUNCATE, "%s%s",
+                                    count ? ", " : "Installed: ", nm);
+                        count++;
+                    }
+                strcat_s(installed, sizeof installed, count ? ". " : "No gene mods installed. ");
+                s_icons_new = 0;
+            }
             char say[2048];
-            if (s_row == s_said_row && s_col == s_said_col && !s_fresh) {
+            if (s_row == s_said_row && s_col == s_said_col && !s_fresh && !installed[0]) {
                 // Enter on the same mod: only whether it is now chosen.
                 if (strcmp(s_button, s_said_button) == 0) return 1;
                 strcpy_s(say, sizeof say, state);
             } else {
-                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s, mod %d of 2. %s%s%s%s%s",
-                            s_fresh ? s_title : "", s_fresh && s_title[0] ? ". " : "",
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s%s, mod %d of 2. %s%s%s%s%s",
+                            s_fresh ? s_title : "", s_fresh && s_title[0] ? ". " : "", installed,
                             s_row != s_said_row && s_row >= 0 && s_row < 5 ? s_rowname[s_row] : "",
                             s_row != s_said_row ? ". " : "", s_name, s_col + 1,
                             state, state[0] ? " " : "", s_desc, cost,
