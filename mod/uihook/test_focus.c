@@ -2769,6 +2769,12 @@ int main(void)
         check(strcmp(pr, "LASER RIFLE, BUILT: 2") == 0, "an item with some in stores");
         hq_build_row("<font color='#EE1C25'>ARC THROWER</font>", 0, "BUILT", pr, sizeof pr);
         check(strcmp(pr, "ARC THROWER, unavailable") == 0, "an item that cannot be built now");
+        hq_build_row("<font color='#808080'>IMPROVED MEDIKIT</font>", 0, "", pr, sizeof pr);
+        check(strcmp(pr, "IMPROVED MEDIKIT, completed") == 0, "a Foundry project already done");
+        hq_cost_text("<font color='#67E8ED'>Project Cost:</font> <font color='#EE1C25'>\xC2\xA7" "35</font><br>"
+                     "<font color='#67E8ED'>5 Engineers</font><br>", pr, sizeof pr);
+        check(strcmp(pr, "Project Cost: 35 credits (not enough). 5 Engineers.") == 0,
+              "a Foundry project short of credits");
 
         hq_queue_row("Laser Rifle (2)", "1/2", "3 Days", pr, sizeof pr);
         check(strcmp(pr, "Laser Rifle (2), 1 of 2 done, 3 Days") == 0, "an order in the queue");

@@ -393,6 +393,10 @@ void hq_cost_text(const char* raw, char* out, size_t out_sz);
 // now (iState 1: the cost is not met). The quantity is how many are in
 // storage, under the column heading from AS_SetLabels ("BUILT"). Left out
 // when none. "LASER RIFLE, BUILT: 2", "ARC THROWER, unavailable".
+// The Foundry's rows (UIFoundry.AS_AddOption) come here too: red when the
+// project cannot be afforded, grey when it is done (XGFoundryUI.
+// UpdateTableMenu; Build Items never draws grey, UIBuildItem turns its
+// state 1 red). "IMPROVED MEDIKIT, completed".
 void hq_build_row(const char* raw_label, int quantity, const char* qty_label,
                   char* out, size_t out_sz);
 

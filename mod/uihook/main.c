@@ -3223,9 +3223,20 @@ static int base_call(const Call* c)
     // (AS_UpdateInfo) and the selection as text (AS_SetFocus("3")). Left
     // and right change tab, which runs all of that and then RealizeSelected
     // once more.
-    if (strncmp(obj_name, "UIBuildItem", 11) == 0) {
+    //
+    // The Foundry (UIFoundry) is the same movie (gfxBuildItem) drawn the EU
+    // way: RealizeAvailableProjects sends AS_SetLabels, an AS_AddOption per
+    // project and AS_SetTabState, and RealizeSelected the same
+    // AS_UpdateInfo(techName, infoText, descText, imgPath) and AS_SetFocus.
+    // Left to the general path, the 2026-10-06 (15:27) log said "Project
+    // Cost: §35" with 33 credits in hand and nothing of what was short;
+    // XGFoundryUI.UpdateTableMenu draws a project it cannot afford red and a
+    // completed one grey, and GetFoundryCostSummary each short requirement
+    // red, which only these handlers read.
+    if (strncmp(obj_name, "UIBuildItem", 11) == 0 ||
+        strncmp(obj_name, "UIFoundry", 9) == 0) {
         static char s_qty_label[64];
-        g_builditem_at = GetTickCount64();
+        if (obj_name[2] == 'B') g_builditem_at = GetTickCount64();
         if (strcmp(fn_name, "AS_SetLabels") == 0) {
             static FrameArgs a;
             frame_args(node, locals, &a);
@@ -3266,7 +3277,8 @@ static int base_call(const Call* c)
         }
         // EU sends the rows one at a time instead, after the same clear:
         // AS_AddOption(int iIndex, string sLabel, bool IsDisabled, int
-        // iQuantity), the label coloured the same way.
+        // iQuantity), the label coloured the same way. So does the Foundry
+        // in both builds, with no quantity.
         if (strcmp(fn_name, "AS_AddOption") == 0 && p->nnumbers >= 2) {
             static char raw[FRAME_ARG_TEXT];
             char row[FOCUS_MAX_LABEL];

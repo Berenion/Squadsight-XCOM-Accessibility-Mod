@@ -1000,6 +1000,7 @@ void hq_build_row(const char* raw_label, int quantity, const char* qty_label,
     char name[128];
     strip_tags(raw_label ? raw_label : "", name, sizeof name);
     int red = raw_label && strstr(raw_label, "EE1C25") != NULL;
+    int grey = raw_label && strstr(raw_label, "808080") != NULL;
     char qty[64] = "";
     if (quantity > 0) {
         if (qty_label && *qty_label)
@@ -1008,7 +1009,8 @@ void hq_build_row(const char* raw_label, int quantity, const char* qty_label,
         else
             _snprintf_s(qty, sizeof qty, _TRUNCATE, ", %d", quantity);
     }
-    _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s", name, red ? ", unavailable" : "", qty);
+    _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s", name,
+                red ? ", unavailable" : grey ? ", completed" : "", qty);
 }
 
 void hq_queue_row(const char* desc, const char* qty, const char* eta,
