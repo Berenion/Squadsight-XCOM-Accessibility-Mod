@@ -316,6 +316,8 @@ int unit_gone(const UnitName* u, void* flag)
 // an entry is still listed where it was last seen -- nothing the squad saw
 // is forgotten -- unless it was known dead.
 
+#define KNOWN_HIST 8            // turns of places kept per enemy, for known_rewind
+
 typedef struct {
     void* unit;                 // NULL after a load, until known_relink
     char  obj[64];              // the XGUnit's object name, for known_relink
@@ -326,6 +328,10 @@ typedef struct {
     int   placed;               // loc holds a place the squad saw it
     float loc[3];
     int   lost_turn;            // the squad's m_iTurn when sight was lost; -1 unknown
+    int   first_turn;           // the squad's m_iTurn when first seen; -1 unknown
+    int   dead_turn;            // and when found dead
+    struct { int turn; float loc[3]; } hist[KNOWN_HIST];  // the last place each turn
+    int   nhist;
 } Known;
 
 static Known g_known[KNOWN_MAX];
@@ -376,6 +382,71 @@ void known_reset(void)
     for (int i = 0; i < g_nunits; i++) g_units[i].number = 0;
 }
 
+static int squad_turn(void* squad);
+
+static void known_mark_dead(Known* kn)
+{
+    kn->dead = 1;
+    kn->dead_turn = g_known_turn;
+}
+
+// A load of this mission may go back before what the table knows: an alien
+// first seen on turn 2 was still said as "last seen" after loading turn 1,
+// where the squad had not met it yet (reported 2026-10-07). The squad's
+// XGPlayer.m_iTurn comes back from the save (it is in XGPlayer's
+// CheckpointRecord, and BeginTurn does not count up on a load), so whatever
+// the table learnt on a later turn is undone: an enemy first seen after it
+// is forgotten, one seen since goes back to its place as of that turn, and
+// one that died since is alive again.
+//
+// A turn is as fine as this goes. A save from early in the turn an alien was
+// first seen keeps it, since nothing in the save says when in the turn the
+// save was made. Sightings in the aliens' turn are noted on the squad's next
+// turn (known_seen only runs for a human squad), which is when the player
+// heard of them, and so are counted with it.
+static void known_rewind(int turn)
+{
+    if (turn < 0) {
+        logf_("known: the loaded turn cannot be read -- the table is kept as it was\n");
+        return;
+    }
+    int out = 0, moved = 0, revived = 0;
+    for (int i = 0; i < g_nknown; i++) {
+        Known* kn = &g_known[i];
+        if (kn->first_turn > turn) {
+            logf_("known: %s %d was first seen on turn %d, after the loaded turn %d "
+                  "-- forgotten\n", kn->name, kn->number, kn->first_turn, turn);
+            kn->name[0] = 0;            // dropped below
+            out++;
+            continue;
+        }
+        if (kn->dead && kn->dead_turn > turn) {
+            kn->dead = 0;
+            revived++;
+            logf_("known: %s %d died on turn %d, after the loaded turn %d -- alive again\n",
+                  kn->name, kn->number, kn->dead_turn, turn);
+        }
+        // The places seen after the loaded turn. The oldest is kept when all
+        // are later, which only happens past KNOWN_HIST turns of history.
+        int keep = kn->nhist;
+        while (keep > 1 && kn->hist[keep - 1].turn > turn) keep--;
+        if (keep < kn->nhist && kn->hist[keep - 1].turn <= turn) {
+            kn->nhist = keep;
+            memcpy(kn->loc, kn->hist[keep - 1].loc, sizeof kn->loc);
+            kn->lost_turn = kn->hist[keep - 1].turn;
+            moved++;
+            logf_("known: %s %d back to %.0f, %.0f, %.0f, where it was on turn %d\n",
+                  kn->name, kn->number, kn->loc[0], kn->loc[1], kn->loc[2], kn->lost_turn);
+        }
+    }
+    int n = 0;
+    for (int i = 0; i < g_nknown; i++)
+        if (g_known[i].name[0]) g_known[n++] = g_known[i];
+    g_nknown = n;
+    logf_("known: loaded turn %d -- %d forgotten, %d moved back, %d alive again, %d kept\n",
+          turn, out, moved, revived, n);
+}
+
 // After a squad change: the same grid is the same map, a load of this
 // mission; any other is another mission, and its places mean nothing there.
 // 0 while the grid cannot be read yet.
@@ -398,6 +469,7 @@ static int known_settle(void)
     }
     g_known_carried = 0;
     logf_("known: the same map after the squad change, %d enemies kept\n", g_nknown);
+    known_rewind(squad_turn(g_known_squad));
     return 1;
 }
 
@@ -491,6 +563,7 @@ static void known_number(void* squad, const SeenSet* set)
         memset(kn, 0, sizeof *kn);
         kn->unit = e;
         kn->lost_turn = -1;
+        kn->first_turn = squad_turn(squad);
         object_name(e, kn->obj, sizeof kn->obj);
         strncpy_s(kn->name, sizeof kn->name, u->name, _TRUNCATE);
         int top = 0;
@@ -499,7 +572,7 @@ static void known_number(void* squad, const SeenSet* set)
                 top = g_known[i].number;
         kn->number = top + 1;
         u->number = kn->number;
-        logf_("known: %s %d first seen\n", kn->name, kn->number);
+        logf_("known: %s %d first seen (turn %d)\n", kn->name, kn->number, kn->first_turn);
     }
 }
 
@@ -557,13 +630,24 @@ void known_seen(void* squad, void* const* units, const float (*locs)[3], int n)
             kn->seen = 1;
             kn->placed = 1;
             memcpy(kn->loc, locs[j], sizeof kn->loc);
+            // This turn's place, for known_rewind: one per turn, the latest.
+            if (turn >= 0) {
+                if (!kn->nhist || kn->hist[kn->nhist - 1].turn != turn) {
+                    if (kn->nhist == KNOWN_HIST) {
+                        memmove(kn->hist, kn->hist + 1, sizeof kn->hist[0] * (KNOWN_HIST - 1));
+                        kn->nhist--;
+                    }
+                    kn->hist[kn->nhist++].turn = turn;
+                }
+                memcpy(kn->hist[kn->nhist - 1].loc, locs[j], sizeof kn->loc);
+            }
             continue;
         }
         // Out of sight: a death is noted here, on every poll, and not only
         // when the scanner asks (known_lost). A load keeps the entry but not
         // the unit, and the corpse has no flag to be matched to, so a death
         // not noted before the load would come back as "last seen".
-        if (!kn->dead && unit_is_live(kn->unit) && known_gone(kn)) kn->dead = 1;
+        if (!kn->dead && unit_is_live(kn->unit) && known_gone(kn)) known_mark_dead(kn);
         if (!kn->seen) continue;
         kn->seen = 0;
         kn->lost_turn = turn;
@@ -589,7 +673,7 @@ int known_lost(void* squad, const SeenSet* now, KnownLost* out, int max)
         if (kn->unit) {
             if (seen_has(now, kn->unit)) continue;
             // Dead, stunned, or its object gone: no longer somewhere to look.
-            if (known_gone(kn)) { kn->dead = 1; continue; }
+            if (known_gone(kn)) { known_mark_dead(kn); continue; }
         }
         _snprintf_s(out[k].label, sizeof out[k].label, _TRUNCATE, "%s %d", kn->name,
                     kn->number);
