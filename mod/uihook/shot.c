@@ -11,6 +11,7 @@ static struct {
     char crit[64];
     char weapon[SHOT_MAX_TEXT];
     char target[SHOT_MAX_TEXT];
+    char self[SHOT_MAX_TEXT];     // shot_set_self
     char said[SHOT_MAX_TEXT];     // what was last announced, verbatim
     char said_weapon[SHOT_MAX_TEXT];
     char said_target[SHOT_MAX_TEXT];
@@ -85,6 +86,11 @@ static int is_zero_percent(const char* v)
 void shot_set_target(const char* text)
 {
     set(g.target, sizeof g.target, text);
+}
+
+void shot_set_self(const char* text)
+{
+    set(g.self, sizeof g.self, text);
 }
 
 // The flag's shield, in words. The flag draws one of four; an EU cover point
@@ -226,6 +232,8 @@ int shot_note(const char* fn, const char* a, const char* b, int flag,
         // Brief: the ability was named when it was picked, and a step of the
         // aim changes only the odds.
         if (!g.brief || (!g.chance[0] && !g.crit[0])) join(core, sizeof core, g.name);
+        // Nothing to aim, so the one thing worth knowing is the key.
+        join(core, sizeof core, g.self);
         join(core, sizeof core, g.chance);
         join(core, sizeof core, g.crit);
     }

@@ -7136,6 +7136,7 @@ static char      g_shot_target_logged[SHOT_MAX_TEXT];
 static void shot_target_now(void* stack)
 {
     shot_set_target("");
+    shot_set_self("");
     if (!readable((uint8_t*)stack + FFRAME_PREVIOUS, sizeof(void*))) return;
     void* frame = *(void**)((uint8_t*)stack + FFRAME_PREVIOUS);
     if (!frame || !readable(frame, FFRAME_PREVIOUS + sizeof(void*))) return;
@@ -7183,8 +7184,18 @@ static void shot_target_now(void* stack)
         !field_ptr(unit, "m_kCurrAction", &g_curr_action, sizeof(void*), &v))
         return;
     void* action = *(void* const*)v;
-    if (!action || !unit_is_live(action) ||
-        !field_ptr(action, "m_kTargetedEnemy", &g_targeted, sizeof(void*), &v))
+    if (!action || !unit_is_live(action)) return;
+    // An ability used on the soldier has nothing to aim, and the readout
+    // says how to use it instead (shot_used_on_self).
+    if (shot_used_on_self(action)) {
+        UnitName* me = unit_by_unit(unit);
+        char cue[128];
+        _snprintf_s(cue, sizeof cue, _TRUNCATE, "Used on %s. Enter to use",
+                    me && me->name[0] ? me->name : "this soldier");
+        shot_set_self(cue);
+        return;
+    }
+    if (!field_ptr(action, "m_kTargetedEnemy", &g_targeted, sizeof(void*), &v))
         return;
     void* target = *(void* const*)v;
     // Hunker Down, Reload and Overwatch aim at the soldier using them, and

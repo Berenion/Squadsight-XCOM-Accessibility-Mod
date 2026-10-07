@@ -108,6 +108,50 @@ static void* aim_shot(void)
     return shot && unit_is_live(shot) ? shot : NULL;
 }
 
+// Whether a targeting action's shot is used on the soldier taking it: target
+// type 1, eTarget_Self, whose only target is the soldier
+// (XGUnit.GetTargetsInRange: `if (iTargetType == 1) arrTargets.AddItem(self)`).
+// The Jetboot Module is one (XGAbilityTree: BuildAbility(83, 1, 0, ...)), and
+// the 2026-10-07 (20:29) log has the player stepping an aim for it six times
+// -- "aiming XGAbility_GameCore, type 83, free aim 0, aimed at a unit" -- with
+// nothing placed and nothing said, then cancelling. Enter uses it. The
+// telekinetic field and psi inspiration are type 1 too but aimed at the
+// ground (ability_aims_at_ground), so they are left to the aim.
+static FieldSlot g_self_target_slot, g_self_type_slot;
+
+int shot_used_on_self(void* action)
+{
+    const void* v;
+    if (!action || !unit_is_live(action) ||
+        !field_ptr(action, "m_kShot", &g_aim_shot_slot, sizeof(void*), &v))
+        return 0;
+    void* shot = *(void* const*)v;
+    if (!shot || !unit_is_live(shot) ||
+        !field_ptr(shot, "iTargetType", &g_self_target_slot, sizeof(int), &v))
+        return 0;
+    int target = *(const int*)v;
+    int type = -1;
+    if (field_ptr(shot, "iType", &g_self_type_slot, sizeof(int), &v)) type = *(const int*)v;
+    int self = target == 1 && !ability_aims_at_ground(type);
+    static void* said;
+    if (shot != said) {
+        said = shot;
+        logf_("nav: shot type %d, target type %d -- %s\n", type, target,
+              self ? "used on the soldier, nothing to aim" : "aimed");
+    }
+    return self;
+}
+
+// The soldier's m_kCurrAction, for shot_used_on_self.
+static void* aim_action(void)
+{
+    void* unit = soldier_unit();
+    const void* v;
+    if (!unit || !field_ptr(unit, "m_kCurrAction", &g_aim_action_slot, sizeof(void*), &v))
+        return NULL;
+    return *(void* const*)v;
+}
+
 static void aim_free_restore(void)
 {
     void* shot = g_aim_freed_shot;
@@ -1079,6 +1123,23 @@ static void nav_press(int digit, int gliding)
 
     int dx, dy;
     if (!nav_step_for_digit(digit, &dx, &dy)) return;
+
+    // Nothing to aim: the ability is used on the soldier, so a step would
+    // move a cursor the game ignores, in silence. Said on the press only.
+    int self = 0;
+    if (aiming) GUARDED("nav: self check", self = shot_used_on_self(aim_action()));
+    if (self) {
+        if (gliding) return;
+        char say[160] = "Nothing to aim. Used on this soldier. Enter to use, Escape to cancel.";
+        UnitName* u = unit_by_unit(soldier_unit());
+        if (u && u->name[0])
+            _snprintf_s(say, sizeof say, _TRUNCATE,
+                        "Nothing to aim. Used on %s. Enter to use, Escape to cancel.", u->name);
+        logf_("nav: numpad %d while aiming an ability used on the soldier -> \"%s\"\n",
+              digit, say);
+        speech_say_now(say);
+        return;
+    }
 
     if (!nav_active()) {
         nav_begin(tx, ty);
@@ -2843,8 +2904,47 @@ static int   g_path_logged_ok = -1;
 static int   g_path_logged_tile[2] = { -1, -1 };
 static float g_path_logged_z;
 
+// Whether the soldier's jet boots are on, logged when it changes. Using the
+// Jetboot Module sets XGUnitNativeBase.m_bJetbootModuleActive and recomputes
+// the path (XGAbilityTree, effect 50: ComputePath2, BuildAbilities), and the
+// start of the soldier's next turn clears it (XGUnit, DeactivatePerk(137)).
+// What it opens to the path -- the roofs -- is the native pathing's, so this
+// line is what tells a log whether a step's verdict was made with them on.
+static void jetboot_note(void)
+{
+    void* unit = soldier_unit();
+    if (!unit || !unit_is_live(unit)) return;
+    static const void* s_cls;
+    static const void* s_prop;
+    uint32_t class_off = props_class_offset();
+    const void* cls = class_off && readable((uint8_t*)unit + class_off, sizeof(void*))
+                          ? *(void* const*)((uint8_t*)unit + class_off) : NULL;
+    if (!cls) return;
+    if (cls != s_cls) {
+        s_cls = cls;
+        s_prop = object_field_prop(unit, "m_bJetbootModuleActive");
+    }
+    int on = 0;
+    if (!s_prop || !props_read_object_bool(s_prop, unit, &on)) return;
+    static void* s_unit;
+    static int   s_on = -1;
+    if (unit == s_unit && on == s_on) return;
+    s_unit = unit;
+    s_on = on;
+    if (on) {
+        char name[80] = "?";
+        UnitName* u = unit_by_unit(unit);
+        if (u && u->name[0]) strncpy_s(name, sizeof name, u->name, _TRUNCATE);
+        else object_name(unit, name, sizeof name);
+        logf_("nav: jet boots on for %s -- paths from here are flown\n", name);
+    } else {
+        logf_("nav: jet boots off\n");
+    }
+}
+
 static void nav_path_result(void* self, void* stack, void* result)
 {
+    GUARDED("nav: jet boots", jetboot_note());
     if (!nav_active() || !readable(stack, 0x20)) return;
     void* node = *(void**)((uint8_t*)stack + FFRAME_NODE);
     uint8_t* locals = *(uint8_t**)((uint8_t*)stack + FFRAME_LOCALS);

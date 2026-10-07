@@ -11,6 +11,10 @@
 // Aiming a rocket or grenade rather than choosing a move (see numpad.c).
 extern int g_nav_aim;
 
+// Whether a targeting action's shot is used on the soldier taking it
+// (eTarget_Self, and not aimed at the ground): nothing to aim, Enter uses it.
+int  shot_used_on_self(void* action);
+
 // Lets go of the numpad's target; `why` is for the log.
 void nav_stop(const char* why);
 

@@ -62,6 +62,12 @@ void shot_list_detail(const ShotTarget* t, int chance, int squadsight,
 // call that ends the burst, so it must be set before that call.
 void shot_set_target(const char* text);
 
+// For an ability used on the soldier taking it (eTarget_Self, the Jetboot
+// Module, Hunker Down): how to use it, "Used on White. Enter to use", said
+// after the ability's name. "" for any other. Set like the target, before the
+// burst ends.
+void shot_set_self(const char* text);
+
 // True when `obj_name` is the tactical info panel.
 int shot_is_panel(const char* obj_name);
 

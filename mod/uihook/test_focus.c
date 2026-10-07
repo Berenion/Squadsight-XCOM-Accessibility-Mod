@@ -1299,6 +1299,17 @@ int main(void)
     {
         char say[SHOT_MAX_TEXT];
 
+        // An ability used on the soldier: nothing to aim, so the key is said
+        // after the name (shot_set_self, set from shot_target_now).
+        shot_reset();
+        shot_note("SetIsAvailable", "", "", 1, say, sizeof say);
+        shot_note("SetShotName", "Jetboot Module", "", -1, say, sizeof say);
+        shot_set_self("Used on Durand. Enter to use");
+        check(shot_note("UpdateLayout", "", "", -1, say, sizeof say) == 1 &&
+              strcmp(say, "Jetboot Module. Used on Durand. Enter to use") == 0,
+              "an ability used on the soldier says how to use it");
+        shot_set_self("");
+
         shot_reset();
         check(shot_is_panel("UITacticalHUD_InfoPanel_0"), "the info panel is known");
         check(!shot_is_panel("UITacticalHUD_AbilityContainer_0"), "its neighbour is not");
