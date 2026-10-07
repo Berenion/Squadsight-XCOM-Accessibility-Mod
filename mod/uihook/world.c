@@ -362,6 +362,29 @@ static void scan_describe_interactive(WorldActor* wa)
     } else if (icon == ICON_BUTTON) {
         it.kind = panel_objective(actor) ? SCAN_OBJECTIVES : SCAN_INTERACT;
         strncpy_s(it.name, sizeof it.name, "Panel", _TRUNCATE);
+        // An objective panel is no more on the screen than a door is until
+        // the fog lifts off it, unless an arrow points at it. The Furies
+        // console (DLC2_3_Furies_Stream) gets its arrow only when a soldier
+        // comes within sight of the XComSquadVisiblePoint beside it
+        // (XComSquadVisiblePoint.Tick -> ConsoleSpotted ->
+        // SeqAct_DisplayUIArrowPointingToActor_3), and the 2026-10-07 (19:30)
+        // log listed it from the first turn, 68 tiles off inside the ship.
+        if (it.kind == SCAN_OBJECTIVES) {
+            marked = arrow_on(actor);
+            static struct { void* actor; int marked; } said[16];
+            static int nsaid;
+            int k;
+            for (k = 0; k < nsaid && said[k].actor != actor; k++) {}
+            if (k == nsaid || said[k].marked != marked) {
+                if (k == nsaid && nsaid < 16) nsaid++;
+                if (k < 16) { said[k].actor = actor; said[k].marked = marked; }
+                char name[80] = "?";
+                object_name(actor, name, sizeof name);
+                logf_("world: objective panel %s, %s\n", name,
+                      marked ? "an arrow on it -- listed through the fog"
+                             : "no arrow -- once seen");
+            }
+        }
     } else {
         it.kind = SCAN_DOORS;
         strncpy_s(it.name, sizeof it.name, "Door", _TRUNCATE);
@@ -373,11 +396,9 @@ static void scan_describe_interactive(WorldActor* wa)
     float world[3];
     if (!actor_location(actor, &g_ilact_loc, world)) return;
     if (!world_item_at(&it, world)) return;
-    // A comm array with an arrow is not held back: the arrow and the
-    // waypoint show through the fog. A wired panel under Objectives keeps
-    // the rule it had.
-    int through = it.kind == SCAN_OBJECTIVES &&
-                  (marked || !object_is_a(actor, "XComRadarArrayActor"));
+    // An objective with an arrow on it is not held back: the arrow (and a
+    // comm array's waypoint) shows through the fog.
+    int through = it.kind == SCAN_OBJECTIVES && marked;
     if (!through && world_unseen(wa, &it, FOG_REACH_WALL, FOG_UP_LAYERS))
         return;
     world_keep(&it);
