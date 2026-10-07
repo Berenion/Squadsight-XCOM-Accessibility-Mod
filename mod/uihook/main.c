@@ -148,6 +148,94 @@ static int log_frame_call(const char* obj, const char* fn)
     return 1;
 }
 
+// Lists that are filled a row a call and that nothing reads row by row from
+// the log, folded into one line. The 2026-10-07 (19:52) log was 1,446 lines,
+// 1,038 of them the load screen's AS_AddListItem: three lines for each of 346
+// saves (the description, the map image, the SLOT copy of the description).
+// The tactical HUD's AS_SetIconButton is four lines per button, fourteen
+// buttons each time the HUD is built. The raw string lines of these calls are
+// dropped (their SLOT line holds the same text); the first LOG_FOLD_KEEP rows
+// keep their SLOT line, and the rest are counted, or for the buttons named,
+// in one line logged when the next call from elsewhere comes in
+// (log_fold_flush). Only the log is changed: the rows are recorded and said
+// as before.
+#define LOG_FOLD_KEEP 3
+static const char* const k_fold_calls[][2] = {
+    { "UILoadGame_",                 "AS_AddListItem" },
+    { "UISaveGame_",                 "AS_AddListItem" },
+    { "UITacticalHUD_MouseControls_", "AS_SetIconButton" },
+};
+#define LOG_FOLD_KINDS ((int)(sizeof k_fold_calls / sizeof k_fold_calls[0]))
+
+static struct {
+    const void* obj;
+    char        where[160];     // "UILoadGame_0.AS_AddListItem"
+    int         kind;
+    int         rows, first, last;
+    char        names[512];     // the buttons, "END TURN (Backspace), ..."
+} g_fold;
+
+static int log_fold_kind(const char* obj, const char* fn)
+{
+    for (int i = 0; i < LOG_FOLD_KINDS; i++)
+        if (strcmp(fn, k_fold_calls[i][1]) == 0 &&
+            strncmp(obj, k_fold_calls[i][0], strlen(k_fold_calls[i][0])) == 0)
+            return i;
+    return -1;
+}
+
+static void log_fold_flush(void)
+{
+    if (!g_fold.obj) return;
+    if (g_fold.kind == 2)
+        logf_("log: %s, %d buttons: %s\n", g_fold.where, g_fold.rows, g_fold.names);
+    else if (g_fold.rows > LOG_FOLD_KEEP)
+        logf_("log: %s, %d rows (%d..%d), the first %d logged above\n", g_fold.where,
+              g_fold.rows, g_fold.first, g_fold.last, LOG_FOLD_KEEP);
+    g_fold.obj = NULL;
+}
+
+// Called for every capture: a call from another object or function ends the
+// fold in progress.
+static void log_fold_other(const void* obj, const char* obj_name, const char* fn)
+{
+    if (!g_fold.obj) return;
+    char where[160];
+    _snprintf_s(where, sizeof where, _TRUNCATE, "%s.%s", obj_name, fn);
+    if (obj != g_fold.obj || strcmp(where, g_fold.where) != 0) log_fold_flush();
+}
+
+// One row of a folded list. 1 when its SLOT line is to be left out.
+static int log_fold_row(const void* obj, const char* obj_name, const char* fn, int kind,
+                        int idx, const char* label)
+{
+    if (!g_fold.obj || idx == 0) {
+        log_fold_flush();
+        g_fold.obj = obj;
+        _snprintf_s(g_fold.where, sizeof g_fold.where, _TRUNCATE, "%s.%s", obj_name, fn);
+        g_fold.kind = kind;
+        g_fold.rows = 0;
+        g_fold.first = idx;
+        g_fold.names[0] = 0;
+    }
+    g_fold.rows++;
+    g_fold.last = idx;
+    if (kind == 2) {
+        // "END TURN, Backspace, endTurn": the name and the key, the id left out.
+        char row[96];
+        strncpy_s(row, sizeof row, label, _TRUNCATE);
+        char* c1 = strstr(row, ", ");
+        char* c2 = c1 ? strstr(c1 + 2, ", ") : NULL;
+        if (c2) *c2 = 0;
+        if (c1) { *c1 = 0; c1 += 2; }
+        size_t used = strlen(g_fold.names);
+        _snprintf_s(g_fold.names + used, sizeof g_fold.names - used, _TRUNCATE,
+                    c1 ? "%s%s (%s)" : "%s%s", used ? ", " : "", row, c1);
+        return 1;
+    }
+    return g_fold.rows > LOG_FOLD_KEEP;
+}
+
 // Flash markup leaks into a lot of these strings; a screen reader should not
 // read tags aloud.
 void strip_markup(char* s)
@@ -5017,6 +5105,7 @@ static void capture_body(const char* tag, LONG n, void* stack)
     object_name(node, fn_name, sizeof fn_name);
     object_name(object, obj_name, sizeof obj_name);
     _snprintf_s(tls_where, sizeof tls_where, _TRUNCATE, "%s.%s", obj_name, fn_name);
+    log_fold_other(object, obj_name, fn_name);
 
     // Deferred until a real frame is in hand: the probe needs a UStruct whose
     // children are known to be properties, and a called function is exactly
@@ -5859,9 +5948,13 @@ static void capture_body(const char* tag, LONG n, void* stack)
     // cancel it: it was said after every move (log of 2026-09-27).
     if (strcmp(fn_name, "AS_SetButtonType") == 0) return;
 
-    if (!log_frame_call(obj_name, fn_name))
+    // An image path is never said, and a folded list's rows are in their
+    // SLOT line (log_fold_row).
+    int fold = log_fold_kind(obj_name, fn_name);
+    if (fold < 0 && !log_frame_call(obj_name, fn_name))
         for (int i = 0; i < p->nstrings; i++)
-            logf_("[%ld] %s %s.%s  \"%s\"\n", n, tag, obj_name, fn_name, p->strings[i]);
+            if (strncmp(p->strings[i], "img:", 4) != 0 && !strstr(p->strings[i], "://"))
+                logf_("[%ld] %s %s.%s  \"%s\"\n", n, tag, obj_name, fn_name, p->strings[i]);
 
     // A unit flag's calls belong to the unit table (unit_note, unit_flag_drew,
     // above) and are never an announcement. RealizeCover sends the shield as
@@ -6009,9 +6102,10 @@ static void capture_body(const char* tag, LONG n, void* stack)
             if (idx == 0 && g_hq_menu && part == FOCUS_PART_LABEL &&
                 strncmp(obj_name, "UIStrategyHUD_FSM_", 18) == 0)
                 focus_set_detail(g_hq_menu, joined);
-            logf_("[%ld] %s %s.%s  SLOT %d %s \"%s\"%s\n", n, tag, obj_name, fn_name,
-                  idx, part == FOCUS_PART_VALUE ? "value =" : "label =", joined,
-                  changed ? "  (changed)" : "");
+            if (fold < 0 || !log_fold_row(object, obj_name, fn_name, fold, idx, joined))
+                logf_("[%ld] %s %s.%s  SLOT %d %s \"%s\"%s\n", n, tag, obj_name, fn_name,
+                      idx, part == FOCUS_PART_VALUE ? "value =" : "label =", joined,
+                      changed ? "  (changed)" : "");
             if (changed && part == FOCUS_PART_VALUE && spinner_stepped() &&
                 object == g_focus_obj) {
                 // A spinner stepped with Left or Right. The screen then redraws
