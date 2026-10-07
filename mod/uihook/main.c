@@ -44,6 +44,7 @@
 #include <math.h>
 #include <stdlib.h>
 
+#include "version.h"
 #include "ue3.h"
 #include "natives.h"
 #include "names.h"
@@ -8375,7 +8376,7 @@ static DWORD WINAPI init(LPVOID param)
     log_open(path);
 
     HMODULE mod = GetModuleHandleA(NULL);
-    logf_("xcom_uihook: module base %p\n", (void*)mod);
+    logf_("xcom_uihook " MOD_VERSION ": module base %p\n", (void*)mod);
     {
         // `path` is the log's; its directory is the game's own.
         char dir[MAX_PATH], exe[MAX_PATH];

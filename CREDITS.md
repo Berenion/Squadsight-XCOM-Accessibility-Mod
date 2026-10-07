@@ -26,7 +26,11 @@ Firaxis Games or 2K. XCOM is a trademark of Take-Two Interactive Software.
 
 - **Tolk**, by Davy Kager, https://github.com/dkager/tolk : speech through
   whichever screen reader is running. GNU Lesser General Public License
-  v3. It ships unmodified, as its own DLL.
+  v3. It ships unmodified, as its own DLL, built for 32-bit from commit
+  e5149f0 of the address above (the Java bridge left out). Tolk's
+  redistributable client libraries for System Access (`SAAPI32.dll`, by
+  Serotek) and SuperNova (`dolapi32.dll`, by Dolphin Computer Access) ship
+  with it, as Tolk distributes them.
 - **NVDA Controller Client**, by NV Access, https://www.nvaccess.org/ :
   speech through NVDA. GNU Lesser General Public License v2.1. It ships
   unmodified, as its own DLL. The source for both libraries is at the

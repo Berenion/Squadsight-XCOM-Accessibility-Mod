@@ -27,6 +27,14 @@ if exist "%HERE%alienbeat.wav" copy /y "%HERE%alienbeat.wav" "%OUT%\alienbeat.wa
 if exist "%HERE%doorsound.wav" copy /y "%HERE%doorsound.wav" "%OUT%\doorsound.wav" >nul
 if exist "%HERE%windowsound.wav" copy /y "%HERE%windowsound.wav" "%OUT%\windowsound.wav" >nul
 
+rem The screen-reader DLLs (Tolk from tools\build_tolk.bat, the clients its
+rem drivers load, NVDA's), so that build\ is a whole copy of the mod: the
+rem launcher's Install copies only from its own folder (the 2026-10-07 launcher
+rem log: "nvdaControllerClient32.dll is missing from ...\build").
+for %%f in (Tolk.dll SAAPI32.dll dolapi32.dll nvdaControllerClient32.dll) do (
+    if exist "%HERE%%%f" (copy /y "%HERE%%%f" "%OUT%\%%f" >nul) else (echo NOTE: %%f is missing from mod\uihook -- run tools\build_tolk.bat)
+)
+
 rem The credits go wherever the DLL goes: two of the sounds (CC BY, CC BY-NC) require
 rem them with every copy of the mod.
 copy /y "%HERE%..\..\CREDITS.md" "%OUT%\CREDITS.md" >nul
@@ -42,8 +50,10 @@ rc /nologo /fo launcher.res /i "%HERE:~0,-1%" "%HERE%launcher.rc"
 if errorlevel 1 (popd & echo RESOURCE BUILD FAILED & exit /b 1)
 
 cl /nologo /W3 /O2 /MT "%HERE%launcher.c" "%HERE%gamepaths.c" "%HERE%injector.c" ^
+   "%HERE%install.c" "%HERE%update.c" ^
    launcher.res /Fe:launcher.exe ^
-   /link /SUBSYSTEM:WINDOWS user32.lib advapi32.lib shlwapi.lib
+   /link /SUBSYSTEM:WINDOWS user32.lib advapi32.lib shlwapi.lib shell32.lib ole32.lib ^
+   uuid.lib winhttp.lib
 if errorlevel 1 (popd & echo LAUNCHER BUILD FAILED & exit /b 1)
 
 cl /nologo /W3 /O2 /MT "%HERE%test_natives.c" "%HERE%natives.c" /Fe:test_natives.exe
@@ -65,6 +75,9 @@ if errorlevel 1 (popd & echo COLORS TEST BUILD FAILED & exit /b 1)
 cl /nologo /W3 /O2 /MT "%HERE%test_paths.c" "%HERE%gamepaths.c" /Fe:test_paths.exe ^
    /link advapi32.lib shlwapi.lib
 if errorlevel 1 (popd & echo PATHS TEST BUILD FAILED & exit /b 1)
+
+cl /nologo /W3 /O2 /MT "%HERE%test_release.c" "%HERE%update.c" /Fe:test_release.exe /link winhttp.lib
+if errorlevel 1 (popd & echo RELEASE TEST BUILD FAILED & exit /b 1)
 
 popd
 echo.

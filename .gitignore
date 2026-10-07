@@ -25,3 +25,10 @@ __pycache__/
 # They must match the game (x86); see HANDOFF.md.
 Tolk.dll
 nvdaControllerClient*.dll
+SAAPI32.dll
+dolapi32.dll
+# tools/build_tolk.bat clones Tolk here.
+/tools/tolk-src/
+
+# Release packages (package.bat)
+/mod/uihook/dist/

@@ -1,8 +1,10 @@
 // Speech output for the XCOM accessibility hook.
 //
 // Prefers Tolk (which routes to whatever screen reader the player already
-// runs -- NVDA, JAWS) and falls back to SAPI, which ships with Windows so the
-// prototype speaks without the player installing anything.
+// runs -- NVDA, JAWS, System Access, SuperNova, ZoomText), then NVDA's own
+// controller client, then SAPI, which ships with Windows so the mod speaks
+// without the player installing anything.  Tolk is a 32-bit build of
+// dkager/tolk made by tools\build_tolk.bat; the game is 32-bit.
 //
 // Speaking never happens on the caller's thread.  The hook runs on the game's
 // UI thread, and both Tolk and SAPI can block; a stall there would show up as
@@ -24,18 +26,35 @@
 // MultiByteToWideChar refused it and the whole briefing was dropped unheard.
 #define MAX_UTTER  4096
 
-typedef int(__cdecl* TolkLoadFn)(void);
+// Tolk's exports return C++ bool, of which only the low byte is defined; the
+// results of Output and Silence are not read, and Detect returns a pointer.
+typedef void(__cdecl* TolkLoadFn)(void);
+typedef void(__cdecl* TolkUnloadFn)(void);
+typedef const wchar_t*(__cdecl* TolkDetectFn)(void);
 typedef int(__cdecl* TolkOutputFn)(const wchar_t*, int);
 typedef int(__cdecl* TolkSilenceFn)(void);
 
 static HMODULE       g_tolk;
-static TolkOutputFn  g_tolk_output;
+static TolkLoadFn    g_tolk_load;
+static TolkUnloadFn  g_tolk_unload;
+static TolkDetectFn  g_tolk_detect;
+static TolkOutputFn  g_tolk_output;       // set only once Tolk has found a reader
 static TolkSilenceFn g_tolk_silence;
 
-// NVDA's controller client is driven directly when Tolk is unavailable.
-// Tolk is only a thin multiplexer over exactly these entry points, and it
-// ships x64-first, so depending on it would add a dependency without adding
-// capability for an NVDA user.  Exports are undecorated __stdcall.
+// The client DLLs Tolk's drivers load.  Tolk asks for them by bare name
+// (LoadLibrary(L"nvdaControllerClient32.dll") in ScreenReaderDriverNVDA.cpp),
+// which searches the *game's* folder, not ours, so inside XCOM it would find
+// none of them.  Loading them first by full path from beside this DLL makes
+// those bare-name loads return the copies already in the process.  JAWS,
+// Window-Eyes and ZoomText are reached through COM and need no file.
+static const char* const TOLK_DRIVERS[] = {
+    "nvdaControllerClient32.dll", "SAAPI32.dll", "dolapi32.dll",
+};
+#define TOLK_DRIVER_COUNT (sizeof TOLK_DRIVERS / sizeof TOLK_DRIVERS[0])
+static HMODULE g_tolk_driver[TOLK_DRIVER_COUNT];
+
+// NVDA's controller client is driven directly when Tolk is missing or finds
+// no screen reader.  Exports are undecorated __stdcall.
 typedef unsigned long(__stdcall* NvdaTestFn)(void);
 typedef unsigned long(__stdcall* NvdaSpeakFn)(const wchar_t*);
 typedef unsigned long(__stdcall* NvdaCancelFn)(void);
@@ -90,6 +109,73 @@ static void speak_now(const wchar_t* text, int interrupt)
     }
 }
 
+// Which of the three speaks, said back to speech_init through g_why once
+// g_ready is set.
+static char   g_why[256];
+static HANDLE g_ready;
+
+// Tolk_Unload ends with an unconditional CoUninitialize (Tolk.cpp), while
+// Tolk_Load leaves a thread that already had COM as it found it -- so an
+// unload takes this thread's own COM reference with it.  Found 2026-10-07:
+// with no screen reader, the SAPI fallback then failed with
+// CO_E_NOTINITIALIZED.  The reference is taken back at once.
+static void tolk_unload_keep_com(void)
+{
+    g_tolk_unload();
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+}
+
+// Tolk first, then NVDA directly, then SAPI.  Decided here on the worker,
+// the thread that will speak, because Tolk's JAWS and SAPI drivers make COM
+// objects (lazily, in Tolk_Load or the first Output) and they should live on
+// the thread that uses them.  Tolk_Load puts its thread in the multithreaded
+// apartment, as this one already is.
+static void choose_backend(void)
+{
+    if (g_tolk) {
+        g_tolk_load();
+        const wchar_t* reader = g_tolk_detect();
+        if (reader && reader[0]) {
+            g_tolk_output = (TolkOutputFn)GetProcAddress(g_tolk, "Tolk_Output");
+            _snprintf_s(g_why, sizeof g_why, _TRUNCATE, "Tolk, speaking through %ls", reader);
+            return;
+        }
+        // Loaded but found no reader: Tolk would accept every line and say
+        // none of them, so it is set aside rather than trusted.
+        tolk_unload_keep_com();
+        _snprintf_s(g_why, sizeof g_why, _TRUNCATE, "Tolk found no screen reader; ");
+    }
+
+    size_t used = strlen(g_why);
+    if (g_nvda_speak && g_nvda_test) {
+        unsigned long st = g_nvda_test();
+        if (st == 0) {
+            _snprintf_s(g_why + used, sizeof g_why - used, _TRUNCATE,
+                        "NVDA (controller client)");
+            return;
+        }
+        // The client loads fine whether or not NVDA is up; say which it
+        // is, because "silence" has two very different causes.
+        g_nvda_speak = NULL;
+        _snprintf_s(g_why + used, sizeof g_why - used, _TRUNCATE,
+                    "SAPI -- nvdaControllerClient32 loaded but NVDA is not running "
+                    "(status %lu)", st);
+    } else if (!used) {
+        _snprintf_s(g_why, sizeof g_why, _TRUNCATE, "SAPI");
+    } else {
+        _snprintf_s(g_why + used, sizeof g_why - used, _TRUNCATE, "SAPI");
+    }
+
+    HRESULT hr = CoCreateInstance(&CLSID_SpVoice, NULL, CLSCTX_ALL, &IID_ISpVoice,
+                                  (void**)&g_voice);
+    if (FAILED(hr)) {
+        g_voice = NULL;
+        used = strlen(g_why);
+        _snprintf_s(g_why + used, sizeof g_why - used, _TRUNCATE,
+                    " -- the SAPI voice could not be made (0x%08lX), no speech", hr);
+    }
+}
+
 static DWORD WINAPI worker(LPVOID param)
 {
     (void)param;
@@ -97,11 +183,8 @@ static DWORD WINAPI worker(LPVOID param)
     HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     int owns_com = SUCCEEDED(hr);
 
-    if (!g_tolk_output && !g_nvda_speak) {
-        hr = CoCreateInstance(&CLSID_SpVoice, NULL, CLSCTX_ALL, &IID_ISpVoice,
-                              (void**)&g_voice);
-        if (FAILED(hr)) g_voice = NULL;
-    }
+    choose_backend();
+    SetEvent(g_ready);
 
     while (!g_stop) {
         WaitForSingleObject(g_wake, 50);
@@ -132,6 +215,7 @@ static DWORD WINAPI worker(LPVOID param)
     }
 
     if (g_voice) { g_voice->lpVtbl->Release(g_voice); g_voice = NULL; }
+    if (g_tolk_output) { g_tolk_output = NULL; tolk_unload_keep_com(); }
     if (owns_com) CoUninitialize();
     return 0;
 }
@@ -198,60 +282,70 @@ int speech_init(const char* dll_dir, char* why, size_t why_sz)
     InitializeCriticalSection(&g_qlock);
     g_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
 
-    // Preference order: Tolk (drives whatever reader the player uses), then
-    // NVDA directly, then the SAPI voice built into Windows.
-    char detail[256];
-    detail[0] = 0;
+    g_ready = CreateEventA(NULL, TRUE, FALSE, NULL);
 
-    g_tolk = load_from_nearby(dll_dir, "Tolk.dll", detail, sizeof detail);
+    // Only the files are loaded here; which of them speaks is chosen on the
+    // worker (choose_backend).  A file that is there but will not load (a
+    // 64-bit Tolk, which is what this repo had until 2026-10-07) is noted, so
+    // the log says why the next choice down was taken.
+    char tolk_note[256] = { 0 }, nvda_note[256] = { 0 };
 
-    if (g_tolk) {
-        TolkLoadFn load = (TolkLoadFn)GetProcAddress(g_tolk, "Tolk_Load");
-        g_tolk_output = (TolkOutputFn)GetProcAddress(g_tolk, "Tolk_Output");
-        g_tolk_silence = (TolkSilenceFn)GetProcAddress(g_tolk, "Tolk_Silence");
-        if (load && g_tolk_output) {
-            load();
-            _snprintf_s(why, why_sz, _TRUNCATE, "Tolk (screen reader bridge)");
-            g_thread = CreateThread(NULL, 0, worker, NULL, 0, NULL);
-            return g_thread != NULL;
+    // The drivers first, so that Tolk's own bare-name loads find them.
+    char drivers[160] = { 0 };
+    for (int i = 0; i < (int)TOLK_DRIVER_COUNT; i++) {
+        char ignored[256] = { 0 };
+        g_tolk_driver[i] = load_from_nearby(dll_dir, TOLK_DRIVERS[i], ignored, sizeof ignored);
+        if (g_tolk_driver[i]) {
+            size_t n = strlen(drivers);
+            _snprintf_s(drivers + n, sizeof drivers - n, _TRUNCATE, "%s%s",
+                        n ? ", " : "", TOLK_DRIVERS[i]);
         }
-        g_tolk_output = NULL;
     }
 
-    // No Tolk: talk to NVDA directly.  Same two directories, same reasoning.
+    g_tolk = load_from_nearby(dll_dir, "Tolk.dll", tolk_note, sizeof tolk_note);
+    if (g_tolk) {
+        g_tolk_load = (TolkLoadFn)GetProcAddress(g_tolk, "Tolk_Load");
+        g_tolk_unload = (TolkUnloadFn)GetProcAddress(g_tolk, "Tolk_Unload");
+        g_tolk_detect = (TolkDetectFn)GetProcAddress(g_tolk, "Tolk_DetectScreenReader");
+        g_tolk_silence = (TolkSilenceFn)GetProcAddress(g_tolk, "Tolk_Silence");
+        if (!g_tolk_load || !g_tolk_unload || !g_tolk_detect ||
+            !GetProcAddress(g_tolk, "Tolk_Output")) {
+            FreeLibrary(g_tolk);
+            g_tolk = NULL;
+            strcpy_s(tolk_note, sizeof tolk_note, "Tolk.dll lacks the expected exports");
+        }
+    }
+
+    // NVDA directly, for when Tolk is missing or finds no reader.  The same
+    // client Tolk's driver uses, so this is a second reference, not a copy.
     g_nvda = load_from_nearby(dll_dir, "nvdaControllerClient32.dll",
-                              detail, sizeof detail);
+                              nvda_note, sizeof nvda_note);
     if (g_nvda) {
         g_nvda_test = (NvdaTestFn)GetProcAddress(g_nvda, "nvdaController_testIfRunning");
         g_nvda_speak = (NvdaSpeakFn)GetProcAddress(g_nvda, "nvdaController_speakText");
         g_nvda_cancel = (NvdaCancelFn)GetProcAddress(g_nvda, "nvdaController_cancelSpeech");
-
-        if (g_nvda_speak && g_nvda_test) {
-            unsigned long st = g_nvda_test();
-            if (st == 0) {
-                _snprintf_s(why, why_sz, _TRUNCATE, "NVDA (controller client)");
-            } else {
-                // The client loads fine whether or not NVDA is up; say which
-                // it is, because "silence" has two very different causes.
-                g_nvda_speak = NULL;
-                _snprintf_s(why, why_sz, _TRUNCATE,
-                            "SAPI -- nvdaControllerClient32 loaded but NVDA is "
-                            "not running (status %lu)", st);
-            }
-        } else {
+        if (!g_nvda_speak || !g_nvda_test) {
             g_nvda_speak = NULL;
-            _snprintf_s(why, why_sz, _TRUNCATE,
-                        "SAPI -- nvdaControllerClient32 lacks the expected exports");
+            strcpy_s(nvda_note, sizeof nvda_note,
+                     "nvdaControllerClient32 lacks the expected exports");
         }
-    } else if (detail[0]) {
-        _snprintf_s(why, why_sz, _TRUNCATE, "SAPI -- %s", detail);
-    } else {
-        _snprintf_s(why, why_sz, _TRUNCATE,
-                    "SAPI (no Tolk.dll or nvdaControllerClient32.dll found)");
     }
 
     g_thread = CreateThread(NULL, 0, worker, NULL, 0, NULL);
-    return g_thread != NULL;
+    if (!g_thread) {
+        _snprintf_s(why, why_sz, _TRUNCATE, "no speech -- the speech thread did not start");
+        return 0;
+    }
+    // Detection asks each screen reader in turn and is quick; the wait is
+    // only there so the startup log line can say what was chosen.
+    if (WaitForSingleObject(g_ready, 5000) != WAIT_OBJECT_0)
+        strcpy_s(g_why, sizeof g_why, "still choosing after 5 s");
+
+    _snprintf_s(why, why_sz, _TRUNCATE, "%s (Tolk.dll %s; drivers loaded: %s%s%s)",
+                g_why, g_tolk ? "loaded" : tolk_note[0] ? tolk_note : "not found",
+                drivers[0] ? drivers : "none",
+                nvda_note[0] ? "; " : "", nvda_note);
+    return 1;
 }
 
 // UTF-8 to UTF-16 into a buffer of MAX_UTTER. Text too long for it is cut to
@@ -346,4 +440,6 @@ void speech_shutdown(void)
     CloseHandle(g_thread);
     g_thread = NULL;
     if (g_tolk) { FreeLibrary(g_tolk); g_tolk = NULL; }
+    for (int i = 0; i < (int)TOLK_DRIVER_COUNT; i++)
+        if (g_tolk_driver[i]) { FreeLibrary(g_tolk_driver[i]); g_tolk_driver[i] = NULL; }
 }
