@@ -3073,16 +3073,39 @@ static int base_call(const Call* c)
                 mec_sentence(item, sizeof item, &w, who);
                 // A perk per tech level, "NAME||description||icon label"
                 // (the 2026-10-05 (11:30) log): the name and description.
+                //
+                // A level the MEC has not been built to yet is "LOCKED||This
+                // tech upgrade requires further research||Locked" whatever
+                // the research: XGCyberneticsUI.GenerateMecWeaponDescription
+                // writes it for any empty slot (eItem_None). A new MEC-1
+                // Warden with the Sentinel researched was said as needing
+                // research, when only the credits were short (2026-10-07).
+                // Whether research is what stops the upgrade is the red
+                // strCantUpgradeReason in the cost's place ("Cannot upgrade:
+                // missing research", GenerateUpgradeMEC), said below, so an
+                // empty level is only said to be empty; the first one is the
+                // upgrade the cost is for.
+                int next_said = 0;
+                int blocked = strncmp(g_mec.cost, "Cannot upgrade", 14) == 0;
                 for (int i = 0; i < 3; i++) {
                     if (!g_mec.perk[i][0]) continue;
                     char part[512];
                     strcpy_s(part, sizeof part, g_mec.perk[i]);
                     char* desc = strstr(part, "||");
+                    char* icon = NULL;
                     if (desc) {
                         *desc = 0;
                         desc += 2;
-                        char* icon = strstr(desc, "||");
-                        if (icon) *icon = 0;
+                        icon = strstr(desc, "||");
+                        if (icon) { *icon = 0; icon += 2; }
+                    }
+                    if (icon && strcmp(icon, "Locked") == 0) {
+                        _snprintf_s(line, sizeof line, _TRUNCATE, "Level %d: not built yet%s",
+                                    i + 1, !next_said && !blocked && g_mec.cost[0]
+                                               ? ", the next upgrade" : "");
+                        next_said = 1;
+                        mec_sentence(item, sizeof item, &w, line);
+                        continue;
                     }
                     _snprintf_s(line, sizeof line, _TRUNCATE, "Level %d: %s", i + 1, part);
                     mec_sentence(item, sizeof item, &w, line);
