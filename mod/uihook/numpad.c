@@ -2926,9 +2926,13 @@ static void jetboot_note(void)
     }
     int on = 0;
     if (!s_prop || !props_read_object_bool(s_prop, unit, &on)) return;
+    // Logged as it goes on, and as it goes off for the soldier who had it --
+    // not each time the selection moves to someone who never had it, which
+    // was 58 "off" lines in the 2026-10-07 (21:03) log.
     static void* s_unit;
-    static int   s_on = -1;
-    if (unit == s_unit && on == s_on) return;
+    static int   s_on;
+    if (on == (unit == s_unit && s_on)) return;
+    if (!on && unit != s_unit) return;
     s_unit = unit;
     s_on = on;
     if (on) {
