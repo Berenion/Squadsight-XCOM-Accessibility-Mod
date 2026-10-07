@@ -5,6 +5,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include "log.h"
+#include "settings.h"
 
 // As long as the longest captured string (main.c's MAX_STR) and its prefix.
 #define LOG_MAX_LINE (4096 + 256)
@@ -168,6 +169,24 @@ void log_open(const char* path)
     AddVectoredExceptionHandler(1, log_on_crash);
 }
 
+// The lines written for every step of the cursor and every move: where it
+// went, what the tile was, the walls round it, the frame rate. They are most
+// of a mission's log -- 5,300 of 15,550 lines in the 2026-10-07 (21:03) log
+// were nav:, where:, cursor:, tile: and walls: alone -- and are wanted only
+// while something is being tested. With "Debug log" off in the options menu
+// (SET_DEBUG) they are not written; everything else is.
+static const char* const k_debug_only[] = {
+    "nav:", "tile:", "where:", "walls:", "cursor:", "height:", "perf:", "move:", "blast:",
+};
+
+static int log_debug_only(const char* key)
+{
+    while (*key == ' ') key++;
+    for (size_t i = 0; i < sizeof k_debug_only / sizeof k_debug_only[0]; i++)
+        if (strncmp(key, k_debug_only[i], strlen(k_debug_only[i])) == 0) return 1;
+    return 0;
+}
+
 void logf_(const char* fmt, ...)
 {
     if (g_log == INVALID_HANDLE_VALUE) return;
@@ -184,6 +203,16 @@ void logf_(const char* fmt, ...)
         const char* b = strchr(key, ']');
         if (b) key = b + 1;
     }
+
+    // The switch is noted in the log where it changes, so a log that goes
+    // quiet about steps says why.
+    static volatile LONG s_debug = -1;
+    LONG debug = settings_get(SET_DEBUG) ? 1 : 0;
+    LONG was = InterlockedExchange(&s_debug, debug);
+    if (was >= 0 && was != debug)
+        logf_("log: debug log %s\n", debug ? "on -- steps and moves are written"
+                                            : "off -- steps and moves are not written");
+    if (!debug && log_debug_only(key)) return;
 
     EnterCriticalSection(&g_lock);
     if (strcmp(key, g_last) == 0) {

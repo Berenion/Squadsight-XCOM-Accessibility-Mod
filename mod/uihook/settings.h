@@ -39,6 +39,7 @@ enum {
     SET_OBJECTIVES,     // objective changes, and the list shown by a script
     SET_NARRATIVE,      // comm-link lines (Central, Shen, Vahlen)
     SET_MOUSE,          // the physical mouse ignored while the game is in front (mouse.h)
+    SET_DEBUG,          // the log's per-step lines (log.c, log_debug_only)
     SET_COUNT
 };
 
