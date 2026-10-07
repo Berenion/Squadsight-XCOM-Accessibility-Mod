@@ -22,6 +22,7 @@ int   g_tile_slot_floorz = -1;
 int   g_unit_slot_visible = -1;
 int   g_unit_slot_alive = -1;
 int   g_unit_slot_overwatch = -1;
+int   g_core_slot_ammocost = -1;
 int   g_panel_slot_visible = -1;
 int   g_cursor_slot_floor = -1;
 int   g_world_slot_seetile = -1;

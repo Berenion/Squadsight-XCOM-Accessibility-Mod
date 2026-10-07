@@ -104,6 +104,11 @@ typedef int (__fastcall* TileCoverFn)(void* self, void* edx, float x, float y,
                                       float z, TileCoverPoint* out);
 typedef int (__fastcall* TileTestFn)(void* self, void* edx, int x, int y, int z);
 typedef int (__fastcall* UnitTestFn)(void* self, void* edx);
+// GetAmmoCost(int iWeapon, int iAbility, bool bHasAmmoConservation,
+// optional out TCharacter kCharacter, optional bool bReactionFire): the
+// TCharacter goes by pointer and is read, so it must be a real one.
+typedef int (__fastcall* AmmoCostFn)(void* self, void* edx, int weapon, int ability,
+                                     int conserve, const void* character, int reaction);
 typedef int (__fastcall* CursorFloorFn)(void* self, void* edx, float x, float y, float z);
 // IsPositionOnFloor / IsPositionOnFloorAndValidDestination(const out Vector):
 // an `out` Vector goes by pointer, not as three floats.
@@ -183,6 +188,7 @@ extern int   g_tile_slot_floorz;        // XComWorldData.GetFloorZForPosition
 extern int   g_unit_slot_visible;       // XGUnitNativeBase.IsAliveAndVisible
 extern int   g_unit_slot_alive;         // XGUnitNativeBase.IsAlive
 extern int   g_unit_slot_overwatch;     // XGUnitNativeBase.IsInOverwatch
+extern int   g_core_slot_ammocost;      // XGTacticalGameCoreNativeBase.GetAmmoCost
 extern int   g_panel_slot_visible;      // UI_FxsPanel.IsVisible
 extern int   g_cursor_slot_floor;       // XCom3DCursor.WorldZToCursorFloor
 extern int   g_world_slot_seetile;      // XComWorldData.CanSeeActorToTile

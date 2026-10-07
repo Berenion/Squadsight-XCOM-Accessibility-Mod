@@ -12,6 +12,7 @@
 #include "speech.h"
 #include "ue3.h"
 #include "input.h"
+#include "cursor.h"
 
 // Keys still owed to a mod menu that just closed: the key that closed it has
 // events left to come, and they must not reach whatever is underneath.
@@ -32,6 +33,102 @@ static ULONGLONG g_menu_grace_until;
 // open they are kept from the game in hook_moviecheck, the same way End is.
 static FieldSlot g_bar_abilities, g_ability_help;
 
+// What an ability costs in ammo, asked of the game: the cost
+// XGAbilityTree.ApplyActionCost takes off is GetAmmoCost(weapon type,
+// ability type, aUpgrades[ePerk_Foundry_AmmoConservation] > 0, the
+// character, reaction), a native. Read from the exe (HANDOFF, "The ammo
+// costs"), it depends on the weapon's Heavy and MEC properties, the ability,
+// a MEC's Expanded Storage and Ammo Conservation -- so it is asked rather
+// than copied. A MEC's Fire costs 50, its reaction shot 33, Collateral
+// Damage the whole clip.
+//
+// Rapid Fire's two shots each pay: the weapon panel shows it doubled
+// (UITacticalHUD_WeaponPanel.SetWeaponAndAmmo, GetType() == 8), and a
+// Scatter Laser at 50 was empty after one (2026-10-07 log).
+//
+// Overwatch costs nothing itself; what it costs is the reaction shot it
+// fires later, which is a standard shot with bReactionFire set
+// (XGUnit's ammo check passes bReactionShot the same way). Its ability may
+// carry no weapon, so then the unit's primary one is asked about.
+//
+// Returns the percentage of the clip, 0 for none, -1 when it cannot be told.
+#define ABILITY_SHOT_STANDARD 7     // eAbility_ShotStandard
+#define ABILITY_RAPID_FIRE    8     // eAbility_RapidFire
+#define ABILITY_OVERWATCH     22    // eAbility_Overwatch
+#define PERK_AMMO_CONSERVATION 113  // ePerk_Foundry_AmmoConservation
+static FieldSlot g_ab_type, g_ab_core, g_ab_unit, g_ab_weapon, g_ab_inventory,
+                 g_ab_primary, g_ab_item_type, g_ab_character;
+
+static void* object_at(void* obj, const char* name, FieldSlot* slot)
+{
+    const void* v;
+    if (!obj || !field_ptr(obj, name, slot, sizeof(void*), &v)) return NULL;
+    void* o = *(void* const*)v;
+    return o && unit_is_live(o) ? o : NULL;
+}
+
+static int ability_ammo_cost(void* ability, int* type_out)
+{
+    const void* v;
+    *type_out = -1;
+    if (g_core_slot_ammocost < 0 ||
+        !field_ptr(ability, "iType", &g_ab_type, sizeof(int), &v))
+        return -1;
+    int type = *type_out = *(const int*)v;
+    void* core = object_at(ability, "m_kGameCore", &g_ab_core);
+    void* unit = object_at(ability, "m_kUnit", &g_ab_unit);
+    if (!core || !unit) return -1;
+    // m_kWeapon is XGAbility_Targeted's; a plain XGAbility uses no weapon.
+    void* weapon = NULL;
+    uint32_t weapon_off;
+    if (object_field_offset(ability, "m_kWeapon", &weapon_off))
+        weapon = object_at(ability, "m_kWeapon", &g_ab_weapon);
+    if (!weapon && type == ABILITY_OVERWATCH)
+        weapon = object_at(object_at(unit, "m_kInventory", &g_ab_inventory),
+                           "m_kPrimaryWeapon", &g_ab_primary);
+    if (!weapon) return 0;
+    if (!field_ptr(weapon, "m_eType", &g_ab_item_type, 1, &v)) return -1;
+    int item = *(const uint8_t*)v;
+
+    void* character = object_at(unit, "m_kCharacter", &g_ab_character);
+    uint32_t char_off = 0, up_off = 0;
+    const void* st = character ? field_struct(character, "m_kChar", &char_off) : NULL;
+    if (!st || !struct_member(st, "aUpgrades", &up_off, NULL)) return -1;
+    const uint8_t* kchar = (const uint8_t*)character + char_off;
+    const int* conserve_at = (const int*)(kchar + up_off) + PERK_AMMO_CONSERVATION;
+    if (!readable(kchar, 0x600) || !readable(conserve_at, sizeof(int))) return -1;
+    int conserve = *conserve_at > 0;
+
+    AmmoCostFn cost_of = (AmmoCostFn)tile_vfn(core, g_core_slot_ammocost);
+    if (!cost_of) return -1;
+    int reaction = type == ABILITY_OVERWATCH;
+    int cost = cost_of(core, NULL, item, reaction ? ABILITY_SHOT_STANDARD : type,
+                       conserve, kchar, reaction);
+    if (type == ABILITY_RAPID_FIRE) cost *= 2;
+    logf_("abar: ammo cost of ability %d with item %d%s: %d\n", type, item,
+          reaction ? " (its reaction shot)" : "", cost);
+    return cost < 0 ? -1 : cost;
+}
+
+// " Uses 50% ammo." for an ability that spends any; "" otherwise.
+static void ability_cost_words(void* ability, char* out, size_t out_sz)
+{
+    out[0] = 0;
+    int type = -1, cost = -1;
+    Fault f;
+    __try {
+        cost = ability_ammo_cost(ability, &type);
+    } __except (fault_note(GetExceptionInformation(), &f)) {
+        fault_log("abar: ammo cost", &f, NULL);
+        cost = -1;
+    }
+    if (cost <= 0) return;
+    if (type == ABILITY_OVERWATCH)
+        _snprintf_s(out, out_sz, _TRUNCATE, " The reaction shot uses %d%% ammo.", cost);
+    else
+        _snprintf_s(out, out_sz, _TRUNCATE, " Uses %d%% ammo.", cost);
+}
+
 static void abar_help(int index, char* out, size_t out_sz)
 {
     out[0] = 0;
@@ -45,10 +142,17 @@ static void abar_help(int index, char* out, size_t out_sz)
         !readable(a->Data, (size_t)a->Num * sizeof(void*)))
         return;
     void* ability = ((void* const*)a->Data)[index];
-    if (!ability || !unit_is_live(ability) ||
-        !field_ptr(ability, "strHelp", &g_ability_help, sizeof(FString), &v))
-        return;
-    if (read_fstring((const FString*)v, out, out_sz)) strip_markup(out);
+    if (!ability || !unit_is_live(ability)) return;
+    if (field_ptr(ability, "strHelp", &g_ability_help, sizeof(FString), &v) &&
+        read_fstring((const FString*)v, out, out_sz))
+        strip_markup(out);
+    char cost[64];
+    ability_cost_words(ability, cost, sizeof cost);
+    if (cost[0]) {
+        size_t used = strlen(out);
+        // No help text: the cost alone, without its leading space.
+        _snprintf_s(out + used, out_sz - used, _TRUNCATE, "%s", used ? cost : cost + 1);
+    }
 }
 
 static void abar_say_entry(void)

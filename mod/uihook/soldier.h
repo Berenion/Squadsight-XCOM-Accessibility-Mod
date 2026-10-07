@@ -85,6 +85,10 @@ void soldier_weapon_words(const char* type, char* out, size_t out_sz);
 // letters, ignoring case, spaces and punctuation.
 int soldier_weapon_is(const char* name, const char* type);
 
+// Whether the panel's type is a MEC's primary weapon: the three items with
+// eWP_Mec in DefaultGameCore.ini (eItem_Chaingun, _Railgun, _ParticleBeam).
+int soldier_weapon_is_mec(const char* type);
+
 // Looser: every word of the name appears in the type, in any order.
 int soldier_weapon_like(const char* name, const char* type);
 

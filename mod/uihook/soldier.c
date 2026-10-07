@@ -207,6 +207,14 @@ static void squash(const char* in, char* out, size_t out_sz)
     out[n] = 0;
 }
 
+int soldier_weapon_is_mec(const char* type)
+{
+    static const char* const mec[] = { "_Chaingun", "_Railgun", "_ParticleBeam" };
+    for (int i = 0; type && i < (int)(sizeof mec / sizeof mec[0]); i++)
+        if (strcmp(type, mec[i]) == 0) return 1;
+    return 0;
+}
+
 int soldier_weapon_is(const char* name, const char* type)
 {
     char a[64], b[64];
@@ -242,10 +250,30 @@ void soldier_weapon_text(const char* name, const SoldierWeapon* w, char* out, si
         _snprintf_s(what, sizeof what, _TRUNCATE, "%d%% overheat chance", w->value);
     else if (w->value <= 0)
         _snprintf_s(what, sizeof what, _TRUNCATE, "%s", w->reload ? "empty, reload needed" : "empty");
-    else if (w->cost > 0) {
+    else if (soldier_weapon_is_mec(w->type)) {
+        // A MEC's weapon is said as the panel's percentage, never in shots:
+        // a shot is 50, a reaction shot 33, Collateral Damage 100, and
+        // Expanded Storage cuts each (GetAmmoCost, read from the exe), so a
+        // count would be wrong as often as right. The ability menu says what
+        // each ability costs.
+        if (w->value >= 100)
+            _snprintf_s(what, sizeof what, _TRUNCATE, "full");
+        else
+            _snprintf_s(what, sizeof what, _TRUNCATE, "%d%% ammo", w->value);
+    } else if (w->cost > 0) {
+        // Less than one shot's cost is no shot: XGUnit's ammo check refuses
+        // a fire when GetRemainingAmmo() < GetAmmoCost(). A MEC weapon's
+        // shot costs 50 but its reaction shot 33 (the native
+        // GetReactionAmmoCost), so after one the Railgun can sit at 17, and
+        // that was said as "1 shot left" though Fire would not go
+        // (2026-10-07).
         int shots = w->value / w->cost;
-        if (shots < 1) shots = 1;
-        _snprintf_s(what, sizeof what, _TRUNCATE, "%d shot%s left", shots, shots == 1 ? "" : "s");
+        if (shots < 1)
+            _snprintf_s(what, sizeof what, _TRUNCATE,
+                        "%d%% ammo, not enough for a shot, reload needed", w->value);
+        else
+            _snprintf_s(what, sizeof what, _TRUNCATE, "%d shot%s left", shots,
+                        shots == 1 ? "" : "s");
     } else if (w->value >= 100)
         _snprintf_s(what, sizeof what, _TRUNCATE, "full");
     else

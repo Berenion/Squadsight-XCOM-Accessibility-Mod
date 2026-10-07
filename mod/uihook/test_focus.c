@@ -1155,6 +1155,31 @@ int main(void)
         soldier_weapons("Rocket Launcher", w, 2, one, sizeof one, all, sizeof all);
         check(strncmp(all, "Rocket Launcher, 1 shot left. LMG,", 34) == 0,
               "the equipped weapon leads, whichever it is");
+        // Ammo left but less than a shot: the game will not fire it
+        // (2026-10-07).
+        {
+            SoldierWeapon r;
+            memset(&r, 0, sizeof r);
+            r.set = 1; strcpy_s(r.type, sizeof r.type, "_HeavyLaser"); r.cost = 33;
+            r.value = 17;
+            soldier_weapon_text("Heavy Laser", &r, one, sizeof one);
+            check(strcmp(one, "Heavy Laser, 17% ammo, not enough for a shot, reload needed.") == 0,
+                  "less than a shot's cost is not one shot");
+            r.value = 34;
+            soldier_weapon_text("Heavy Laser", &r, one, sizeof one);
+            check(strcmp(one, "Heavy Laser, 1 shot left.") == 0, "34 at 33 a shot is one");
+
+            // A MEC's weapon stays in percentages, cost known or not.
+            strcpy_s(r.type, sizeof r.type, "_Railgun"); r.cost = 50;
+            r.value = 67;
+            soldier_weapon_text("Railgun", &r, one, sizeof one);
+            check(strcmp(one, "Railgun, 67% ammo.") == 0, "a MEC's Railgun in percent");
+            r.value = 100;
+            soldier_weapon_text("Railgun", &r, one, sizeof one);
+            check(strcmp(one, "Railgun, full.") == 0, "a full Railgun");
+            check(soldier_weapon_is_mec("_Chaingun") && soldier_weapon_is_mec("_ParticleBeam") &&
+                  !soldier_weapon_is_mec("_LMG"), "the three MEC weapons, and only them");
+        }
         w[0].value = 0; w[0].reload = 1;
         soldier_weapon_text("LMG", &w[0], one, sizeof one);
         check(strcmp(one, "LMG, empty, reload needed.") == 0, "empty, and the reload flag");

@@ -1091,7 +1091,8 @@ static void combat_message(LONG n, void* stack, const Payload* p);
 static void announce(const char* text);
 static void announce_as(int setting, const char* text);
 static void soldier_stats_note(LONG n, const Payload* p);
-static int weapon_note(LONG n, const char* obj, const char* fn, const Payload* p);
+static int weapon_note(LONG n, const char* obj, const char* fn, const Payload* p,
+                       void* node, uint8_t* locals);
 static void soldier_selected(void* flag);
 static void shot_target_now(void* stack);
 
@@ -1215,6 +1216,30 @@ static int frame_float(void* node, uint8_t* locals, const char* name, float* out
         prop = next;
     }
     return 0;
+}
+
+// An object local or parameter of the call, by name, if it is still an
+// object. NULL when there is none or it is unset.
+static void* frame_object(void* node, uint8_t* locals, const char* name)
+{
+    if (!locals || !readable((uint8_t*)node + USTRUCT_CHILDREN, sizeof(void*))) return NULL;
+    void* prop = *(void**)((uint8_t*)node + USTRUCT_CHILDREN);
+    for (int guard = 0; prop && guard < MAX_FIELDS; guard++) {
+        if (!readable(prop, 0x68)) return NULL;
+        uint32_t flags = *(uint32_t*)((uint8_t*)prop + UPROPERTY_FLAGS);
+        uint32_t off   = *(uint32_t*)((uint8_t*)prop + UPROPERTY_OFFSET);
+        void* next     = *(void**)((uint8_t*)prop + UFIELD_NEXT);
+        if (!(flags & CPF_RETURNPARM) && off < 0x1000 && props_kind(prop) == PROP_UNKNOWN) {
+            char pname[64];
+            object_name(prop, pname, sizeof pname);
+            if (strcmp(pname, name) == 0) {
+                void* obj = *(void* const*)(locals + off);
+                return obj && unit_is_live(obj) ? obj : NULL;
+            }
+        }
+        prop = next;
+    }
+    return NULL;
 }
 
 // A string parameter by name with its line breaks read as stops, the way
@@ -3688,7 +3713,7 @@ static int tactical_call(const Call* c)
     }
     // The weapon panels: the equipped weapon and the ammo each has. Kept for
     // the soldier's readouts, not said as they pass (weapon_note).
-    if (weapon_note(n, obj_name, fn_name, p)) return 1;
+    if (weapon_note(n, obj_name, fn_name, p, node, locals)) return 1;
     // Whose turn it is. See combat_turn in combat.h.
     if (strncmp(obj_name, "UITurnOverlay", 13) == 0) {
         const char* strs[8];
@@ -7157,6 +7182,7 @@ static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
         { "XGUnitNativeBaseexecIsAliveAndVisible",   &g_unit_slot_visible,  NULL },
         { "XGUnitNativeBaseexecIsAlive",             &g_unit_slot_alive,    NULL },
         { "XGUnitNativeBaseexecIsInOverwatch",       &g_unit_slot_overwatch, NULL },
+        { "XGTacticalGameCoreNativeBaseexecGetAmmoCost", &g_core_slot_ammocost, NULL },
         { "UI_FxsPanelexecIsVisible",                &g_panel_slot_visible, NULL },
         { "XCom3DCursorexecWorldZToCursorFloor",     &g_cursor_slot_floor,  NULL },
         { "VolumeexecEncompassesPoint",              &g_volume_slot_encompass,
@@ -7279,8 +7305,16 @@ static UnitName* unit_of_flag(void* flag)
 //
 // A shot's cost is only sent while an ability that uses the weapon is
 // selected, and GetAmmoCost is native, so each type's cost is learnt as it
-// passes and kept for the mission: the smallest seen, since Rapid Fire sends
-// double.
+// passes and kept for the mission: the smallest seen.
+//
+// Only while that ability is a plain shot (eAbility_ShotStandard), though:
+// the cost is the selected ability's, and Rapid Fire's is doubled
+// (SetWeaponAndAmmo, GetType() == 8) and a MEC's Collateral Damage
+// (eAbility_MEC_Barrage) costs the whole clip (the native GetAmmoCost, read
+// from the exe 2026-10-07). Fire is unavailable with no enemy in sight, so a
+// MEC's HUD can sit on Collateral Damage for a whole turn.
+// The selected ability is SetWeaponAndAmmo's own local kTAbility.
+#define WEAPON_COST_ABILITY 7   // eAbility_ShotStandard
 #define WEAPON_COSTS 32
 static SoldierWeapon g_weapon[2];
 static char          g_weapon_name[64];
@@ -7395,7 +7429,10 @@ static int weapon_x_same_soldier(void)
 
 static void weapon_words(char* active, size_t active_sz, char* all, size_t all_sz);
 
-static int weapon_note(LONG n, const char* obj, const char* fn, const Payload* p)
+static FieldSlot g_weapon_ability_type;
+
+static int weapon_note(LONG n, const char* obj, const char* fn, const Payload* p,
+                       void* node, uint8_t* locals)
 {
     if (strncmp(obj, "UITacticalHUD_WeaponContainer", 29) == 0 && strstr(fn, "SetWeaponName")) {
         const char* name = p->nstrings ? p->strings[0] : "";
@@ -7430,12 +7467,19 @@ static int weapon_note(LONG n, const char* obj, const char* fn, const Payload* p
     w->overheat = p->nabools > 0 ? p->abools[0] : 0;
     w->reload = p->nabools > 1 ? p->abools[1] : 0;
     int known = weapon_cost(w->type);
-    if (!w->overheat) weapon_learn_cost(w->type, cost);
+    int ability = -1;
+    if (cost > 0) {
+        void* a = frame_object(node, locals, "kTAbility");
+        const void* v;
+        if (a && field_ptr(a, "iType", &g_weapon_ability_type, sizeof(int), &v))
+            ability = *(const int*)v;
+    }
+    if (!w->overheat && ability == WEAPON_COST_ABILITY) weapon_learn_cost(w->type, cost);
     // Every HUD update redraws both panels; only a change is worth a line.
     if (memcmp(&was, w, sizeof was) != 0 || weapon_cost(w->type) != known)
-        logf_("[%ld] weapon: %s %s %s %d, cost %d (%d known)%s\n", n, obj,
+        logf_("[%ld] weapon: %s %s %s %d, cost %d for ability %d (%d known)%s\n", n, obj,
               w->set ? w->type : "(none)", w->overheat ? "overheat" : "ammo", w->value,
-              cost, weapon_cost(w->type), w->reload ? ", reload needed" : "");
+              cost, ability, weapon_cost(w->type), w->reload ? ", reload needed" : "");
     return 1;
 }
 
