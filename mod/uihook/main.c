@@ -483,6 +483,21 @@ static char      g_slots_row[SLOT_ROWS][FOCUS_MAX_LABEL];
 static int       g_slots_button[SLOT_ROWS];
 static int       g_slots_n, g_slots_sel = -1;
 static void      slots_select(LONG n, int i, const char* lead);
+static void      slots_select_as(LONG n, int i, int game, const char* lead);
+// The Psi Labs being left with Escape, and when: its last redraw is not said.
+static void*     g_slots_leaving;
+static ULONGLONG g_slots_leaving_at;
+
+// Which of the Psi Labs' views is up (UIPsiLabs.m_iView): 0 the test
+// subjects, 1 picking a soldier, 2 the test results; -1 for another lab.
+static int psilabs_view(void* screen)
+{
+    static FieldSlot slot;
+    const void* v;
+    if (!screen || !objects_live(screen)) return -1;
+    if (!field_ptr(screen, "m_iView", &slot, sizeof(int32_t), &v)) return -1;
+    return *(const int32_t*)v;
+}
 
 // The end-of-month report (UIWorldReport, then UIEndOfMonthReport). See the
 // handler in capture_body. The summary page is kept a line at a time for the
@@ -2770,6 +2785,11 @@ static int base_call(const Call* c)
         strncmp(obj_name, "UICyberneticsLab", 16) == 0) {
         if (strcmp(fn_name, "AS_SetTitleLabels") == 0) {
             frame_string(node, locals, 0, g_slots_title, sizeof g_slots_title);
+            // The Psi Labs' titles end in a colon ("Test Results:"), which
+            // came out as "Test Results:." in front of the slots.
+            size_t len = strlen(g_slots_title);
+            while (len && (g_slots_title[len - 1] == ':' || g_slots_title[len - 1] == ' '))
+                g_slots_title[--len] = 0;
             return 1;
         }
         if (strcmp(fn_name, "AS_ClearSoldiers") == 0) {
@@ -2803,9 +2823,29 @@ static int base_call(const Call* c)
                 i = 0;
                 for (int k = 0; k < g_slots_n; k++) if (g_slots_button[k]) { i = k; break; }
             }
+            // Escape in the Psi Labs redraws the slots on its way out
+            // (XGPsiLabsUI.OnLeaveResults -> GoToView(0)) and only then
+            // leaves (OnLeaveFacility -> PopState). The 2026-10-08 (20:52)
+            // log said "Current Test Subjects ... Enter: ADD SOLDIER" with
+            // the player already back in the barracks menu. That redraw is
+            // kept for the slots, not said.
+            if (g_slots_leaving == object && GetTickCount64() - g_slots_leaving_at < 1000) {
+                g_slots_leaving = NULL;
+                g_slots_obj = object;
+                g_slots_sel = i;
+                logf_("[%ld] SLOTS redrawn on the way out, not said\n", n);
+                return 1;
+            }
+            // The test results (UIPsiLabs m_iView 2) are read, not chosen
+            // from: Enter only plays the bad sound (UIPsiLabs.OnAccept), and
+            // Escape is the way on.
             char lead[160];
-            _snprintf_s(lead, sizeof lead, _TRUNCATE, "%s%s", g_slots_title,
-                        g_slots_title[0] ? ". Up and Down choose a slot. " : "");
+            if (strncmp(obj_name, "UIPsiLabs", 9) == 0 && psilabs_view(object) == 2)
+                _snprintf_s(lead, sizeof lead, _TRUNCATE, "%s%sEscape leaves the Psi Labs. ",
+                            g_slots_title, g_slots_title[0] ? ". " : "");
+            else
+                _snprintf_s(lead, sizeof lead, _TRUNCATE, "%s%s", g_slots_title,
+                            g_slots_title[0] ? ". Up and Down choose a slot. " : "");
             slots_select(n, i, lead);
             return 1;
         }
@@ -3974,6 +4014,36 @@ static int tactical_call(const Call* c)
     return 0;
 }
 
+// A psi rank's name (1 to 4), as XGTacticalGameCore.GetRankString(rank,,
+// true) gives it: the localized m_aPsiRankNames[EPsiRanks] off the class
+// default object. Found by a walk of the object table (~50 ms), so the names
+// are kept once read, and a miss is retried at most every 10 s.
+static int psi_rank_name(int rank, char* out, size_t out_sz)
+{
+    static char names[5][64];
+    static int have;
+    static ULONGLONG tried;
+    static FieldSlot slot;
+    if (rank < 1 || rank > 4) return 0;
+    if (!have) {
+        ULONGLONG now = GetTickCount64();
+        if (tried && now - tried < 10000) return 0;
+        tried = now;
+        void* core = (void*)objects_named("Default__XGTacticalGameCore");
+        const void* v;
+        if (core && field_ptr(core, "m_aPsiRankNames", &slot, 5 * sizeof(FString), &v)) {
+            for (int i = 1; i < 5; i++)
+                if (read_fstring((const FString*)v + i, names[i], sizeof names[i])) have = 1;
+        }
+        logf_("psi ranks: %s, %s, %s, %s (Default__XGTacticalGameCore %p)\n",
+              names[1], names[2], names[3], names[4], core);
+        if (!have) return 0;
+    }
+    if (!names[rank][0]) return 0;
+    strncpy_s(out, out_sz, names[rank], _TRUNCATE);
+    return 1;
+}
+
 // The screens between missions that stand after the name-free button
 // tests (the help bar, the two-button screens, the panel, a button's
 // focus), which take their calls too: Mission Control's notices and
@@ -5055,11 +5125,13 @@ static int screens_call(const Call* c)
     // a label and every move read a rank or an icon name.
     if (strncmp(obj_name, "UISoldierPromotion", 18) == 0) {
         static FrameArgs a;
+        static int psi;
         if (strcmp(fn_name, "AS_InitializeTree") == 0) {
             frame_args(node, locals, &a);
             hq_promo_reset(a.ns ? a.s[0] : "");
-            logf_("[%ld] %s %s.%s  PROMOTION tree \"%s\"\n", n, tag, obj_name, fn_name,
-                  a.ns ? a.s[0] : "");
+            psi = a.nb && a.b[0];       // AS_InitializeTree(title, icon, psi)
+            logf_("[%ld] %s %s.%s  PROMOTION tree \"%s\"%s\n", n, tag, obj_name, fn_name,
+                  a.ns ? a.s[0] : "", psi ? " (psi)" : "");
             return 1;
         }
         if (strcmp(fn_name, "AS_SetAbilityIcon") == 0 && p->nnumbers >= 2) {
@@ -5070,7 +5142,18 @@ static int screens_call(const Call* c)
         }
         if (strcmp(fn_name, "AS_SetColumnData") == 0 && p->nnumbers >= 2) {
             frame_args(node, locals, &a);
-            hq_promo_column((int)p->numbers[0], a.ns ? a.s[0] : "", (int)p->numbers[1]);
+            // The psi tree's columns are labelled with the ordinary ranks
+            // (UISoldierPromotion.UpdateAbilityData: GetRankString(column + 1)
+            // without bPsi), while its locked description names the psi rank
+            // (XGSoldierUI.GetHighlightedPerkDescription: GetRankString(branch,,
+            // true)). The 2026-10-08 (20:52) log had a lieutenant hear
+            // "CORPORAL, not reached ... available at psi rank Specialist".
+            // So a psi column says its psi rank, as the description does.
+            int col = (int)p->numbers[0];
+            char psi_name[64];
+            const char* label = a.ns ? a.s[0] : "";
+            if (psi && psi_rank_name(col + 1, psi_name, sizeof psi_name)) label = psi_name;
+            hq_promo_column(col, label, (int)p->numbers[1]);
             return 1;
         }
         if (strcmp(fn_name, "AS_SetSelectedIcon") == 0 && p->nnumbers >= 2) {
@@ -6311,7 +6394,7 @@ static int sitroom_up(void)
 }
 
 // Up and Down in a lab with soldier slots. See slots_select.
-static void slots_walk(LONG n, int down);
+static void slots_walk(LONG n, int down, int game_moves);
 
 // Y reaching the covert ops map when no scan can be run. OnSweepDialogue
 // returns without a sound unless CanPerformSweep, so 2 (or the menu's
@@ -6536,7 +6619,28 @@ static int rewrite_cmd(LONG n, void* stack)
     if (press && (cmd == FXS_ARROW_UP || cmd == FXS_ARROW_DOWN) &&
         (strncmp(screen, "UIGeneLab", 9) == 0 || strncmp(screen, "UIPsiLabs", 9) == 0 ||
          strncmp(screen, "UICyberneticsLab", 16) == 0))
-        slots_walk(n, cmd == FXS_ARROW_DOWN);
+        slots_walk(n, cmd == FXS_ARROW_DOWN, strncmp(screen, "UIPsiLabs", 9) == 0);
+
+    // The Psi Labs: Escape leaves from the subjects and from the results
+    // (UIPsiLabs.OnCancel; view 1, the soldier list, goes back instead),
+    // and Enter on the results only plays the bad sound. See slots_select.
+    if (press && strncmp(screen, "UIPsiLabs", 9) == 0 &&
+        (cmd == FXS_KEY_ESCAPE || cmd == FXS_BUTTON_B || cmd == FXS_KEY_ENTER ||
+         cmd == FXS_BUTTON_A)) {
+        int view = psilabs_view(object);
+        if ((cmd == FXS_KEY_ESCAPE || cmd == FXS_BUTTON_B) && view != 1) {
+            g_slots_leaving = object;
+            g_slots_leaving_at = GetTickCount64();
+            logf_("[%ld] SLOTS leaving the Psi Labs from view %d\n", n, view);
+        } else if ((cmd == FXS_KEY_ENTER || cmd == FXS_BUTTON_A) && view == 2) {
+            char say[160];
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%sEscape leaves the Psi Labs.",
+                        g_slots_title, g_slots_title[0] ? ". " : "");
+            logf_("[%ld] SLOTS Enter on the results: \"%s\"\n", n, say);
+            speech_cancel_pending();
+            if (g_speak) speech_say_now(say);
+        }
+    }
 
     // Up or Down on the finance statement walks it. See fin_walk.
     if (press && (cmd == FXS_ARROW_UP || cmd == FXS_ARROW_DOWN) &&
@@ -6666,12 +6770,19 @@ static FieldSlot g_slots_cur;
 // Puts the choice into the game and says it; `lead` goes in front.
 static void slots_select(LONG n, int i, const char* lead)
 {
+    slots_select_as(n, i, i, lead);
+}
+
+// The same, writing `game` into the screen: the slot the game is to start
+// from, when its own handler is still to move it. See slots_walk.
+static void slots_select_as(LONG n, int i, int game, const char* lead)
+{
     if (!g_slots_obj || i < 0 || i >= g_slots_n) return;
     g_slots_sel = i;
     const void* v;
     if (field_ptr(g_slots_obj, "m_iCurrentSelection", &g_slots_cur, sizeof(int32_t), &v) &&
         writable(v, sizeof(int32_t)))
-        *(int32_t*)v = i;
+        *(int32_t*)v = game;
     char say[FOCUS_MAX_LABEL + 256];
     _snprintf_s(say, sizeof say, _TRUNCATE, "%sSlot %d of %d: %s", lead ? lead : "", i + 1,
                 g_slots_n, g_slots_row[i]);
@@ -6680,13 +6791,21 @@ static void slots_select(LONG n, int i, const char* lead)
     if (g_speak) speech_say_now(say);
 }
 
-static void slots_walk(LONG n, int down)
+// The Psi Labs, unlike the other two, moves on Up and Down itself
+// (UIPsiLabs.OnUnrealCommand: m_iCurrentSelection -/+ 1, wrapping over the
+// slots) -- after this hook, which runs inside the screen's first call. So
+// writing the new slot there moved it twice, and Enter acted on a slot other
+// than the one said. There the slot the mod stands on is written instead,
+// and the game's own step lands on the one said.
+static void slots_walk(LONG n, int down, int game_moves)
 {
     if (!g_slots_n) return;
-    int i = g_slots_sel + (down ? 1 : -1);
+    int from = g_slots_sel;
+    if (from < 0 || from >= g_slots_n) from = 0;
+    int i = from + (down ? 1 : -1);
     if (i >= g_slots_n) i = 0;
     if (i < 0) i = g_slots_n - 1;
-    slots_select(n, i, "");
+    slots_select_as(n, i, game_moves ? from : i, "");
 }
 
 
