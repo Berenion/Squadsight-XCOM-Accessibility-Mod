@@ -32,3 +32,8 @@ dolapi32.dll
 
 # Release packages (package.bat)
 /mod/uihook/dist/
+
+# Development notes and tools: kept locally, not published.
+/HANDOFF.md
+/CLAUDE.md
+/tools/

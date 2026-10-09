@@ -50,11 +50,23 @@ rc /nologo /fo launcher.res /i "%HERE:~0,-1%" "%HERE%launcher.rc"
 if errorlevel 1 (popd & echo RESOURCE BUILD FAILED & exit /b 1)
 
 cl /nologo /W3 /O2 /MT "%HERE%launcher.c" "%HERE%gamepaths.c" "%HERE%injector.c" ^
-   "%HERE%install.c" "%HERE%update.c" ^
+   "%HERE%install.c" "%HERE%update.c" "%HERE%progress.c" ^
    launcher.res /Fe:launcher.exe ^
    /link /SUBSYSTEM:WINDOWS user32.lib advapi32.lib shlwapi.lib shell32.lib ole32.lib ^
    uuid.lib winhttp.lib
 if errorlevel 1 (popd & echo LAUNCHER BUILD FAILED & exit /b 1)
+
+rem The setup, the one file a player downloads (setup.c). The asInvoker
+rem manifest is not optional: Windows takes "Setup" in a name without one to
+rem mean an installer, and asks for administrator rights.
+rc /nologo /fo setup.res /i "%HERE:~0,-1%" "%HERE%setup.rc"
+if errorlevel 1 (popd & echo SETUP RESOURCE BUILD FAILED & exit /b 1)
+
+cl /nologo /W3 /O2 /MT "%HERE%setup.c" "%HERE%update.c" "%HERE%progress.c" ^
+   setup.res /Fe:Squadsight-Setup.exe ^
+   /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTUAC:"level='asInvoker' uiAccess='false'" ^
+   user32.lib advapi32.lib winhttp.lib
+if errorlevel 1 (popd & echo SETUP BUILD FAILED & exit /b 1)
 
 cl /nologo /W3 /O2 /MT "%HERE%test_natives.c" "%HERE%natives.c" /Fe:test_natives.exe
 if errorlevel 1 (popd & echo TEST BUILD FAILED & exit /b 1)
@@ -84,3 +96,4 @@ echo.
 echo Built: %OUT%\launcher.exe   (start here)
 echo        %OUT%\xcom_uihook.dll
 echo        %OUT%\inject.exe
+echo        %OUT%\Squadsight-Setup.exe   (what a release offers)

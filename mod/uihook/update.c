@@ -125,19 +125,40 @@ BOOL update_json_string(const char* json, const char* key, char* out, size_t out
     return TRUE;
 }
 
-BOOL update_zip_url(const char* json, char* out, size_t out_sz)
+// The name is taken from the address rather than from the asset's "name": the
+// asset object holds other "name" keys (its uploader's, in "login" and the
+// like, and a release's own title comes before the assets), while the last
+// segment of browser_download_url is always the file as it was uploaded.
+int update_assets(const char* json, ReleaseAsset* out, int max)
 {
-    out[0] = 0;
+    int n = 0;
     const char* from = json;
     const char* v;
-    while (from && (v = json_value(from, "browser_download_url", &from)) != NULL) {
+    while (n < max && from && (v = json_value(from, "browser_download_url", &from)) != NULL) {
         if (*v != '"') continue;
-        json_unescape(v + 1, out, out_sz);
-        size_t len = strlen(out);
-        if (len > 4 && _stricmp(out + len - 4, ".zip") == 0) return TRUE;
+        ReleaseAsset* a = &out[n];
+        json_unescape(v + 1, a->url, sizeof a->url);
+        const char* slash = strrchr(a->url, '/');
+        if (!slash || !slash[1]) continue;
+        strncpy_s(a->name, sizeof a->name, slash + 1, _TRUNCATE);
+        ++n;
     }
-    out[0] = 0;
-    return FALSE;
+    return n;
+}
+
+const ReleaseAsset* update_asset(const Release* r, const char* name)
+{
+    for (int i = 0; i < r->asset_count; ++i)
+        if (_stricmp(r->assets[i].name, name) == 0) return &r->assets[i];
+    return NULL;
+}
+
+BOOL update_asset_is_mod_file(const ReleaseAsset* a)
+{
+    size_t len = strlen(a->name);
+    if (_stricmp(a->name, SETUP_NAME) == 0) return FALSE;
+    if (len > 4 && _stricmp(a->name + len - 4, ".zip") == 0) return FALSE;
+    return TRUE;
 }
 
 BOOL update_parse_release(const char* json, Release* r, char* err, size_t err_sz)
@@ -156,8 +177,9 @@ BOOL update_parse_release(const char* json, Release* r, char* err, size_t err_sz
     }
     update_json_string(json, "html_url", r->page_url, sizeof r->page_url);
     update_json_string(json, "body", r->notes, sizeof r->notes);
-    if (!update_zip_url(json, r->zip_url, sizeof r->zip_url)) {
-        sprintf_s(err, err_sz, "Release %s has no zip file attached.", r->tag);
+    r->asset_count = update_assets(json, r->assets, RELEASE_ASSETS);
+    if (!update_asset(r, "launcher.exe")) {
+        sprintf_s(err, err_sz, "Release %s has no launcher.exe attached.", r->tag);
         return FALSE;
     }
     return TRUE;
@@ -312,39 +334,33 @@ BOOL update_download(const char* url, const char* path, char* err, size_t err_sz
     return ok;
 }
 
-BOOL update_unzip(const char* zip, const char* dir, char* err, size_t err_sz)
+BOOL update_fetch_files(const Release* r, const char* dir,
+                        void (*progress)(void* ctx, const char* text), void* ctx,
+                        char* err, size_t err_sz)
 {
-    // System32's tar by its full path: a tar earlier on PATH (Git's is GNU
-    // tar, which cannot read zip) would fail where this one works.
-    char tar[MAX_PATH];
-    UINT n = GetSystemDirectoryA(tar, MAX_PATH);
-    if (!n || n >= MAX_PATH - 10) { strcpy_s(err, err_sz, "No system folder."); return FALSE; }
-    strcat_s(tar, sizeof tar, "\\tar.exe");
-    if (GetFileAttributesA(tar) == INVALID_FILE_ATTRIBUTES) {
-        strcpy_s(err, err_sz, "This version of Windows has no tar.exe to unpack the "
-                              "update with (it came with Windows 10 version 1803).");
-        return FALSE;
-    }
-
-    char command[3 * MAX_PATH];
-    sprintf_s(command, sizeof command, "\"%s\" -xf \"%s\" -C \"%s\"", tar, zip, dir);
-    STARTUPINFOA si = { sizeof si };
-    PROCESS_INFORMATION pi = { 0 };
-    if (!CreateProcessA(tar, command, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, dir,
-                        &si, &pi)) {
-        sprintf_s(err, err_sz, "Could not start tar.exe (error %lu).", GetLastError());
-        return FALSE;
-    }
-    CloseHandle(pi.hThread);
-    DWORD code = 1;
-    if (WaitForSingleObject(pi.hProcess, 60000) == WAIT_OBJECT_0)
-        GetExitCodeProcess(pi.hProcess, &code);
-    else
-        TerminateProcess(pi.hProcess, 1);
-    CloseHandle(pi.hProcess);
-    if (code != 0) {
-        sprintf_s(err, err_sz, "Unpacking the update failed (tar.exe exit code %lu).", code);
-        return FALSE;
+    int total = 0, done = 0;
+    for (int i = 0; i < r->asset_count; ++i)
+        if (update_asset_is_mod_file(&r->assets[i])) ++total;
+    for (int i = 0; i < r->asset_count; ++i) {
+        const ReleaseAsset* a = &r->assets[i];
+        if (!update_asset_is_mod_file(a)) continue;
+        // A name that could climb out of the folder is not a file of ours.
+        if (strchr(a->name, '\\') || strchr(a->name, '/') ||strstr(a->name, "..") || strchr(a->name, ':')) {
+            sprintf_s(err, err_sz, "The release has a file with a strange name: %s", a->name);
+            return FALSE;
+        }
+        if (progress) {
+            char text[256];
+            sprintf_s(text, sizeof text, "Downloading %s, %d of %d...", a->name, ++done, total);
+            progress(ctx, text);
+        }
+        char path[MAX_PATH];
+        sprintf_s(path, sizeof path, "%s\\%s", dir, a->name);
+        char why[512];
+        if (!update_download(a->url, path, why, sizeof why)) {
+            sprintf_s(err, err_sz, "%s: %s", a->name, why);
+            return FALSE;
+        }
     }
     return TRUE;
 }

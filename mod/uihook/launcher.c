@@ -5,13 +5,15 @@
 //   launcher.exe /eu        XCOM: Enemy Unknown, no question
 //   launcher.exe /ew        XCOM: Enemy Within, no question
 //   launcher.exe /install   copy this folder's mod into the install folder
+//   launcher.exe /install /setup   the same, then open the installed launcher
+//                           (what Squadsight-Setup.exe runs, setup.c)
 //   launcher.exe /uninstall remove the installed mod (Windows' Uninstall runs this)
 //   launcher.exe /noupdate  skip the check for a newer release
 //   launcher.exe /stage DIR copy a release's files into DIR (package.bat)
 //
 // On every start the launcher asks GitHub for the latest release and offers it
-// when it is newer than MOD_VERSION.  An accepted update is downloaded and
-// unpacked into the temp folder, and the new launcher is started there with
+// when it is newer than MOD_VERSION.  An accepted update's files are downloaded
+// into the temp folder, and the new launcher is started there with
 // `/install /after <pid> /then <the original arguments>`: it waits for this one
 // to exit, installs its own files, and starts the installed launcher with the
 // original arguments, so a desktop shortcut's /ew still ends in the game.
@@ -26,6 +28,7 @@
 #include "gamepaths.h"
 #include "injector.h"
 #include "install.h"
+#include "progress.h"
 #include "resource.h"
 #include "update.h"
 #include "version.h"
@@ -42,7 +45,6 @@
 #define DEFAULT_DLL  "xcom_uihook.dll"
 #define LOG_NAME     "xcom_uihook.log"
 #define TITLE        "XCOM Accessibility Launcher"
-#define UPDATE_DIR   MOD_NAME "-update"
 
 // What the publisher's own launcher passes, and it is not cosmetic: started
 // without -FROMLAUNCHER the game boots all the way to the main menu and then
@@ -166,10 +168,9 @@ static BOOL load_config(Config* cfg)
 typedef struct {
     Release release;
     char work[MAX_PATH];        // %TEMP%\Squadsight-update
-    char launcher[MAX_PATH];    // the new launcher.exe, once unpacked
+    char launcher[MAX_PATH];    // the new launcher.exe, once downloaded
     char err[512];
     BOOL ok;
-    HWND progress;
 } Fetch;
 
 static void update_work_dir(char* out, size_t out_sz)
@@ -179,41 +180,11 @@ static void update_work_dir(char* out, size_t out_sz)
     sprintf_s(out, out_sz, "%s%s", temp, UPDATE_DIR);
 }
 
-static void progress_say(HWND progress, const char* text)
-{
-    if (!progress) return;
-    SetDlgItemTextA(progress, IDC_PROGRESS_TEXT, text);
-    SetWindowTextA(progress, text);
-}
-
-// The release zip holds one folder (Squadsight-0.9.1\...); a flat zip is taken
-// too, so that a hand-made one still works.
-static BOOL find_unpacked_launcher(const char* dir, char* out, size_t out_sz)
-{
-    sprintf_s(out, out_sz, "%s\\launcher.exe", dir);
-    if (GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES) return TRUE;
-    char pattern[MAX_PATH];
-    sprintf_s(pattern, sizeof pattern, "%s\\*", dir);
-    WIN32_FIND_DATAA fd;
-    HANDLE find = FindFirstFileA(pattern, &fd);
-    BOOL found = FALSE;
-    if (find != INVALID_HANDLE_VALUE) {
-        do {
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.')
-                continue;
-            sprintf_s(out, out_sz, "%s\\%s\\launcher.exe", dir, fd.cFileName);
-            found = GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES;
-        } while (!found && FindNextFileA(find, &fd));
-        FindClose(find);
-    }
-    if (!found) out[0] = 0;
-    return found;
-}
-
+// Each of the mod's files is an asset of the release (update.h), fetched into
+// the work folder one by one; the new launcher among them installs the rest.
 static DWORD WINAPI fetch_thread(LPVOID param)
 {
     Fetch* f = (Fetch*)param;
-    char zip[MAX_PATH], unpacked[MAX_PATH], text[256];
 
     install_delete_tree(f->work);
     if (!CreateDirectoryA(f->work, NULL)) {
@@ -221,63 +192,24 @@ static DWORD WINAPI fetch_thread(LPVOID param)
                   GetLastError());
         return 0;
     }
-    sprintf_s(zip, sizeof zip, "%s\\%s-%s.zip", f->work, MOD_NAME, f->release.tag);
-    launcher_log("update: downloading %s\n", f->release.zip_url);
-    if (!update_download(f->release.zip_url, zip, f->err, sizeof f->err)) return 0;
-
-    sprintf_s(text, sizeof text, "Unpacking %s %s...", MOD_NAME, f->release.tag);
-    progress_say(f->progress, text);
-    sprintf_s(unpacked, sizeof unpacked, "%s\\files", f->work);
-    CreateDirectoryA(unpacked, NULL);
-    if (!update_unzip(zip, unpacked, f->err, sizeof f->err)) return 0;
-    if (!find_unpacked_launcher(unpacked, f->launcher, sizeof f->launcher)) {
-        sprintf_s(f->err, sizeof f->err, "The downloaded release has no launcher.exe in it.");
+    launcher_log("update: downloading %d files of %s\n", f->release.asset_count,
+                 f->release.tag);
+    if (!update_fetch_files(&f->release, f->work, progress_say, NULL, f->err, sizeof f->err)) {
+        launcher_log("update: download FAILED -- %s\n", f->err);
         return 0;
     }
-    launcher_log("update: unpacked, the new launcher is %s\n", f->launcher);
+    sprintf_s(f->launcher, sizeof f->launcher, "%s\\launcher.exe", f->work);
+    launcher_log("update: downloaded, the new launcher is %s\n", f->launcher);
     f->ok = TRUE;
     return 0;
 }
 
-static INT_PTR CALLBACK progress_proc(HWND dlg, UINT msg, WPARAM wparam, LPARAM lparam)
-{
-    (void)dlg; (void)msg; (void)wparam; (void)lparam;
-    return FALSE;
-}
-
-// Downloads and unpacks on a thread while this one keeps the progress window
-// alive, so that a screen reader hears it come up and Windows does not call
-// the launcher hung.
 static BOOL fetch_release(HWND owner, Fetch* f)
 {
     char text[256];
     sprintf_s(text, sizeof text, "Downloading %s %s, please wait...", MOD_NAME, f->release.tag);
-    f->progress = CreateDialogParamA(GetModuleHandleA(NULL), MAKEINTRESOURCEA(IDD_PROGRESS),
-                                     owner, progress_proc, 0);
-    progress_say(f->progress, text);
-    if (f->progress) SetForegroundWindow(f->progress);
-    if (owner) EnableWindow(owner, FALSE);
-
-    HANDLE thread = CreateThread(NULL, 0, fetch_thread, f, 0, NULL);
-    if (!thread) {
+    if (!progress_run(owner, text, fetch_thread, f))
         strcpy_s(f->err, sizeof f->err, "Could not start the download.");
-    } else {
-        while (MsgWaitForMultipleObjects(1, &thread, FALSE, INFINITE, QS_ALLINPUT) ==
-               WAIT_OBJECT_0 + 1) {
-            MSG m;
-            while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE)) {
-                if (!f->progress || !IsDialogMessageA(f->progress, &m)) {
-                    TranslateMessage(&m);
-                    DispatchMessageA(&m);
-                }
-            }
-        }
-        CloseHandle(thread);
-    }
-
-    if (owner) EnableWindow(owner, TRUE);
-    if (f->progress) DestroyWindow(f->progress);
-    f->progress = NULL;
     return f->ok;
 }
 
@@ -446,6 +378,14 @@ static int run_install(const Config* cfg, const char* args)
     }
     char text[1024];
     installed_summary(text, sizeof text);
+    // From the setup: this copy sits in the temp folder, so the launcher the
+    // player goes on with is the installed one, opened here rather than left
+    // to the desktop shortcut. No update check: the setup has just fetched the
+    // latest release.
+    if (StrStrIA(args, "/setup")) {
+        say_info(NULL, "%s\n\nThe launcher opens now.", text);
+        return start_installed("/noupdate") ? 0 : 1;
+    }
     say_info(NULL, "%s", text);
     return 0;
 }

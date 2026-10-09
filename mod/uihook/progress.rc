@@ -1,0 +1,9 @@
+// The download's progress window (progress.c), shared by the launcher and the
+// setup.  Its caption is replaced by the text as soon as it opens.
+IDD_PROGRESS DIALOGEX 0, 0, 200, 40
+STYLE DS_MODALFRAME | DS_CENTER | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_VISIBLE
+CAPTION "Squadsight"
+FONT 8, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    LTEXT           "", IDC_PROGRESS_TEXT, 12, 12, 176, 18
+END

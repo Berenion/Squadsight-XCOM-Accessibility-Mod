@@ -20,7 +20,8 @@ static int cmp(const char* a, const char* b)
 }
 
 // Shaped like the real answer: the asset's url (the API's) comes before
-// browser_download_url, and a source tarball's address precedes the zip's.
+// browser_download_url, the release's own "name" comes before the assets, and
+// the mod's files sit beside the setup and an old release's zip.
 static const char RELEASE[] =
     "{\n"
     "  \"url\": \"https://api.github.com/repos/x/y/releases/1\",\n"
@@ -28,10 +29,16 @@ static const char RELEASE[] =
     "  \"tag_name\": \"v0.9.1\",\n"
     "  \"name\": \"Squadsight 0.9.1\",\n"
     "  \"assets\": [\n"
+    "    { \"url\": \"https://api.github.com/repos/x/y/releases/assets/6\",\n"
+    "      \"name\": \"Squadsight-Setup.exe\",\n"
+    "      \"browser_download_url\": \"https://github.com/x/y/releases/download/v0.9.1/Squadsight-Setup.exe\" },\n"
     "    { \"url\": \"https://api.github.com/repos/x/y/releases/assets/7\",\n"
-    "      \"name\": \"notes.txt\",\n"
-    "      \"browser_download_url\": \"https://github.com/x/y/releases/download/v0.9.1/notes.txt\" },\n"
+    "      \"name\": \"launcher.exe\",\n"
+    "      \"browser_download_url\": \"https://github.com/x/y/releases/download/v0.9.1/launcher.exe\" },\n"
     "    { \"url\": \"https://api.github.com/repos/x/y/releases/assets/8\",\n"
+    "      \"name\": \"xcom_uihook.dll\",\n"
+    "      \"browser_download_url\": \"https://github.com/x/y/releases/download/v0.9.1/xcom_uihook.dll\" },\n"
+    "    { \"url\": \"https://api.github.com/repos/x/y/releases/assets/9\",\n"
     "      \"name\": \"Squadsight-0.9.1.zip\",\n"
     "      \"browser_download_url\": \"https://github.com/x/y/releases/download/v0.9.1/Squadsight-0.9.1.zip\" }\n"
     "  ],\n"
@@ -64,22 +71,31 @@ int main(void)
     CHECK(update_json_string(RELEASE, "body", s, sizeof s) &&
           !strcmp(s, "## Changes\n- Say \"hello\" \xC3\xA9\xF0\x9F\x98\x80\n- Path C:\\x"));
 
-    CHECK(update_zip_url(RELEASE, s, sizeof s) &&
-          !strcmp(s, "https://github.com/x/y/releases/download/v0.9.1/Squadsight-0.9.1.zip"));
-    CHECK(!update_zip_url("{\"assets\": []}", s, sizeof s));
+    ReleaseAsset few[2];
+    CHECK(update_assets(RELEASE, few, 2) == 2);             // stops at max
+    CHECK(update_assets("{\"assets\": []}", few, 2) == 0);
 
     Release r;
     char err[256];
     CHECK(update_parse_release(RELEASE, &r, err, sizeof err));
     CHECK(r.version[0] == 0 && r.version[1] == 9 && r.version[2] == 1);
     CHECK(!strcmp(r.page_url, "https://github.com/x/y/releases/tag/v0.9.1"));
+    CHECK(r.asset_count == 4);
+    CHECK(!strcmp(r.assets[0].name, "Squadsight-Setup.exe"));
+    const ReleaseAsset* dll = update_asset(&r, "XCOM_UIHOOK.DLL");
+    CHECK(dll && !strcmp(dll->url, "https://github.com/x/y/releases/download/v0.9.1/xcom_uihook.dll"));
+    CHECK(!update_asset(&r, "missing.wav"));
+    // Only the mod's own files are fetched: not the setup, not the old zip.
+    int mod = 0;
+    for (int i = 0; i < r.asset_count; ++i) mod += update_asset_is_mod_file(&r.assets[i]);
+    CHECK(mod == 2);
 
     // What a private or missing repository answers.
     CHECK(!update_parse_release("{\"message\": \"Not Found\", \"status\": \"404\"}",
                                 &r, err, sizeof err) &&
           !strcmp(err, "GitHub answered: Not Found"));
     CHECK(!update_parse_release("{\"tag_name\": \"v1.0.0\", \"assets\": []}", &r, err, sizeof err) &&
-          strstr(err, "no zip"));
+          strstr(err, "no launcher.exe"));
 
     if (g_fail) { printf("%d failed\n", g_fail); return 1; }
     printf("PASS\n");

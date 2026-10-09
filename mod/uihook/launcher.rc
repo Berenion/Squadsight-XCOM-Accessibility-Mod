@@ -22,16 +22,7 @@ BEGIN
     PUSHBUTTON      "Cancel", IDCANCEL, 170, 144, 50, 14
 END
 
-// Shown while an update downloads, so the wait is not silent.  Its caption
-// carries the text too: with no control to focus, the caption is what a screen
-// reader says when the window comes up.
-IDD_PROGRESS DIALOGEX 0, 0, 200, 40
-STYLE DS_MODALFRAME | DS_CENTER | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_VISIBLE
-CAPTION "Updating"
-FONT 8, "MS Shell Dlg", 400, 0, 0x1
-BEGIN
-    LTEXT           "", IDC_PROGRESS_TEXT, 12, 12, 176, 18
-END
+#include "progress.rc"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     MOD_VERSION_MAJOR, MOD_VERSION_MINOR, MOD_VERSION_PATCH, 0
