@@ -15,6 +15,13 @@ extern int g_nav_aim;
 // (eTarget_Self, and not aimed at the ground): nothing to aim, Enter uses it.
 int  shot_used_on_self(void* action);
 
+// Whether the selected soldier is flying (XGUnit.m_bIsFlying, Toggle Flight).
+int  soldier_flying(void);
+
+// "Hovering, 3 storeys up." when the flying soldier's pawn at `loc` is in
+// the air; 0 (and nothing written) otherwise.
+int  fly_hover_words(const float* loc, char* out, size_t out_sz);
+
 // Lets go of the numpad's target; `why` is for the log.
 void nav_stop(const char* why);
 

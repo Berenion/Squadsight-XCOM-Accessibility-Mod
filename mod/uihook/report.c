@@ -17,6 +17,7 @@
 #include "tile.h"
 #include "props.h"
 #include "names.h"
+#include "numpad.h"
 
 // The pathing pawn that built the last path (hook_computepath), and the one
 // the path offsets were resolved on.
@@ -42,6 +43,16 @@ static void* g_reach_pawn;
 static uint32_t g_path_off, g_std_off, g_maxcost_off, g_cost_off;
 static void*    g_cost_class_path;
 static FieldSlot g_gameunit, g_moves;
+
+// Whether this turn still allows a dash: XGAction_Path.CanDash, which also
+// refuses a flying soldier (!IsFlying()), so ChangeDashState never raises a
+// flier's allowance. The 2026-10-09 (22:59) log: Hagen in flight, 27, 27 at a
+// cost of 14 of max 12 waited 8 times for an allowance of 24 that never came,
+// was said as "Dash", and the move stopped on 35, 25 and landed him.
+static int can_dash(int moves)
+{
+    return moves == 0 && !soldier_flying();
+}
 
 int tile_dash(int* cost_out, int* std_out, int* max_out, int* moves_out,
                      int* turns_out)
@@ -82,7 +93,7 @@ int tile_dash(int* cost_out, int* std_out, int* max_out, int* moves_out,
         if (field_ptr(unit, "m_iMovesActionsPerformed", &g_moves, 4, &v))
             *moves_out = *(const int32_t*)v;
     }
-    int limit = *moves_out == 0 ? 2 * *std_out : *std_out;
+    int limit = can_dash(*moves_out) ? 2 * *std_out : *std_out;
     int full = *max_out >= limit;
     if (*max_out > limit) limit = *max_out;
 
@@ -105,7 +116,7 @@ int tile_dash(int* cost_out, int* std_out, int* max_out, int* moves_out,
         // whatever it cost: the dash is only for a first move (SetDashing).
         // The 2026-09-29 (17:25) log: White, 1 action left, reached 62, 37
         // at a cost of 17 of 16 and it was said as "Dash".
-        return *moves_out <= 0 && *cost_out > *std_out;
+        return *moves_out <= 0 && !soldier_flying() && *cost_out > *std_out;
     }
     if (*cost_out > limit) return 2;
     return *cost_out > *std_out;
@@ -133,7 +144,7 @@ int tile_dash_pending(void)
 {
     int cost, std, max, moves, turns;
     if (tile_dash(&cost, &std, &max, &moves, &turns) < 0) return 0;
-    int limit = moves == 0 ? 2 * std : std;
+    int limit = can_dash(moves) ? 2 * std : std;
     if (max >= limit) return 0;
     return path_out_of_range(g_path_pawn) == 1 || cost > max;
 }
@@ -625,7 +636,7 @@ int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     // exactly one move: the 2026-09-29 (17:47) log, Robinson to 67, 34 --
     // out of range at max 12, then cost 12 of 12 at max 24, said without
     // "Dash", and the move took both actions under the game's "Dashing".
-    if (reach == 0 && with_dash == TILE_DASH_FELL_SHORT && moves == 0) reach = 1;
+    if (reach == 0 && with_dash == TILE_DASH_FELL_SHORT && can_dash(moves)) reach = 1;
     r.dash = reach == 1;
     r.turns = reach == 2 ? turns : 0;
     // Past reach, and the path stops short with moves to spare: no route.

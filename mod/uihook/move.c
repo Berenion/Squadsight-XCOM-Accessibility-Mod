@@ -477,11 +477,24 @@ static void move_finish(const float* loc, const char* why)
     int dx = ax - g_move.tx, dy = ay - g_move.ty;
     float dz = loc[2] - g_move.z;
     char where[64];
-    where_is(ax, ay, feet, where, sizeof where);
+    // In flight, inside / outside is the ground's word: a soldier hovering
+    // over a street was "Outside." (the 2026-10-09 (23:12) log).
+    int hover = 0;
+    GUARDED("move: hover", hover = fly_hover_words(loc, where, sizeof where), hover = 0);
+    if (!hover) where_is(ax, ay, feet, where, sizeof where);
 
     if (!dx && !dy && fabsf(dz) <= MOVE_Z_SLACK) {
         logf_("move: %s arrived on %d, %d (z %.1f)%s%s [%s]\n", g_move.name, ax, ay,
               loc[2], where[0] ? " -- " : "", where, why);
+        // A ground arrival is what the step already said; one in the air is
+        // said, as nothing else tells the flight held rather than landed.
+        if (hover) {
+            char say[160];
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s %c%s", g_move.name,
+                        tolower((unsigned char)where[0]), where + 1);
+            history_add(say);
+            if (g_speak) speech_say(say);
+        }
         return;
     }
     logf_("move: %s stopped short on %d, %d (z %.1f), the path ended on %d, %d "

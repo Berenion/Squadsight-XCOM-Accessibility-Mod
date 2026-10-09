@@ -336,7 +336,12 @@ static float     g_floor_hold_z;
 // A flying soldier's target in the air (see "flight", by nav_floor): at the
 // camera floor's height, g_fly_z, with the surface under it at g_fly_below.
 #define FLY_AIR_MIN   48.0f             // above the surface under it, or not in the air
-#define FLY_KEY_MS    150               // F / C: when the game's new height is read
+// F / C: how long the game has to move its plane before the key is taken as
+// refused ("Highest flight level."). The new height is taken the frame it
+// shows, so this only delays the refusal. It was a single read at 150 ms, and
+// the 2026-10-09 (23:05) log has the plane moving after it twice: F at 44, 25
+// said "stays at 192.0", then 384 appeared, and the next F went 384 -> 576.
+#define FLY_KEY_MS    600
 #define FLY_HOVER_FUEL 2                // CanSatisfyHoverRequirements: fuel >= 1 + 1
 static int       g_fly_air;
 static float     g_fly_z;
@@ -345,7 +350,6 @@ static float     g_fly_below;
 // "In the air, 2 storeys up." says the same, so the note is dropped there;
 // "One storey down." is kept for the step that lands on the ground.
 static int       g_fly_note;
-static int  soldier_flying(void);
 static int  fly_fuel(void);
 static void fly_where(char* out, size_t out_sz);
 
@@ -1518,12 +1522,13 @@ static void floor_game_check(void)
 static FieldSlot g_fly_stats_slot;
 static int       g_fly_key_dir;
 static ULONGLONG g_fly_key_at;
+static ULONGLONG g_fly_key_down;
 static int       g_fly_key_tile[2];
 static float     g_fly_key_from;
 static float     g_fly_cam_seen;
 static int       g_fly_cam_seen_ok;
 
-static int soldier_flying(void)
+int soldier_flying(void)
 {
     void* unit = soldier_unit();
     if (!unit || !unit_is_live(unit)) return 0;
@@ -1625,6 +1630,32 @@ static void fly_pick(void)
     g_fly_air = on;
 }
 
+// "Hovering, 3 storeys up." for a flying soldier whose pawn is at loc (its
+// middle) with the surface well below it; 0 when not in the air. Whole storeys,
+// rounded down: a hovering pawn stands about 95 above the plane it was sent to
+// -- the 2026-10-09 (23:12) log, Hagen sent to 576 came to rest at z 735, feet
+// at 671 -- so rounding down names the plane.
+int fly_hover_words(const float* loc, char* out, size_t out_sz)
+{
+    if (!soldier_flying()) return 0;
+    void* world = cursor_world();
+    FloorZFn floorz = world ? (FloorZFn)tile_vfn(world, g_tile_slot_floorz) : NULL;
+    if (!floorz) return 0;
+    float feet = loc[2] - NAVH_LIFT;
+    float at[3] = { loc[0], loc[1], feet };
+    float s = floorz(world, NULL, at, 1);       // bUnlimitedSearch
+    if (s == feet || s > feet - FLY_AIR_MIN) return 0;
+    int storeys = (int)((feet - s) / 192.0f);
+    if (storeys <= 0)
+        _snprintf_s(out, out_sz, _TRUNCATE, "Hovering, under a storey up.");
+    else if (storeys == 1)
+        _snprintf_s(out, out_sz, _TRUNCATE, "Hovering, one storey up.");
+    else
+        _snprintf_s(out, out_sz, _TRUNCATE, "Hovering, %d storeys up.", storeys);
+    logf_("nav: hovering with feet at %.1f, the surface under them at %.1f\n", feet, s);
+    return 1;
+}
+
 // "In the air, one storey up." -- above the surface under the target.
 static void fly_where(char* out, size_t out_sz)
 {
@@ -1656,30 +1687,39 @@ static void fly_floor_key(int dir)
     g_fly_key_tile[0] = tx;
     g_fly_key_tile[1] = ty;
     g_fly_key_from = g_fly_cam_seen_ok ? g_fly_cam_seen : -99999.0f;
-    g_fly_key_at = GetTickCount64() + FLY_KEY_MS;
+    g_fly_key_down = GetTickCount64();
+    g_fly_key_at = g_fly_key_down + FLY_KEY_MS;
     logf_("nav: %s in flight at %d, %d, plane at %.1f -- the game moves it\n",
           dir > 0 ? "F" : "C", tx, ty, g_fly_key_from);
 }
 
+// Each frame while a key waits: the new height as soon as the plane moves,
+// the refusal once FLY_KEY_MS has passed without it.
 static void fly_floor_apply(void)
 {
     int dir = g_fly_key_dir;
-    g_fly_key_at = 0;
+    int late = GetTickCount64() >= g_fly_key_at;
     float cam;
     if (!camera_floor_z(&cam)) {
+        if (!late) return;
+        g_fly_key_at = 0;
         logf_("nav: flight height unreadable after the key\n");
         return;
     }
+    int moved = fabsf(cam - g_fly_key_from) >= 1.0f;
+    if (!moved && !late) return;
+    g_fly_key_at = 0;
     g_fly_cam_seen = cam;
     g_fly_cam_seen_ok = 1;
-    if (fabsf(cam - g_fly_key_from) < 1.0f) {
-        logf_("nav: flight height stays at %.1f\n", cam);
+    if (!moved) {
+        logf_("nav: flight height stays at %.1f after %d ms\n", cam, FLY_KEY_MS);
         speech_cancel_pending();
         speech_say_now(dir > 0 ? "Highest flight level." : "Lowest flight level.");
         return;
     }
     int tx = g_fly_key_tile[0], ty = g_fly_key_tile[1];
-    logf_("nav: flight height %.1f -> %.1f at %d, %d\n", g_fly_key_from, cam, tx, ty);
+    logf_("nav: flight height %.1f -> %.1f at %d, %d, %d ms after the key\n", g_fly_key_from,
+          cam, tx, ty, (int)(GetTickCount64() - g_fly_key_down));
     float from = g_fly_key_from;
     // From the plane: in the air the pick settles there (fly_pick); below the
     // surface the floor search starts from it.
@@ -1694,7 +1734,7 @@ static void fly_floor_apply(void)
 static void fly_poll(void)
 {
     if (g_fly_key_at) {
-        if (GetTickCount64() >= g_fly_key_at) fly_floor_apply();
+        fly_floor_apply();
         return;
     }
     // Only F, C and a change of soldier move the plane, so a tenth of a
