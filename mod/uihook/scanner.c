@@ -590,27 +590,52 @@ static int scan_rebuild(void)
     g_scan_from[1] = ty;
     g_scan_from[2] = tz;
 
+    // Each part timed: all of this runs on the game's thread, inside one
+    // frame. Written after the 2026-10-07 (23:21) log, where stepping through
+    // the categories stuttered the sound and the frame rate fell from 107 to
+    // 79 a second, with nothing in the log to say which part took the time.
+    LARGE_INTEGER freq, t[6];
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t[0]);
+
     scan_begin(tx, ty, tz);
     ScanCategory c = scan_category();
     if (c == SCAN_ALL || c == SCAN_SQUAD || c == SCAN_ENEMIES || c == SCAN_CIVILIANS)
         scan_add_units();
+    QueryPerformanceCounter(&t[1]);
     // Its own category only: "Everything" already has these enemies once,
     // under Enemies.
     if (c == SCAN_TARGETS) scan_add_targets();
+    QueryPerformanceCounter(&t[2]);
     if (c == SCAN_ALL || c == SCAN_DOORS || c == SCAN_WINDOWS || c == SCAN_OBJECTIVES ||
         c == SCAN_INTERACT || c == SCAN_EXPLOSIVES || c == SCAN_MELD)
         scan_add_world();
+    QueryPerformanceCounter(&t[3]);
     // Three field reads and no walk, so it costs nothing outside a tutorial
     // -- and inside one it is the only objective that matters.
     if (c == SCAN_ALL || c == SCAN_OBJECTIVES) scan_add_tutorial();
     if (c == SCAN_ALL || c == SCAN_OBJECTIVES) scan_add_evac();
     if (c == SCAN_ALL || c == SCAN_OBJECTIVES) scan_add_civilian_count();
     if (c == SCAN_ALL || c == SCAN_OBJECTIVES) scan_add_counters();
+    QueryPerformanceCounter(&t[4]);
     // The climb scan is a query per tile, so it runs only when its own
     // category is showing: "Everything" would pay for it on every press, and
     // a hundred ledges would bury the doors and the people in it anyway.
     if (c == SCAN_INTERACT) scan_add_climbs();
-    return scan_end();
+    int n = scan_end();
+    QueryPerformanceCounter(&t[5]);
+
+    double ms = 1000.0 / (double)freq.QuadPart;
+    double total = (t[5].QuadPart - t[0].QuadPart) * ms;
+    // A cheap rebuild says nothing: only one long enough to be heard.
+    if (total >= 5.0)
+        logf_("scan: %s rebuilt in %.1f ms -- units %.1f, targets %.1f, level %.1f, "
+              "objectives %.1f, climbs %.1f\n",
+              scan_category_name(c), total,
+              (t[1].QuadPart - t[0].QuadPart) * ms, (t[2].QuadPart - t[1].QuadPart) * ms,
+              (t[3].QuadPart - t[2].QuadPart) * ms, (t[4].QuadPart - t[3].QuadPart) * ms,
+              (t[5].QuadPart - t[4].QuadPart) * ms);
+    return n;
 }
 
 static void scan_say(const char* what)

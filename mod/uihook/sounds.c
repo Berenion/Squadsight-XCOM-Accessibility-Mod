@@ -338,30 +338,40 @@ void perf_note(long long walls_ticks, long long hearts_ticks)
     static ULONGLONG since;
     static int frames;
     static long long walls_max, hearts_max;
+    // The longest wait between two frames: an average hides one long frame,
+    // which is what a stutter is (the 2026-10-07 (23:21) log, the scanner).
+    static LARGE_INTEGER last;
+    static long long gap_max;
     if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    LARGE_INTEGER qpc;
+    QueryPerformanceCounter(&qpc);
     ULONGLONG now = GetTickCount64();
     if (!since || now - since > 4 * PERF_MS) {
         // First frame, or back from a stretch with no mission: start afresh
         // rather than average the gap in.
         since = now;
         frames = 0;
-        walls_max = hearts_max = 0;
+        walls_max = hearts_max = gap_max = 0;
+        last.QuadPart = 0;
     }
+    if (last.QuadPart && qpc.QuadPart - last.QuadPart > gap_max)
+        gap_max = qpc.QuadPart - last.QuadPart;
+    last = qpc;
     frames++;
     if (walls_ticks > walls_max) walls_max = walls_ticks;
     if (hearts_ticks > hearts_max) hearts_max = hearts_ticks;
     if (now - since < PERF_MS) return;
     double ms = 1000.0 / (double)freq.QuadPart;
     static unsigned walks_seen, climbs_seen;
-    logf_("perf: %.1f frames a second; worst frame's walls %.2f ms, hearts %.2f ms; "
-          "%u field walks, %u climbs\n",
-          frames * 1000.0 / (double)(now - since), walls_max * ms, hearts_max * ms,
-          g_field_walks - walks_seen, g_field_climbs - climbs_seen);
+    logf_("perf: %.1f frames a second, the longest %.1f ms; worst frame's walls %.2f ms, "
+          "hearts %.2f ms; %u field walks, %u climbs\n",
+          frames * 1000.0 / (double)(now - since), gap_max * ms, walls_max * ms,
+          hearts_max * ms, g_field_walks - walks_seen, g_field_climbs - climbs_seen);
     walks_seen = g_field_walks;
     climbs_seen = g_field_climbs;
     since = now;
     frames = 0;
-    walls_max = hearts_max = 0;
+    walls_max = hearts_max = gap_max = 0;
 }
 
 // Door and window sounds (SET_DOORS, SET_WINDOWS): every door and window
