@@ -333,6 +333,21 @@ static float     g_floor_hold_z;
 // 2026-09-29 (17:25) F at 74, 53 went 224 -> 320, the old path ended exactly
 // 96 below, counted as on the new floor, and the target settled back on 224.
 #define FLOOR_HOLD_SLACK 40.0f
+// A flying soldier's target in the air (see "flight", by nav_floor): at the
+// camera floor's height, g_fly_z, with the surface under it at g_fly_below.
+#define FLY_AIR_MIN   48.0f             // above the surface under it, or not in the air
+#define FLY_KEY_MS    150               // F / C: when the game's new height is read
+#define FLY_HOVER_FUEL 2                // CanSatisfyHoverRequirements: fuel >= 1 + 1
+static int       g_fly_air;
+static float     g_fly_z;
+static float     g_fly_below;
+// g_step_note is F / C's change of flight height. In the air the step's own
+// "In the air, 2 storeys up." says the same, so the note is dropped there;
+// "One storey down." is kept for the step that lands on the ground.
+static int       g_fly_note;
+static int  soldier_flying(void);
+static int  fly_fuel(void);
+static void fly_where(char* out, size_t out_sz);
 
 // How long after a tile's first path it is described. None: the next frame.
 // It was 200 ms while "Dash" came from DestinationReachability, which the
@@ -597,6 +612,11 @@ static void nav_say_no_path(int tx, int ty)
         return;
     }
     if (!g_step_pending) return;    // already said: nothing to ask the game for
+    // In the air the floor flags have nothing to say about the refusal.
+    if (g_fly_air) {
+        nav_step_say(tile_refusal_text(TILE_REFUSE_NO_PATH));
+        return;
+    }
     char why[48];
     GUARDED("nav: refusal", tile_refusal_probe(tx, ty, navh_ground(), why, sizeof why),
             _snprintf_s(why, sizeof why, _TRUNCATE, "%s", tile_refusal_text(TILE_REFUSE_NO_PATH)));
@@ -728,6 +748,7 @@ void nav_stop(const char* why)
     // still there, and the player has not stopped needing to hear them.
     g_nav_live = 0;
     g_nav_aim = 0;
+    g_fly_air = 0;
     GUARDED("nav: free aim back", aim_free_restore());
     g_nav_parked = 0;
     g_tile_due = 0;
@@ -803,6 +824,14 @@ static void nav_confirm(void)
         if (!nav_target(&mx, &my)) mx = my = -1;
         GUARDED("move: confirmed", go = move_confirmed(mx, my, navh_ground()), go = 1);
         if (!go) return;
+        // A move ending in the air with too little fuel: ClickToPath does
+        // nothing and says nothing (see "flight").
+        int fuel = g_fly_air ? fly_fuel() : -1;
+        if (g_fly_air && fuel >= 0 && fuel < FLY_HOVER_FUEL) {
+            logf_("nav: confirm in the air with fuel %d -- the game refuses the hover\n", fuel);
+            speech_say_now("Not enough fuel to hover there.");
+            return;
+        }
     }
     g_nav_confirm_at = GetTickCount64();
     INPUT in[2];
@@ -966,6 +995,7 @@ static void nav_arrive(int tx, int ty)
     g_tile_due = 0;
     g_step_note[0] = 0;
     g_step_where[0] = 0;
+    g_fly_note = 0;
     g_floor_hold = 0;
     navh_begin_tile();
     g_nav_path_tile[0] = tx;
@@ -999,7 +1029,9 @@ static void nav_arrive(int tx, int ty)
     // Nothing can stand here: say so now rather than after the search times
     // out. A tile with a unit on it is left to the search, whose verdict
     // names them.
-    if (!mine && !g_step_nunits) {
+    // Not in flight: a flown move may end in the air, on a layer with no
+    // floor at all, which is what this check refuses.
+    if (!mine && !g_step_nunits && !soldier_flying()) {
         char why[48];
         int blocked = 0;
         GUARDED("nav: arrival check",
@@ -1453,12 +1485,242 @@ static void floor_game_check(void)
           "camera floor height %.1f\n", req, eff, cam);
 }
 
+// ---- flight ----------------------------------------------------------------
+//
+// Toggle Flight (Archangel armour) sets XGUnit.m_bIsFlying, and from then on
+// the game moves the soldier differently in three places, none of which the
+// ground navigation above knew about. The 2026-10-09 (22:20) log has Hagen
+// flying: every step after "Fuel: 6/6" was "nothing decided the tile in 1500
+// ms (0 path calls)", and F went to the game's floor 2 at 192 while the mod
+// said "No floor above here" and put the cursor back on the ground.
+//
+//   - The path. XGAction_Path.Perform_ComputePath asks ComputeJetpackPath
+//     instead of ComputePath2 for a flying human unit, so the ComputePath2
+//     hook never saw a path. hook_jetpackpath reports it the same way.
+//   - The height. Mouse_CheckForPathing passes m_bIsFlying as
+//     GetAdjustedMousePickPoint's bAllowAirPicking, and then the pick is the
+//     mouse ray's crossing with the plane at the cursor's
+//     m_fLogicalCameraFloorHeight whenever that plane is above the floor under
+//     the mouse. With the hit put at the plane's own height the crossing is
+//     the target tile itself, and either branch of the pick comes out at that
+//     height.
+//   - F and C. The mouse cursor's AscendFloor / DescendFloor
+//     (XCom3DCursorMouse) only move m_iRequestedFloor, 0 to m_iMaxFloor 3, and
+//     set that plane from WorldZFromCursorFloor -- the sighted player's way of
+//     flying higher or lower. Those keys still reach the game, so in flight
+//     the mod lets them do that and reads the height a moment later, instead
+//     of searching for a floor.
+//
+// A confirm in the air goes through ClickToPath's IsAttemptingToHover, and
+// with under 2 fuel CanSatisfyHoverRequirements refuses the move with nothing
+// shown outside the tutorial (only UITacticalTutorialMgr watches
+// m_bHoverFailDetectedToggle), so that is said instead.
+static FieldSlot g_fly_stats_slot;
+static int       g_fly_key_dir;
+static ULONGLONG g_fly_key_at;
+static int       g_fly_key_tile[2];
+static float     g_fly_key_from;
+static float     g_fly_cam_seen;
+static int       g_fly_cam_seen_ok;
+
+static int soldier_flying(void)
+{
+    void* unit = soldier_unit();
+    if (!unit || !unit_is_live(unit)) return 0;
+    static const void* s_cls;
+    static const void* s_prop;
+    uint32_t class_off = props_class_offset();
+    const void* cls = class_off && readable((uint8_t*)unit + class_off, sizeof(void*))
+                          ? *(void* const*)((uint8_t*)unit + class_off) : NULL;
+    if (!cls) return 0;
+    if (cls != s_cls) {
+        s_cls = cls;
+        s_prop = object_field_prop(unit, "m_bIsFlying");
+    }
+    int on = 0;
+    if (!s_prop || !props_read_object_bool(s_prop, unit, &on)) return 0;
+    static void* s_unit;
+    static int   s_on = -1;
+    if (unit != s_unit || on != s_on) {
+        if (on || unit == s_unit)
+            logf_("nav: %s for this soldier\n", on ? "flight mode on -- paths are "
+                  "ComputeJetpackPath, F and C change the flight height" : "flight mode off");
+        s_unit = unit;
+        s_on = on;
+    }
+    return on;
+}
+
+// XGUnit.GetUnitFlightFuel: m_aCurrentStats[17]. -1 when unreadable.
+static int fly_fuel(void)
+{
+    void* unit = soldier_unit();
+    const void* v;
+    if (!unit || !unit_is_live(unit) ||
+        !field_ptr(unit, "m_aCurrentStats", &g_fly_stats_slot, 18 * sizeof(int32_t), &v))
+        return -1;
+    return ((const int32_t*)v)[17];
+}
+
+static int camera_floor_z(float* out)
+{
+    void* cur = cursor_object();
+    const void* v;
+    if (!cur || !field_ptr(cur, "m_fLogicalCameraFloorHeight", &g_cur_camfloor,
+                           sizeof(float), &v))
+        return 0;
+    *out = *(const float*)v;
+    return 1;
+}
+
+// Whether a pick at x, y would be in the air for the soldier: flying, moving
+// rather than aiming, and the camera floor's plane well above the surface
+// under it -- GetAdjustedMousePickPoint's own test, `kPlaneHitPoint.Z >
+// fGroundLocation`, with a margin so a plane level with a roof is the roof.
+static int fly_air_here(float x, float y, float* air, float* below)
+{
+    if (g_nav_aim || !soldier_flying()) return 0;
+    float cam;
+    if (!camera_floor_z(&cam)) return 0;
+    void* world = cursor_world();
+    FloorZFn floorz = world ? (FloorZFn)tile_vfn(world, g_tile_slot_floorz) : NULL;
+    if (!floorz) return 0;
+    float at[3] = { x, y, cam };
+    float s = floorz(world, NULL, at, 1);       // bUnlimitedSearch
+    // GetFloorZForPosition hands back the height it was given when it finds
+    // nothing, so that is no surface rather than one at the plane.
+    if (s == cam || s > cam - FLY_AIR_MIN) return 0;
+    *air = cam;
+    *below = s;
+    return 1;
+}
+
+// Called with every pick made for the target: the height follows the air or
+// the ground as the plane and the tile allow.
+static void fly_pick(void)
+{
+    float air = 0.0f, below = 0.0f;
+    int on = fly_air_here(g_nav_world[0], g_nav_world[1], &air, &below);
+    int tx = -1, ty = -1;
+    nav_target(&tx, &ty);
+    if (on) {
+        // Settled at the plane: no floor search, the verdict comes from the
+        // jetpack path like any other (navh_path_result / navh_poll).
+        if (navh_phase() != NAVH_SETTLED || fabsf(navh_query_z() - air) > 1.0f) {
+            if (!g_fly_air || fabsf(air - g_fly_z) > 1.0f)
+                logf_("nav: %d, %d in the air at %.1f, the surface under it at %.1f\n",
+                      tx, ty, air, below);
+            navh_settle_at(air);
+        }
+        g_fly_z = air;
+        g_fly_below = below;
+    } else if (g_fly_air) {
+        // The plane came down to the ground, or the tile rises to it: a floor
+        // search, from the surface under the last air.
+        logf_("nav: %d, %d out of the air -- searching for the floor from %.1f\n",
+              tx, ty, g_fly_below);
+        navh_set_ground(g_fly_below);
+        navh_begin_tile();
+    }
+    g_fly_air = on;
+}
+
+// "In the air, one storey up." -- above the surface under the target.
+static void fly_where(char* out, size_t out_sz)
+{
+    float d = g_fly_z - g_fly_below;
+    int halves = (int)(d / 96.0f + 0.5f);
+    char h[48];
+    if (halves <= 1)
+        _snprintf_s(h, sizeof h, _TRUNCATE, "half a storey");
+    else if (halves == 2)
+        _snprintf_s(h, sizeof h, _TRUNCATE, "one storey");
+    else if (halves % 2)
+        _snprintf_s(h, sizeof h, _TRUNCATE, "%d and a half storeys", halves / 2);
+    else
+        _snprintf_s(h, sizeof h, _TRUNCATE, "%d storeys", halves / 2);
+    int fuel = fly_fuel();
+    _snprintf_s(out, out_sz, _TRUNCATE, "In the air, %s up%s.", h,
+                fuel >= 0 && fuel < FLY_HOVER_FUEL ? ", not enough fuel to hover" : "");
+}
+
+// F / C in flight: noted now, applied once the game has moved its plane.
+static void fly_floor_key(int dir)
+{
+    CursorGrid g;
+    int tx, ty;
+    float z;
+    if (!cursor_grid(&g)) return;
+    if (!(nav_active() && nav_target(&tx, &ty)) && !cursor_tile(&g, &tx, &ty, &z)) return;
+    g_fly_key_dir = dir;
+    g_fly_key_tile[0] = tx;
+    g_fly_key_tile[1] = ty;
+    g_fly_key_from = g_fly_cam_seen_ok ? g_fly_cam_seen : -99999.0f;
+    g_fly_key_at = GetTickCount64() + FLY_KEY_MS;
+    logf_("nav: %s in flight at %d, %d, plane at %.1f -- the game moves it\n",
+          dir > 0 ? "F" : "C", tx, ty, g_fly_key_from);
+}
+
+static void fly_floor_apply(void)
+{
+    int dir = g_fly_key_dir;
+    g_fly_key_at = 0;
+    float cam;
+    if (!camera_floor_z(&cam)) {
+        logf_("nav: flight height unreadable after the key\n");
+        return;
+    }
+    g_fly_cam_seen = cam;
+    g_fly_cam_seen_ok = 1;
+    if (fabsf(cam - g_fly_key_from) < 1.0f) {
+        logf_("nav: flight height stays at %.1f\n", cam);
+        speech_cancel_pending();
+        speech_say_now(dir > 0 ? "Highest flight level." : "Lowest flight level.");
+        return;
+    }
+    int tx = g_fly_key_tile[0], ty = g_fly_key_tile[1];
+    logf_("nav: flight height %.1f -> %.1f at %d, %d\n", g_fly_key_from, cam, tx, ty);
+    float from = g_fly_key_from;
+    // From the plane: in the air the pick settles there (fly_pick); below the
+    // surface the floor search starts from it.
+    nav_focus(tx, ty, cam, dir > 0 ? "flying higher" : "flying lower");
+    if (from > -99999.0f) {
+        tile_height_step(cam - from, g_step_note, sizeof g_step_note);
+        g_fly_note = 1;
+    }
+}
+
+// Each frame, outside a key: the plane as it stands, for the next key's "from".
+static void fly_poll(void)
+{
+    if (g_fly_key_at) {
+        if (GetTickCount64() >= g_fly_key_at) fly_floor_apply();
+        return;
+    }
+    // Only F, C and a change of soldier move the plane, so a tenth of a
+    // second is soon enough, and spares a guarded read on every frame.
+    static ULONGLONG at;
+    ULONGLONG now = GetTickCount64();
+    if (now - at < 100) return;
+    at = now;
+    float cam;
+    if (camera_floor_z(&cam)) {
+        g_fly_cam_seen = cam;
+        g_fly_cam_seen_ok = 1;
+    }
+}
+
 static void nav_floor(int dir)
 {
     CursorGrid g;
     int tx, ty;
     float from, z;
     if (!cursor_grid(&g)) return;
+    // In flight the keys are the flight height's, as the game has them.
+    if (!soldier_aiming() && soldier_flying()) {
+        fly_floor_key(dir);
+        return;
+    }
     if (nav_active() && nav_target(&tx, &ty)) {
         from = g_nav_aim ? g_aim_floor : navh_ground();
     } else if (cursor_tile(&g, &tx, &ty, &z)) {
@@ -2045,7 +2307,11 @@ static void nav_poll(void)
                 // heard, and one worked out for a step nobody hears is lost.
                 int late = g_step_late && what[0] &&
                            tx == g_step_late_at[0] && ty == g_step_late_at[1];
-                if (g_step_pending || late)
+                if (g_fly_note && g_fly_air) g_step_note[0] = 0;
+                g_fly_note = 0;
+                if ((g_step_pending || late) && g_fly_air)
+                    fly_where(g_step_where, sizeof g_step_where);
+                else if (g_step_pending || late)
                     where_say(tx, ty, navh_ground(), 0, g_step_where, sizeof g_step_where);
                 if (!nav_step_say(what) && late) {
                     g_step_late = 0;
@@ -2295,6 +2561,7 @@ static void nav_poll(void)
         g_floor_check_at = 0;
         GUARDED("nav: floor check", floor_game_check());
     }
+    GUARDED("nav: flight", fly_poll());
 
     // Delete: the selected soldier (soldier.h). Its only binding, Camera
     // Default, is removed with -Bindings in [Engine.PlayerInput], so like
@@ -2800,6 +3067,7 @@ static int nav_aim_pick(void* stack)
     if (!writable(v, 3 * sizeof(float))) return 0;
     v[0] = g_nav_world[0];
     v[1] = g_nav_world[1];
+    if (!g_nav_aim) GUARDED("nav: flight pick", fly_pick());
     v[2] = g_nav_aim ? g_nav_world[2] : navh_query_z();
     g_nav_world[2] = v[2];
     // Last, because it decides whether the game will take any of the above.
@@ -2979,6 +3247,10 @@ static void nav_path_result(void* self, void* stack, void* result)
     // from before the key: the same tile, the old storey.
     int stale = dest && g_floor_hold &&
                 fabsf(dest[2] - NAV_CURSOR_LIFT - g_floor_hold_z) > FLOOR_HOLD_SLACK;
+    // In the air, one that does not end at the flight height is from before
+    // the target went up there.
+    if (dest && g_fly_air && fabsf(dest[2] - NAV_CURSOR_LIFT - g_fly_z) > FLOOR_HOLD_SLACK)
+        stale = 1;
     if (dest && !stale && tx == g_nav_path_tile[0] && ty == g_nav_path_tile[1]) {
         g_path_pawn = self;
         NavVerdict v = navh_path_result(dest[2], ok, GetTickCount64());
@@ -3028,6 +3300,22 @@ void __fastcall hook_computepath(void* self, void* edx, void* stack, void* resul
     InterlockedIncrement(&g_path_calls);
     g_orig_computepath(self, edx, stack, result);
     GUARDED("nav: path result", nav_path_result(self, stack, result));
+}
+
+// The flying soldier's path (see "flight"): the same caller,
+// Perform_ComputePath, with the same first parameter, vLoc.
+ExecFn g_orig_jetpackpath;
+void __fastcall hook_jetpackpath(void* self, void* edx, void* stack, void* result)
+{
+    InterlockedIncrement(&g_path_calls);
+    g_orig_jetpackpath(self, edx, stack, result);
+    static int logged;
+    if (!logged) {
+        logged = 1;
+        logf_("nav: first ComputeJetpackPath, %s\n",
+              *(int32_t*)result ? "built" : "none");
+    }
+    GUARDED("nav: jetpack path result", nav_path_result(self, stack, result));
 }
 
 // Whether Flash took a click. InputEvent asks this, through

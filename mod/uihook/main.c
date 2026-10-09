@@ -8630,6 +8630,9 @@ static DWORD WINAPI init(LPVOID param)
                      (LPVOID)hook_flashhit, (LPVOID*)&g_orig_flashhit);
     h_nav[4] = arm(tbl, n, mod, "AXComPathingPawnexecComputePath2",
                      (LPVOID)hook_computepath, (LPVOID*)&g_orig_computepath);
+    // A flying soldier's path. Its loss costs only flight.
+    arm(tbl, n, mod, "AXComPathingPawnexecComputeJetpackPath",
+        (LPVOID)hook_jetpackpath, (LPVOID*)&g_orig_jetpackpath);
 
     free(tbl);
 

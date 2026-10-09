@@ -27,6 +27,7 @@ void __fastcall hook_worlddata(void* self, void* edx, void* stack, void* result)
 void __fastcall hook_cursormode(void* self, void* edx, void* stack, void* result);
 void __fastcall hook_floorz(void* self, void* edx, void* stack, void* result);
 void __fastcall hook_computepath(void* self, void* edx, void* stack, void* result);
+void __fastcall hook_jetpackpath(void* self, void* edx, void* stack, void* result);
 void __fastcall hook_flashhit(void* self, void* edx, void* stack, void* result);
 void __fastcall hook_moviecheck(void* self, void* edx, void* stack, void* result);
 void __fastcall hook_getengine(void* self, void* edx, void* stack, void* result);
@@ -35,7 +36,7 @@ void __fastcall hook_chained(void* self, void* edx, void* stack, void* result);
 void __fastcall hook_validpos(void* self, void* edx, void* stack, void* result);
 extern ExecFn g_orig_worlddata, g_orig_cursormode, g_orig_floorz, g_orig_computepath,
               g_orig_flashhit, g_orig_moviecheck, g_orig_getengine, g_orig_worldinfo,
-              g_orig_chained, g_orig_validpos;
+              g_orig_chained, g_orig_validpos, g_orig_jetpackpath;
 
 // ---- provided by main.c --------------------------------------------------------
 // The per-frame work of the other readouts, which nav_poll runs in a mission.
