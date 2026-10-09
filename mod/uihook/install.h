@@ -30,6 +30,12 @@ BOOL install_running_installed(void);
 // uninstall entry and the desktop shortcut.
 BOOL install_from(const char* src_dir, char* err, size_t err_sz);
 
+// Whether every file an install needs is in dir.  If not, missing gets the
+// first one that is not.  A launcher.exe downloaded on its own from the
+// release page has none of them (the 2026-10-09 report from a second
+// machine: "xcom_uihook.dll is missing from C:\Users\...\Downloads").
+BOOL install_files_beside(const char* dir, char* missing, size_t missing_sz);
+
 // Copies the files a release holds into dir, looking beside src_dir's
 // launcher and then one folder up (the NVDA client sits in mod\uihook, the
 // build in mod\uihook\build).  For package.bat.

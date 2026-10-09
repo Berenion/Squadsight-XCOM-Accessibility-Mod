@@ -309,6 +309,58 @@ static BOOL offer_update(HWND owner, BOOL asked, const char* passthrough)
 
 // ------------------------------------------------------------------ install --
 
+// Install with the mod's files missing from beside this launcher: it was
+// downloaded on its own from the release page, where every file is an asset
+// of its own (the 2026-10-09 report: "xcom_uihook.dll is missing from
+// C:\Users\...\Downloads"). So it does what the setup does -- fetches the
+// latest release's files into the temp folder and hands over to the launcher
+// among them with /install /setup. TRUE means that launcher is running and
+// this one must exit.
+static BOOL install_by_download(HWND owner, const char* missing)
+{
+    const char* running = install_game_running();
+    if (running) {
+        say_error("%s is running. Close the game first, then install.", running);
+        return FALSE;
+    }
+    Fetch* f = (Fetch*)calloc(1, sizeof *f);
+    if (!f) return FALSE;
+    char err[512];
+    launcher_log("install: %s is not beside this launcher -- downloading the release\n",
+                 missing);
+    if (!update_latest(MOD_REPO, &f->release, err, sizeof err)) {
+        say_error("%s could not be installed: its files are not beside this launcher "
+                  "(%s is missing), and the latest release could not be found on "
+                  "GitHub.\n\n%s", MOD_NAME, missing, err);
+        free(f);
+        return FALSE;
+    }
+    update_work_dir(f->work, sizeof f->work);
+    if (!fetch_release(owner, f)) {
+        say_error("%s could not be downloaded.\n\n%s\n\nThe release page is %s",
+                  MOD_NAME, f->err, f->release.page_url);
+        free(f);
+        return FALSE;
+    }
+
+    char command[MAX_PATH + 32], work_dir[MAX_PATH];
+    sprintf_s(command, sizeof command, "\"%s\" /install /setup", f->launcher);
+    strcpy_s(work_dir, sizeof work_dir, f->work);
+    STARTUPINFOA si = { sizeof si };
+    PROCESS_INFORMATION pi = { 0 };
+    if (!CreateProcessA(f->launcher, command, NULL, NULL, FALSE, 0, NULL, work_dir, &si, &pi)) {
+        say_error("The downloaded launcher could not be started (error %lu).\n\n%s",
+                  GetLastError(), f->launcher);
+        free(f);
+        return FALSE;
+    }
+    launcher_log("install: started %s\n", command);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    free(f);
+    return TRUE;
+}
+
 static BOOL start_installed(const char* args)
 {
     char dir[MAX_PATH], exe[MAX_PATH], command[MAX_PATH + 600];
@@ -366,8 +418,14 @@ static int run_install(const Config* cfg, const char* args)
         }
     }
 
-    char here[MAX_PATH], err[512];
+    char here[MAX_PATH], err[512], missing[64];
     exe_directory(here, sizeof here);
+    // Never from an update or the setup: their launcher sits among the files
+    // they just downloaded, and one missing there is a broken release, which
+    // downloading it again would not mend.
+    if (!updating && !StrStrIA(args, "/setup") &&
+        !install_files_beside(here, missing, sizeof missing))
+        return install_by_download(NULL, missing) ? 0 : 1;
     if (!install_from(here, err, sizeof err)) {
         say_error("%s %s could not be installed.\n\n%s", MOD_NAME, MOD_VERSION, err);
         return 1;
@@ -489,8 +547,12 @@ static INT_PTR CALLBACK dialog_proc(HWND dlg, UINT msg, WPARAM wparam, LPARAM lp
             return TRUE;
 
         case IDC_INSTALL: {
-            char here[MAX_PATH], err[512], text[1024];
+            char here[MAX_PATH], err[512], text[1024], missing[64];
             exe_directory(here, sizeof here);
+            if (!install_files_beside(here, missing, sizeof missing)) {
+                if (install_by_download(dlg, missing)) EndDialog(dlg, CHOICE_UPDATING);
+                return TRUE;
+            }
             if (!install_from(here, err, sizeof err)) {
                 say_error("%s %s could not be installed.\n\n%s", MOD_NAME, MOD_VERSION, err);
                 return TRUE;

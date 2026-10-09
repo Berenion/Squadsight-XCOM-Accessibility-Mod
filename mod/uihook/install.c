@@ -144,6 +144,19 @@ static BOOL find_source(const char* const* dirs, int n, int index, char* out, si
     return TRUE;
 }
 
+BOOL install_files_beside(const char* dir, char* missing, size_t missing_sz)
+{
+    char path[MAX_PATH], err[512];
+    const char* dirs[] = { dir };
+    for (int i = 0; i < (int)FILE_COUNT; ++i) {
+        if (find_source(dirs, 1, i, path, sizeof path, err, sizeof err)) continue;
+        strcpy_s(missing, missing_sz, FILES[i].name);
+        return FALSE;
+    }
+    missing[0] = 0;
+    return TRUE;
+}
+
 // A file being replaced may still be held for a moment: the old launcher is
 // exiting while the new one installs over it.
 static BOOL copy_patiently(const char* from, const char* to)
