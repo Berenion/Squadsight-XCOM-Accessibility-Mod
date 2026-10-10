@@ -40,6 +40,16 @@ rem them with every copy of the mod.
 copy /y "%HERE%..\..\CREDITS.md" "%OUT%\CREDITS.md" >nul
 if errorlevel 1 (popd & echo CREDITS COPY FAILED & exit /b 1)
 
+rem The translations (strings.h), lang\<CODE>.txt beside the DLL as the DLL
+rem looks for them. Made afresh, so one deleted from mod\uihook\lang does not
+rem linger in the build and get staged.
+if exist "%OUT%\lang" rmdir /s /q "%OUT%\lang"
+if exist "%HERE%lang\*.txt" (
+    mkdir "%OUT%\lang"
+    copy /y "%HERE%lang\*.txt" "%OUT%\lang\" >nul
+    if errorlevel 1 (popd & echo LANG COPY FAILED & exit /b 1)
+)
+
 cl /nologo /W3 /O2 /MT "%HERE%inject.c" "%HERE%injector.c" /Fe:inject.exe /link user32.lib
 if errorlevel 1 (popd & echo INJECTOR BUILD FAILED & exit /b 1)
 
@@ -93,6 +103,10 @@ if errorlevel 1 (popd & echo PATHS TEST BUILD FAILED & exit /b 1)
 
 cl /nologo /W3 /O2 /MT "%HERE%test_release.c" "%HERE%update.c" /Fe:test_release.exe /link winhttp.lib
 if errorlevel 1 (popd & echo RELEASE TEST BUILD FAILED & exit /b 1)
+
+cl /nologo /W3 /O2 /MT "%HERE%test_langs.c" "%HERE%install.c" "%HERE%injector.c" /Fe:test_langs.exe ^
+   /link user32.lib advapi32.lib shlwapi.lib shell32.lib ole32.lib uuid.lib
+if errorlevel 1 (popd & echo LANGS TEST BUILD FAILED & exit /b 1)
 
 popd
 echo.

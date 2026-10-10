@@ -205,6 +205,111 @@ static BOOL copy_files(const char* const* dirs, int n, const char* dst, char* er
     return TRUE;
 }
 
+// ---------------------------------------------------------------- translations --
+
+#define LANG_MAX 32
+
+typedef struct {
+    char code[8];
+    char src[MAX_PATH];
+} LangFile;
+
+// A language code as the game names its folders: two to four letters, the
+// same test the DLL makes of the game's language (main.c, lang_poll).
+static BOOL lang_code(const char* s, size_t len, char* out, size_t out_sz)
+{
+    if (len < 2 || len > 4 || len >= out_sz) return FALSE;
+    for (size_t i = 0; i < len; ++i) {
+        char c = s[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))) return FALSE;
+        out[i] = (char)(c >= 'a' && c <= 'z' ? c - 32 : c);
+    }
+    out[len] = 0;
+    return TRUE;
+}
+
+// The .txt files matching `pattern` in `dir` whose name, less `prefix` and
+// ".txt", is a code no earlier one had.
+static void lang_scan(const char* dir, const char* sub, const char* prefix, LangFile* out,
+                      int* n)
+{
+    char pattern[MAX_PATH];
+    sprintf_s(pattern, sizeof pattern, "%s\\%s%s*.txt", dir, sub, prefix);
+    WIN32_FIND_DATAA fd;
+    HANDLE find = FindFirstFileA(pattern, &fd);
+    if (find == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        size_t pl = strlen(prefix), len = strlen(fd.cFileName);
+        if (len < pl + 4 || _stricmp(fd.cFileName + len - 4, ".txt") != 0) continue;
+        char code[8];
+        if (!lang_code(fd.cFileName + pl, len - pl - 4, code, sizeof code)) continue;
+        int dup = 0;
+        for (int i = 0; i < *n && !dup; ++i) dup = !strcmp(out[i].code, code);
+        if (dup || *n >= LANG_MAX) continue;
+        strcpy_s(out[*n].code, sizeof out[*n].code, code);
+        sprintf_s(out[*n].src, sizeof out[*n].src, "%s\\%s%s", dir, sub, fd.cFileName);
+        ++*n;
+    } while (FindNextFileA(find, &fd));
+    FindClose(find);
+}
+
+int install_langs(const char* const* dirs, int n, const char* dst, BOOL flat,
+                  char* err, size_t err_sz)
+{
+    LangFile langs[LANG_MAX];
+    int count = 0;
+    for (int d = 0; d < n; ++d) {
+        lang_scan(dirs[d], "lang\\", "", langs, &count);    // build\lang\DEU.txt
+        lang_scan(dirs[d], "", "lang_", langs, &count);     // a release's lang_DEU.txt
+    }
+
+    char folder[MAX_PATH];
+    if (flat) {
+        strcpy_s(folder, sizeof folder, dst);
+    } else {
+        sprintf_s(folder, sizeof folder, "%s\\lang", dst);
+        // An older version's translation of a language this one has none of
+        // would be loaded as if it belonged, as with an optional file.
+        char pattern[MAX_PATH];
+        sprintf_s(pattern, sizeof pattern, "%s\\*.txt", folder);
+        WIN32_FIND_DATAA fd;
+        HANDLE find = FindFirstFileA(pattern, &fd);
+        if (find != INVALID_HANDLE_VALUE) {
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                char path[MAX_PATH];
+                sprintf_s(path, sizeof path, "%s\\%s", folder, fd.cFileName);
+                if (DeleteFileA(path)) launcher_log("install: removed %s\n", path);
+            } while (FindNextFileA(find, &fd));
+            FindClose(find);
+        }
+        if (count) {
+            int rc = SHCreateDirectoryExA(NULL, folder, NULL);
+            if (rc != ERROR_SUCCESS && rc != ERROR_ALREADY_EXISTS && rc != ERROR_FILE_EXISTS) {
+                sprintf_s(err, err_sz, "Could not create the folder %s (error %d).", folder, rc);
+                return -1;
+            }
+        } else {
+            RemoveDirectoryA(folder);   // only if empty
+        }
+    }
+
+    for (int i = 0; i < count; ++i) {
+        char to[MAX_PATH];
+        if (flat) sprintf_s(to, sizeof to, "%s\\lang_%s.txt", folder, langs[i].code);
+        else      sprintf_s(to, sizeof to, "%s\\%s.txt", folder, langs[i].code);
+        if (!copy_patiently(langs[i].src, to)) {
+            sprintf_s(err, err_sz, "Could not copy %s to %s (error %lu).", langs[i].src, to,
+                      GetLastError());
+            return -1;
+        }
+        launcher_log("install: %s -> %s\n", langs[i].src, to);
+    }
+    launcher_log("install: %d translation%s\n", count, count == 1 ? "" : "s");
+    return count;
+}
+
 BOOL install_delete_tree(const char* dir)
 {
     if (GetFileAttributesA(dir) == INVALID_FILE_ATTRIBUTES) return TRUE;
@@ -338,7 +443,7 @@ BOOL install_from(const char* src_dir, char* err, size_t err_sz)
         return FALSE;
     }
     const char* dirs[] = { src_dir };
-    if (!copy_files(dirs, 1, dir, err, err_sz)) {
+    if (!copy_files(dirs, 1, dir, err, err_sz) || install_langs(dirs, 1, dir, FALSE, err, err_sz) < 0) {
         launcher_log("install: FAILED -- %s\n", err);
         return FALSE;
     }
@@ -361,7 +466,8 @@ BOOL install_stage(const char* src_dir, const char* dir, char* err, size_t err_s
     if (slash) *slash = 0;
     const char* dirs[] = { src_dir, parent };
     launcher_log("stage: version %s from %s to %s\n", MOD_VERSION, src_dir, dir);
-    BOOL ok = copy_files(dirs, 2, dir, err, err_sz);
+    BOOL ok = copy_files(dirs, 2, dir, err, err_sz) &&
+              install_langs(dirs, 2, dir, TRUE, err, err_sz) >= 0;
     launcher_log("stage: %s%s\n", ok ? "done" : "FAILED -- ", ok ? "" : err);
     return ok;
 }

@@ -41,6 +41,16 @@ BOOL install_files_beside(const char* dir, char* missing, size_t missing_sz);
 // build in mod\uihook\build).  For package.bat.
 BOOL install_stage(const char* src_dir, const char* dir, char* err, size_t err_sz);
 
+// The translations (strings.h): lang\<CODE>.txt beside the DLL once
+// installed, CODE the game's language (DEU, RUS, ...). A release's files are
+// GitHub assets, which have no folders, so there each is lang_<CODE>.txt;
+// both forms are looked for in each of dirs, the first of a code wins.
+// `flat` writes them as a release holds them (lang_<CODE>.txt in dst, for
+// install_stage); otherwise into dst\lang, after removing the translations
+// there that this version does not have. The count copied, or -1 with err.
+int install_langs(const char* const* dirs, int n, const char* dst, BOOL flat,
+                  char* err, size_t err_sz);
+
 // Removes the install folder, the shortcut and the uninstall entry.  With
 // settings, also the mod's settings, learnt data and logs in the game's
 // folders.  When the running launcher is the installed one, its own file and
