@@ -1,26 +1,12 @@
 // Floating combat text, in words. See combat.h.
 
 #include "combat.h"
-#include <ctype.h>
+#include "strings.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-// Case-insensitive strstr, ASCII only.
-static const char* find_ci(const char* hay, const char* needle)
-{
-    size_t n = strlen(needle);
-    for (; *hay; hay++) {
-        size_t i = 0;
-        while (i < n && hay[i] &&
-               tolower((unsigned char)hay[i]) == tolower((unsigned char)needle[i]))
-            i++;
-        if (i == n) return hay;
-    }
-    return NULL;
-}
-
-int combat_describe(const char* who, const char* text, int damage,
+int combat_describe(const char* who, const char* text, int damage, const char* crit_word,
                     char* out, size_t out_sz)
 {
     out[0] = 0;
@@ -31,25 +17,25 @@ int combat_describe(const char* who, const char* text, int damage,
     if (!who) who = "";
 
     if (damage) {
-        // The figure, then whatever the screen put beside it. Only CRITICAL!
-        // is known to be there; anything else is kept as it came.
+        // The figure, then whatever the screen put beside it. Only the
+        // critical mark is known to be there (XGUnit's
+        // m_sCriticalHitDamageDisplay, "CRITICAL!" in English, which main.c
+        // reads in the game's language); anything else is kept as it came.
         char* end;
         long n = strtol(text, &end, 10);
         if (end != text) {
             while (*end == ' ') end++;
-            int crit = find_ci(end, "critical") != NULL;
-            _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%ld damage%s.", who, sep, n,
-                        crit ? ", critical" : "");
+            int crit = crit_word && *crit_word && text_find_ci(end, crit_word) != NULL;
+            if (*who) tfmt(out, out_sz, crit ? COMBAT_WHO_DAMAGE_CRIT : COMBAT_WHO_DAMAGE, who, n);
+            else      tfmt(out, out_sz, crit ? COMBAT_DAMAGE_CRIT : COMBAT_DAMAGE, n);
             return 1;
         }
     }
 
     // Anything else is said as it is written, with a full stop if it ends in
     // none, so the speech does not run it into what follows.
-    size_t len = strlen(text);
-    char last = text[len - 1];
-    int stop = last == '.' || last == '!' || last == '?';
-    _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s%s", who, sep, text, stop ? "" : ".");
+    _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s", who, sep, text);
+    text_end_sentence(out, out_sz);
     return 1;
 }
 
@@ -59,7 +45,7 @@ enum { TURN_UNKNOWN, TURN_XCOM, TURN_ALIEN, TURN_OTHER };
 
 static struct {
     int  whose;
-    char text[4][64];           // indexed by the enum; the banner's own words
+    char text[4][128];          // indexed by the enum; the banner's own words
 } t;
 
 void combat_turn_reset(void)
@@ -70,15 +56,8 @@ void combat_turn_reset(void)
 // "ALIEN ACTIVITY" -> "Alien activity.": capitals would be spelt out.
 static void sentence(const char* in, char* out, size_t out_sz)
 {
-    size_t n = 0;
-    for (; in[n] && n + 2 < out_sz; n++)
-        out[n] = (char)(n == 0 ? toupper((unsigned char)in[n])
-                               : tolower((unsigned char)in[n]));
-    out[n] = 0;
-    if (n && out[n - 1] != '.' && out[n - 1] != '!' && n + 1 < out_sz) {
-        out[n] = '.';
-        out[n + 1] = 0;
-    }
+    text_sentence_case(in, out, out_sz);
+    text_end_sentence(out, out_sz);
 }
 
 int combat_turn(const char* fn, const char* const* strings, int nstrings,
@@ -114,8 +93,9 @@ int combat_turn(const char* fn, const char* const* strings, int nstrings,
     if (now == t.whose) return 0;
     t.whose = now;
 
-    static const char* fallback[] = { "", "Your turn", "Alien activity", "Opponent's turn" };
-    sentence(t.text[now][0] ? t.text[now] : fallback[now], out, out_sz);
+    static const StrId fallback[] = { TXT_EMPTY, COMBAT_YOUR_TURN, COMBAT_ALIEN_TURN,
+                                      COMBAT_OPPONENT_TURN };
+    sentence(t.text[now][0] ? t.text[now] : T(fallback[now]), out, out_sz);
     return out[0] != 0;
 }
 
@@ -124,9 +104,9 @@ int combat_hp(int hp, int hp_max, char* out, size_t out_sz)
     out[0] = 0;
     if (hp < 0 || hp_max <= 0) return 0;
     if (hp == 0)
-        _snprintf_s(out, out_sz, _TRUNCATE, "No HP left.");
+        strncpy_s(out, out_sz, T(COMBAT_NO_HP), _TRUNCATE);
     else
-        _snprintf_s(out, out_sz, _TRUNCATE, "%d of %d HP left.", hp, hp_max);
+        tfmt(out, out_sz, COMBAT_HP_LEFT, hp, hp_max);
     return 1;
 }
 
@@ -135,9 +115,8 @@ void combat_unit_state(int hp, int hp_max, int overwatch, char* out, size_t out_
     size_t used = 0;
     out[0] = 0;
     if (hp >= 0 && hp_max > 0) {
-        int w = _snprintf_s(out, out_sz, _TRUNCATE, ", %d of %d HP", hp, hp_max);
-        if (w > 0) used = (size_t)w;
+        tfmt_cat(out, out_sz, &used, COMBAT_UNIT_HP, hp, hp_max);
     }
     if (overwatch && used < out_sz)
-        _snprintf_s(out + used, out_sz - used, _TRUNCATE, ", on overwatch");
+        tfmt_cat(out, out_sz, &used, COMBAT_ON_OVERWATCH);
 }

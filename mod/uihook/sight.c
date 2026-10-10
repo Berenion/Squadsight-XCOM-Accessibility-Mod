@@ -2,6 +2,7 @@
 
 #include "sight.h"
 #include "tile.h"
+#include "strings.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -124,7 +125,7 @@ void sight_text(const SightEvent* ev, int n, char* out, size_t out_sz)
 {
     if (!out || !out_sz) return;
     out[0] = 0;
-    group(ev, n, SIGHT_NEW,   "Sighted:",        out, out_sz);
-    group(ev, n, SIGHT_AGAIN, "In sight again:", out, out_sz);
-    group(ev, n, SIGHT_GONE,  "Out of sight:",   out, out_sz);
+    group(ev, n, SIGHT_NEW,   T(SIGHT_HEAD_NEW),   out, out_sz);
+    group(ev, n, SIGHT_AGAIN, T(SIGHT_HEAD_AGAIN), out, out_sz);
+    group(ev, n, SIGHT_GONE,  T(SIGHT_HEAD_GONE),  out, out_sz);
 }

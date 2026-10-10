@@ -1,6 +1,7 @@
 // The scanner: the part that does not touch the game. See scan.h.
 
 #include "scan.h"
+#include "strings.h"
 #include "tile.h"
 #include <stdio.h>
 #include <string.h>
@@ -21,24 +22,24 @@ static int g_from[3];
 static int  g_have_sel;
 static char g_sel_name[SCAN_NAME];
 static int  g_sel_tile[3];
-static char g_sel_detail[96];
+static char g_sel_detail[160];
 static int  g_sel_pos;          // where it stood in the list, for a tie
 
 const char* scan_category_name(ScanCategory c)
 {
     switch (c) {
-    case SCAN_ALL:        return "Everything";
-    case SCAN_SQUAD:      return "Squad";
-    case SCAN_ENEMIES:    return "Enemies";
-    case SCAN_TARGETS:    return "Targets";
-    case SCAN_EXPLOSIVES: return "Explosives";
-    case SCAN_CIVILIANS:  return "Civilians";
-    case SCAN_DOORS:      return "Doors";
-    case SCAN_WINDOWS:    return "Windows";
-    case SCAN_OBJECTIVES: return "Objectives";
-    case SCAN_MELD:       return "Meld";
-    case SCAN_INTERACT:   return "Interactables";
-    default:              return "Unknown";
+    case SCAN_ALL:        return T(SCAN_CAT_ALL);
+    case SCAN_SQUAD:      return T(SCAN_CAT_SQUAD);
+    case SCAN_ENEMIES:    return T(SCAN_CAT_ENEMIES);
+    case SCAN_TARGETS:    return T(SCAN_CAT_TARGETS);
+    case SCAN_EXPLOSIVES: return T(SCAN_CAT_EXPLOSIVES);
+    case SCAN_CIVILIANS:  return T(SCAN_CAT_CIVILIANS);
+    case SCAN_DOORS:      return T(SCAN_CAT_DOORS);
+    case SCAN_WINDOWS:    return T(SCAN_CAT_WINDOWS);
+    case SCAN_OBJECTIVES: return T(SCAN_CAT_OBJECTIVES);
+    case SCAN_MELD:       return T(SCAN_CAT_MELD);
+    case SCAN_INTERACT:   return T(SCAN_CAT_INTERACT);
+    default:              return T(TXT_UNKNOWN);
     }
 }
 
@@ -85,11 +86,13 @@ int scan_add(const ScanItem* item)
             if (o->unplaced || o->kind != item->kind || o->tx != item->tx ||
                 o->ty != item->ty || o->tz != item->tz)
                 continue;
-            int door_pair = strcmp(item->name, "Door") == 0 &&
-                            (strcmp(o->name, "Door") == 0 ||
-                             strcmp(o->name, "Double door") == 0);
+            // The names are the scanner's own (world.c), in the mod's
+            // language, so they are compared as such.
+            int door_pair = strcmp(item->name, T(WORLD_DOOR)) == 0 &&
+                            (strcmp(o->name, T(WORLD_DOOR)) == 0 ||
+                             strcmp(o->name, T(SCAN_DOUBLE_DOOR)) == 0);
             if (!door_pair && strcmp(o->name, item->name) != 0) continue;
-            if (door_pair) strcpy_s(o->name, sizeof o->name, "Double door");
+            if (door_pair) strncpy_s(o->name, sizeof o->name, T(SCAN_DOUBLE_DOOR), _TRUNCATE);
             return 0;
         }
     }
@@ -228,17 +231,18 @@ int scan_selected(ScanItem* out)
 }
 
 // "one floor up", "two floors down", or nothing at all on the same storey.
+// Up to five as a word (TXT_NUM_1..5), beyond as a figure; either way the
+// line's plural form follows the count.
 static void floor_offset_text(int dz, char* out, size_t out_sz)
 {
-    static const char* small[] = { "", "one", "two", "three", "four", "five" };
+    static const StrId small[] = { TXT_EMPTY, TXT_NUM_1, TXT_NUM_2, TXT_NUM_3, TXT_NUM_4,
+                                   TXT_NUM_5 };
     if (!dz) { out[0] = 0; return; }
     int n = dz > 0 ? dz : -dz;
-    const char* count = n <= 5 ? small[n] : NULL;
-    if (count)
-        _snprintf_s(out, out_sz, _TRUNCATE, "%s floor%s %s", count,
-                    n == 1 ? "" : "s", dz > 0 ? "up" : "down");
-    else
-        _snprintf_s(out, out_sz, _TRUNCATE, "%d floors %s", n, dz > 0 ? "up" : "down");
+    char count[32];
+    if (n <= 5) strncpy_s(count, sizeof count, T(small[n]), _TRUNCATE);
+    else _snprintf_s(count, sizeof count, _TRUNCATE, "%d", n);
+    tpfmt(out, out_sz, dz > 0 ? SCAN_FLOORS_UP : SCAN_FLOORS_DOWN, n, count);
 }
 
 int scan_storey_diff(float feet, float floor)
@@ -249,7 +253,7 @@ int scan_storey_diff(float feet, float floor)
 
 void scan_unit_floor_text(const char* label, int dz, char* out, size_t out_sz)
 {
-    char storey[48];
+    char storey[96];
     floor_offset_text(dz, storey, sizeof storey);
     _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s.", label, storey[0] ? ", " : "", storey);
 }
@@ -266,21 +270,21 @@ void scan_describe(const ScanItem* item, int from_tx, int from_ty, int from_tz,
         return;
     }
 
-    char where[64];
+    char where[128];
     tile_offset_text(item->tx - from_tx, item->ty - from_ty, where, sizeof where);
 
-    char storey[48];
+    char storey[96];
     floor_offset_text(item->tz - from_tz, storey, sizeof storey);
 
     if (item->last_seen) {
-        char ago[32] = "";
+        char ago[64] = "", place[256];
         if (item->turns_ago == 0)
-            strcpy_s(ago, sizeof ago, "this turn");
+            strncpy_s(ago, sizeof ago, T(SCAN_THIS_TURN), _TRUNCATE);
         else if (item->turns_ago > 0)
-            _snprintf_s(ago, sizeof ago, _TRUNCATE, "%d turn%s ago", item->turns_ago,
-                        item->turns_ago == 1 ? "" : "s");
-        _snprintf_s(out, out_sz, _TRUNCATE, "%s, last seen %s%s%s%s%s.", item->name, where,
+            tpfmt(ago, sizeof ago, SCAN_TURNS_AGO, item->turns_ago, item->turns_ago);
+        _snprintf_s(place, sizeof place, _TRUNCATE, "%s%s%s%s%s", where,
                     storey[0] ? ", " : "", storey, ago[0] ? ", " : "", ago);
+        tfmt(out, out_sz, SCAN_LAST_SEEN, item->name, place);
         return;
     }
 
@@ -294,20 +298,18 @@ void scan_category_text(ScanCategory c, int floor, int count,
 {
     if (!out || !out_sz) return;
     if (floor == SCAN_ALL_FLOORS)
-        _snprintf_s(out, out_sz, _TRUNCATE, "%s, %d found.",
-                    scan_category_name(c), count);
+        tfmt(out, out_sz, SCAN_CAT_FOUND, scan_category_name(c), count);
     else
-        _snprintf_s(out, out_sz, _TRUNCATE, "%s, floor %d, %d found.",
-                    scan_category_name(c), floor + 1, count);
+        tfmt(out, out_sz, SCAN_CAT_FLOOR_FOUND, scan_category_name(c), floor + 1, count);
 }
 
 void scan_floor_text(int floor, char* out, size_t out_sz)
 {
     if (!out || !out_sz) return;
     if (floor == SCAN_ALL_FLOORS)
-        _snprintf_s(out, out_sz, _TRUNCATE, "All floors.");
+        strncpy_s(out, out_sz, T(SCAN_ALL_FLOORS_SAID), _TRUNCATE);
     else
-        _snprintf_s(out, out_sz, _TRUNCATE, "Floor %d.", floor + 1);
+        tfmt(out, out_sz, SCAN_FLOOR_N, floor + 1);
 }
 
 // Words in a mesh name that name no object: the maps' prefixes, texture and
@@ -432,6 +434,11 @@ void scan_mesh_words(const char* mesh, const char* fallback, char* out, size_t o
         }
     }
     if (!used) _snprintf_s(out, out_sz, _TRUNCATE, "%s", fallback ? fallback : "");
+    // Made from the artists' English: a translation can name it (@ lines).
+    else {
+        const char* named = strings_phrase(out);
+        if (named != out) strncpy_s(out, out_sz, named, _TRUNCATE);
+    }
 }
 
 int scan_mesh_is_dressing(const char* mesh)
@@ -451,10 +458,19 @@ void scan_empty_text(ScanCategory c, char* out, size_t out_sz)
 {
     if (!out || !out_sz) return;
     // "No enemies." reads better than "Enemies, none", and it is the answer to
-    // the key that was actually pressed -- a cycle, not a category change.
-    const char* name = scan_category_name(c);
-    if (c == SCAN_ALL)
-        _snprintf_s(out, out_sz, _TRUNCATE, "Nothing found.");
+    // the key that was actually pressed -- a cycle, not a category change. A
+    // line of its own per category: how "no" agrees with the noun, and
+    // whether the noun keeps its capital, is the language's business.
+    static const StrId none[] = {
+        [SCAN_ALL] = SCAN_NONE_ALL, [SCAN_SQUAD] = SCAN_NONE_SQUAD,
+        [SCAN_ENEMIES] = SCAN_NONE_ENEMIES, [SCAN_TARGETS] = SCAN_NONE_TARGETS,
+        [SCAN_EXPLOSIVES] = SCAN_NONE_EXPLOSIVES, [SCAN_CIVILIANS] = SCAN_NONE_CIVILIANS,
+        [SCAN_DOORS] = SCAN_NONE_DOORS, [SCAN_WINDOWS] = SCAN_NONE_WINDOWS,
+        [SCAN_OBJECTIVES] = SCAN_NONE_OBJECTIVES, [SCAN_MELD] = SCAN_NONE_MELD,
+        [SCAN_INTERACT] = SCAN_NONE_INTERACT,
+    };
+    if ((unsigned)c < sizeof none / sizeof none[0] && none[c])
+        strncpy_s(out, out_sz, T(none[c]), _TRUNCATE);
     else
-        _snprintf_s(out, out_sz, _TRUNCATE, "No %c%s.", name[0] | 0x20, name + 1);
+        strncpy_s(out, out_sz, T(SCAN_NONE_ALL), _TRUNCATE);
 }

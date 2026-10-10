@@ -2,6 +2,7 @@
 // cannot go through the general text path.
 
 #include "dialog.h"
+#include "strings.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -10,7 +11,7 @@
 // there is one object and one set of fields to hold.
 static struct {
     void* obj;
-    char  severity[16];               // "Warning" / "Alert", or empty
+    char  severity[64];               // "Warning" / "Alert" (translated), or empty
     char  title[DIALOG_MAX_TEXT];
     char  body[DIALOG_MAX_TEXT];
     char  accept[DIALOG_MAX_TEXT];
@@ -99,8 +100,8 @@ static void compose(char* out, size_t out_sz)
 {
     char answers[DIALOG_MAX_TEXT];
     answers[0] = 0;
-    join_answer(answers, sizeof answers, "Enter", g.accept);
-    join_answer(answers, sizeof answers, "Escape", g.cancel);
+    join_answer(answers, sizeof answers, T(KEY_ENTER), g.accept);
+    join_answer(answers, sizeof answers, T(KEY_ESCAPE), g.cancel);
 
     size_t reserve = strlen(answers);
     if (reserve) reserve += 2;          // the ". " that will introduce them
@@ -145,8 +146,8 @@ int dialog_note(void* obj, const char* fn, int slot, const char* text,
         void* keep = g.obj;
         dialog_reset();
         g.obj = keep;
-        if (strstr(fn, "Warning")) set(g.severity, sizeof g.severity, "Warning");
-        else if (strstr(fn, "Alert")) set(g.severity, sizeof g.severity, "Alert");
+        if (strstr(fn, "Warning")) set(g.severity, sizeof g.severity, T(DIALOG_WARNING));
+        else if (strstr(fn, "Alert")) set(g.severity, sizeof g.severity, T(DIALOG_ALERT));
         return DIALOG_SILENT;
     }
 

@@ -102,6 +102,14 @@ void soldier_weapon_text(const char* name, const SoldierWeapon* w,
 void soldier_weapons(const char* active_name, const SoldierWeapon* w, int n,
                      char* active, size_t active_sz, char* all, size_t all_sz);
 
+// The same, told which panel is the equipped one (`active_index`, -1 when
+// not known). The name is the game's, in the player's language, and the
+// panels' types are the item's English enum name ("_LMG"), so matching the
+// two works only in English; the index, where main.c could read it from the
+// game, holds in any.
+void soldier_weapons_at(const char* active_name, int active_index, const SoldierWeapon* w,
+                        int n, char* active, size_t active_sz, char* all, size_t all_sz);
+
 // One squad member's state as their flag shows it, for the squad list:
 // "2 actions, 11 of 11 HP", "no actions left, 5 of 10 HP, panicked",
 // "bleeding out, 2 turns left", "stabilised". Unknown parts are left out.
@@ -113,3 +121,10 @@ const char* soldier_rank_word(const char* rank);
 
 // "heavy" -> "heavy", "mech_psi_gene" -> "MEC trooper, psionic, gene modded".
 void soldier_class_words(const char* cls, char* out, size_t out_sz);
+
+// Where the game's own words come from: main.c hands soldier.c a function
+// that reads them in the player's language (game_loc). Returns 0 when it has
+// none, and soldier.c says the English.
+enum { SOLDIER_LOC_RANK, SOLDIER_LOC_CLASS, SOLDIER_LOC_SHIV };
+typedef int (*SoldierLocFn)(int kind, int index, char* out, size_t out_sz);
+void soldier_set_loc(SoldierLocFn fn);

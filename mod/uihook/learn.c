@@ -7,6 +7,7 @@
 #include "sonar.h"
 #include "audio.h"
 #include "speech.h"
+#include "strings.h"
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
@@ -89,32 +90,32 @@ static int has_focus(void)
     return pid == GetCurrentProcessId();
 }
 
-static const char* DIR_NAME[SONAR_DIRS] = { "West", "North", "South", "East" };
+static const StrId DIR_NAME[SONAR_DIRS] = { LEARN_WEST, LEARN_NORTH, LEARN_SOUTH, LEARN_EAST };
 
 // "against you", "one tile", "four tiles" -- how the distance is spoken, and
 // the same words in the log.
 static void say_distance(char* out, size_t out_sz)
 {
-    if (g_tiles == 0)      _snprintf_s(out, out_sz, _TRUNCATE, "against you");
-    else if (g_tiles == 1) _snprintf_s(out, out_sz, _TRUNCATE, "one tile");
-    else                   _snprintf_s(out, out_sz, _TRUNCATE, "%d tiles", g_tiles);
+    if (g_tiles == 0)      strncpy_s(out, out_sz, T(LEARN_AGAINST_YOU), _TRUNCATE);
+    else if (g_tiles == 1) strncpy_s(out, out_sz, T(LEARN_ONE_TILE), _TRUNCATE);
+    else                   tpfmt(out, out_sz, TXT_TILES, g_tiles, g_tiles);
 }
 
 // The level, named rather than numbered: a notch out of five means nothing said
 // aloud, and "loudest" tells the player there is no point pressing again.
 static void say_volume(int notch)
 {
-    static const char* NAME[] = {
-        "Quietest", "Quiet", "Normal", "Loud", "Loudest"
+    static const StrId NAME[] = {
+        SET_LEVEL_QUIETEST, SET_LEVEL_QUIET, SET_LEVEL_NORMAL, SET_LEVEL_LOUD, SET_LEVEL_LOUDEST
     };
     int n = audio_volume_notches();
     if (notch >= 0 && notch < n && n == (int)(sizeof NAME / sizeof NAME[0]))
-        speech_say_now(NAME[notch]);
+        speech_say_now(T(NAME[notch]));
     else {
         // The mixer grew a notch and this table did not. Say the number rather
         // than nothing, so the key still plainly works.
-        char say[32];
-        _snprintf_s(say, sizeof say, _TRUNCATE, "Level %d of %d", notch + 1, n);
+        char say[64];
+        tfmt(say, sizeof say, LEARN_LEVEL_N, notch + 1, n);
         speech_say_now(say);
     }
 }
@@ -138,24 +139,23 @@ static void announce(void)
 {
     char say[256];
     char who[128];
-    char how_far[32];
+    char how_far[64];
     int n = 0;
 
     who[0] = 0;
     for (int d = 0; d < SONAR_DIRS; d++) {
         if (!(g_dirs & (1 << d))) continue;
         _snprintf_s(who + strlen(who), sizeof who - strlen(who), _TRUNCATE,
-                    "%s%s", n ? " and " : "", DIR_NAME[d]);
+                    "%s%s", n ? T(TXT_AND) : "", T(DIR_NAME[d]));
         n++;
     }
 
     if (!n) {
-        speech_say_now("Silent.");
+        speech_say_now(T(LEARN_SILENT));
         return;
     }
     say_distance(how_far, sizeof how_far);
-    _snprintf_s(say, sizeof say, _TRUNCATE, "%s, %s.",
-                n == SONAR_DIRS ? "All four sides" : who, how_far);
+    tfmt(say, sizeof say, LEARN_SIDES_AT, n == SONAR_DIRS ? T(LEARN_ALL_SIDES) : who, how_far);
     speech_say_now(say);
 }
 
@@ -197,11 +197,7 @@ static void enter(void)
     g_dirs = BIT(SONAR_N);
     g_tiles = 0;
     push();
-    speech_say_now(
-        "Sound practice. 8, 2, 4 and 6 for one side. 7, 9, 1 and 3 for corners. "
-        "5 for all four. 0 for silence. Plus and minus for distance. "
-        "Star and dot for the level. Slash to go back. "
-        "North, against you.");
+    speech_say_now(T(LEARN_PRACTICE_INTRO));
 }
 
 // Practice ends back in the menu, on its own entry, rather than closing
@@ -220,7 +216,7 @@ static void leave(void)
 // A move plays nothing: the player chooses when to listen. The beats are
 // timed from the poll, so the keys stay live while they play.
 typedef struct {
-    const char* say;
+    StrId say;
     int kind, dx, dy, hp, hp_max, panicked, wounded;
     int cues;           // a height cue: how many storeys; 0 for everything else
 } HeartDemo;
@@ -228,37 +224,37 @@ typedef struct {
 static const HeartDemo DEMO[] = {
     // Placed in tiles, as the map puts them: pan by east-west tiles, pitch
     // by north-south tiles. The states are heard here, on the listening tile.
-    { "Ally, here",                 HEART_ALLY,    0,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Ally, 5 west",               HEART_ALLY,   -5,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Ally, 10 west, 5 north",     HEART_ALLY,  -10,   5, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Ally, 10 east",              HEART_ALLY,   10,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Ally, 10 north",             HEART_ALLY,    0,  10, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Ally, 10 south",             HEART_ALLY,    0, -10, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Ally, far off, 25 north",    HEART_ALLY,    0,  25, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Ally, badly hurt",           HEART_ALLY,    0,   0, 1, 6, 0, SOLDIER_WOUND_NONE },
-    { "Ally, panicked",             HEART_ALLY,    0,   0, 6, 6, 1, SOLDIER_WOUND_NONE },
-    { "Ally, bleeding out",         HEART_ALLY,    0,   0, 0, 6, 0, SOLDIER_BLEEDING   },
-    { "Ally, stabilised",           HEART_ALLY,    0,   0, 0, 6, 0, SOLDIER_STABILISED },
-    { "Alien, here",                HEART_ALIEN,   0,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Alien, 5 west",              HEART_ALIEN,  -5,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Alien, 10 west, 5 north",    HEART_ALIEN, -10,   5, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Alien, 10 east",             HEART_ALIEN,  10,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Alien, 10 north",            HEART_ALIEN,   0,  10, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Alien, 10 south",            HEART_ALIEN,   0, -10, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Alien, badly hurt",          HEART_ALIEN,   0,   0, 1, 6, 0, SOLDIER_WOUND_NONE },
-    { "Door, here",                 HEART_DOOR,    0,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Door, 5 west",               HEART_DOOR,   -5,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Door, 8 east, 4 north",      HEART_DOOR,    8,   4, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Door, 10 south",             HEART_DOOR,    0, -10, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Window, here",               HEART_WINDOW,  0,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Window, 5 east",             HEART_WINDOW,  5,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Window, 8 west, 4 south",    HEART_WINDOW, -8,  -4, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Window, 10 north",           HEART_WINDOW,  0,  10, 6, 6, 0, SOLDIER_WOUND_NONE },
-    { "Up one floor",               HEART_STEP_UP,   0, 0, 0, 0, 0, 0, 1 },
-    { "Down one floor",             HEART_STEP_DOWN, 0, 0, 0, 0, 0, 0, 1 },
-    { "Down two floors, a roof to the ground", HEART_STEP_DOWN, 0, 0, 0, 0, 0, 0, 2 },
-    { "Up three floors",            HEART_STEP_UP,   0, 0, 0, 0, 0, 0, 3 },
-    { "A day passing",              HEART_TICK,      0, 0, 0, 0, 0, 0, 1 },
+    { DEMO_ALLY_HERE,                 HEART_ALLY,    0,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_ALLY_5W,               HEART_ALLY,   -5,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_ALLY_10W_5N,     HEART_ALLY,  -10,   5, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_ALLY_10E,              HEART_ALLY,   10,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_ALLY_10N,             HEART_ALLY,    0,  10, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_ALLY_10S,             HEART_ALLY,    0, -10, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_ALLY_FAR,    HEART_ALLY,    0,  25, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_ALLY_HURT,           HEART_ALLY,    0,   0, 1, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_ALLY_PANIC,             HEART_ALLY,    0,   0, 6, 6, 1, SOLDIER_WOUND_NONE },
+    { DEMO_ALLY_BLEEDING,         HEART_ALLY,    0,   0, 0, 6, 0, SOLDIER_BLEEDING   },
+    { DEMO_ALLY_STABLE,           HEART_ALLY,    0,   0, 0, 6, 0, SOLDIER_STABILISED },
+    { DEMO_ALIEN_HERE,                HEART_ALIEN,   0,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_ALIEN_5W,              HEART_ALIEN,  -5,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_ALIEN_10W_5N,    HEART_ALIEN, -10,   5, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_ALIEN_10E,             HEART_ALIEN,  10,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_ALIEN_10N,            HEART_ALIEN,   0,  10, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_ALIEN_10S,            HEART_ALIEN,   0, -10, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_ALIEN_HURT,          HEART_ALIEN,   0,   0, 1, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_DOOR_HERE,                 HEART_DOOR,    0,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_DOOR_5W,               HEART_DOOR,   -5,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_DOOR_8E_4N,      HEART_DOOR,    8,   4, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_DOOR_10S,             HEART_DOOR,    0, -10, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_WINDOW_HERE,               HEART_WINDOW,  0,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_WINDOW_5E,             HEART_WINDOW,  5,   0, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_WINDOW_8W_4S,    HEART_WINDOW, -8,  -4, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_WINDOW_10N,           HEART_WINDOW,  0,  10, 6, 6, 0, SOLDIER_WOUND_NONE },
+    { DEMO_UP_ONE,               HEART_STEP_UP,   0, 0, 0, 0, 0, 0, 1 },
+    { DEMO_DOWN_ONE,             HEART_STEP_DOWN, 0, 0, 0, 0, 0, 0, 1 },
+    { DEMO_DOWN_TWO, HEART_STEP_DOWN, 0, 0, 0, 0, 0, 0, 2 },
+    { DEMO_UP_THREE,            HEART_STEP_UP,   0, 0, 0, 0, 0, 0, 3 },
+    { DEMO_DAY,              HEART_TICK,      0, 0, 0, 0, 0, 0, 1 },
 };
 #define DEMO_ITEMS ((int)(sizeof DEMO / sizeof DEMO[0]))
 // Three of a steady heart -- at the calm pace that is already five seconds
@@ -275,10 +271,10 @@ static int        g_demo_hinted;
 
 static void hear_say(const char* before)
 {
-    char say[128];
-    _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s. %d of %d",
-                before ? before : "", before ? " " : "", DEMO[g_demo_item].say,
-                g_demo_item + 1, DEMO_ITEMS);
+    char say[256], what[160];
+    _snprintf_s(what, sizeof what, _TRUNCATE, "%s%s%s",
+                before ? before : "", before ? " " : "", T(DEMO[g_demo_item].say));
+    tfmt(say, sizeof say, LEARN_ITEM_POS, what, g_demo_item + 1, DEMO_ITEMS);
     speech_say_now(say);
 }
 
@@ -286,10 +282,10 @@ static void hear_open(void)
 {
     InterlockedExchange(&g_mode, MODE_HEARTS);
     g_demo_left = 0;
-    hear_say("Heartbeats.");
+    hear_say(T(LEARN_HEARTBEATS));
     if (!g_demo_hinted) {
         g_demo_hinted = 1;
-        speech_say("8 and 2 to choose, 5 to play, slash to go back.");
+        speech_say(T(LEARN_HEAR_KEYS));
     }
 }
 
@@ -299,7 +295,7 @@ static void hear_play(void)
     heart_sound(d->dx, d->dy, d->hp, d->hp_max, d->panicked, d->wounded, &g_demo_sound);
     g_demo_sound.kind = d->kind;
     if (!audio_hearts_available(d->kind)) {
-        speech_say_now("No sound for it yet.");
+        speech_say_now(T(LEARN_NO_SOUND));
         return;
     }
     if (d->cues) {
@@ -337,33 +333,34 @@ static void hear_poll(const int* hit)
 // the list wraps and nothing else tells the player they went round.
 static void menu_say_item(const char* before)
 {
-    char say[256], value[32];
+    char say[256], value[64], what[160];
     int id = MENU[g_item];
-    const char* name = id == ITEM_PRACTICE ? "Sound practice"
-                     : id == ITEM_HEAR     ? "Hear the sounds"
+    const char* name = id == ITEM_PRACTICE ? T(LEARN_SOUND_PRACTICE)
+                     : id == ITEM_HEAR     ? T(LEARN_HEAR_SOUNDS)
                      : settings_name(id);
     value[0] = 0;
     if (id >= 0) settings_value_text(id, value, sizeof value);
-    _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s. %d of %d",
-                before ? before : "", before ? " " : "", name,
-                value[0] ? ", " : "", value, g_item + 1, ITEMS);
+    _snprintf_s(what, sizeof what, _TRUNCATE, "%s%s%s",
+                before ? before : "", before ? " " : "", name);
+    if (value[0]) tfmt(say, sizeof say, LEARN_ITEM_VALUE_POS, what, value, g_item + 1, ITEMS);
+    else          tfmt(say, sizeof say, LEARN_ITEM_POS, what, g_item + 1, ITEMS);
     speech_say_now(say);
 }
 
 static void menu_open(void)
 {
     InterlockedExchange(&g_mode, MODE_MENU);
-    menu_say_item("Mod options.");
+    menu_say_item(T(LEARN_MOD_OPTIONS));
     if (!g_hinted) {
         g_hinted = 1;
-        speech_say("8 and 2 to move, 4 and 6 to change, 5 to open, slash to close.");
+        speech_say(T(LEARN_MENU_KEYS));
     }
 }
 
 static void menu_close(void)
 {
     InterlockedExchange(&g_mode, MODE_OFF);
-    speech_say_now("Mod options closed.");
+    speech_say_now(T(LEARN_MENU_CLOSED));
 }
 
 // The level goes to the mixer as well as the file: it is the one setting the
@@ -405,7 +402,7 @@ static void preview(int setting)
         heart_sound(0, 0, -1, -1, 0, SOLDIER_WOUND_NONE, &s);
         s.kind = KIND[level_source(setting)];
         if (audio_hearts_available(s.kind)) audio_heart_once(&s);
-        else speech_say("No sound for it yet.");
+        else speech_say(T(LEARN_NO_SOUND));
     }
 }
 
@@ -415,20 +412,20 @@ static void menu_change(int delta)
 {
     int id = MENU[g_item];
     if (id < 0) {
-        speech_say_now("5 to open.");
+        speech_say_now(T(LEARN_FIVE_TO_OPEN));
         return;
     }
     int level = level_source(id) >= 0;
     if (level) level_apply(id, settings_get(id) + delta);
     else settings_step(id, delta);
-    char value[32];
+    char value[64];
     settings_value_text(id, value, sizeof value);
     speech_say_now(value);
     if (level) preview(id);
     // Otherwise it goes quiet with nothing to say why: nobody is followed
     // until the scanner picks someone.
     if (id == SET_HEART_SOLO && settings_get(id))
-        speech_say("The soldier you pick with Page Up and Page Down is the one heard.");
+        speech_say(T(LEARN_SOLO_HINT));
 }
 
 static void menu_poll(const int* hit)
@@ -448,7 +445,7 @@ static void menu_poll(const int* hit)
             for (int kind = 0; kind < HEART_KINDS; kind++)
                 if (audio_hearts_available(kind)) any = 1;
             if (any) hear_open();
-            else speech_say_now("No heartbeat sound. It did not load.");
+            else speech_say_now(T(LEARN_NO_HEARTBEAT));
         }
         else if (settings_is_switch(id)) menu_change(1);
         else menu_say_item(NULL);
@@ -492,14 +489,14 @@ static void poll(int* down)
             InterlockedExchange(&g_mode, MODE_MENU);
             menu_say_item(NULL);
         }
-        else { leave(); menu_say_item("Sound practice off."); }
+        else { leave(); menu_say_item(T(LEARN_PRACTICE_OFF)); }
         return;
     }
     if (g_mode == MODE_OFF) return;
     if (g_mode == MODE_MENU)   { menu_poll(hit); return; }
     if (g_mode == MODE_HEARTS) { hear_poll(hit); return; }
 
-    char how_far[32];
+    char how_far[64];
     if (hit[1] && g_tiles < MAX_TILES) {            // further
         g_tiles++;
         push();

@@ -1,6 +1,7 @@
 // What has been announced. See history.h.
 
 #include "history.h"
+#include "strings.h"
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -67,12 +68,12 @@ static const char* entry(unsigned seq) { return g_text[seq % HISTORY_MAX]; }
 static int h_open(char* out, size_t out_sz)
 {
     if (g_count == 0) {
-        _snprintf_s(out, out_sz, _TRUNCATE, "No announcements yet.");
+        strncpy_s(out, out_sz, T(HISTORY_NONE), _TRUNCATE);
         return 0;
     }
     g_open = 1;
     g_at = g_next - 1;
-    _snprintf_s(out, out_sz, _TRUNCATE, "Announcements, %d. %s", g_count, entry(g_at));
+    tfmt(out, out_sz, HISTORY_OPEN, g_count, entry(g_at));
     return 1;
 }
 
@@ -85,7 +86,7 @@ static int h_page_open(const char* title, const char (*lines)[HISTORY_PAGE_TEXT]
 {
     if (n > HISTORY_PAGE_MAX) n = HISTORY_PAGE_MAX;
     if (n <= 0) {
-        _snprintf_s(out, out_sz, _TRUNCATE, "%s: nothing to read yet.", title ? title : "");
+        tfmt(out, out_sz, HISTORY_PAGE_EMPTY, title ? title : "");
         return 0;
     }
     for (int i = 0; i < n; i++) strncpy_s(g_page[i], HISTORY_PAGE_TEXT, lines[i], _TRUNCATE);
@@ -101,7 +102,7 @@ static void h_page_step(int dir, char* out, size_t out_sz)
 {
     int to = g_page_at + (dir < 0 ? -1 : 1);
     if (to < 0 || to >= g_page_n) {
-        _snprintf_s(out, out_sz, _TRUNCATE, "%s %s", dir < 0 ? "Top." : "End.",
+        _snprintf_s(out, out_sz, _TRUNCATE, "%s %s", T(dir < 0 ? TXT_TOP : TXT_END),
                     g_page[g_page_at]);
         return;
     }
@@ -118,14 +119,14 @@ static void h_step(int dir, char* out, size_t out_sz)
             g_at--;
             _snprintf_s(out, out_sz, _TRUNCATE, "%s", entry(g_at));
         } else {
-            _snprintf_s(out, out_sz, _TRUNCATE, "Oldest. %s", entry(g_at));
+            tfmt(out, out_sz, HISTORY_OLDEST, entry(g_at));
         }
     } else {
         if (g_at + 1 < g_next) {
             g_at++;
             _snprintf_s(out, out_sz, _TRUNCATE, "%s", entry(g_at));
         } else {
-            _snprintf_s(out, out_sz, _TRUNCATE, "Newest. %s", entry(g_at));
+            tfmt(out, out_sz, HISTORY_NEWEST, entry(g_at));
         }
     }
 }

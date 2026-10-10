@@ -6,6 +6,7 @@
 // touches it, so a single lock is enough.
 
 #include "focus.h"
+#include "strings.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -347,9 +348,10 @@ int focus_take_title(void* obj, char* out, size_t out_sz, ULONGLONG* at)
     return fetch(obj, 1, 1, out, out_sz, at);
 }
 
+// The game's labels, in its language: compared in any case, not ASCII's alone.
 static int same_ci(const char* a, const char* b)
 {
-    return _stricmp(a, b) == 0;
+    return text_equal_ci(a, b);
 }
 
 // Appends `piece` after `sep`, by hand: strcat_s kills the process on a full
@@ -406,7 +408,7 @@ void focus_compose(const char* title, const char* label, const char* detail,
     // (techName, infoText, descText) -- which the label has just said.
     if (detail && label && *label) {
         size_t n = strlen(label);
-        if (_strnicmp(detail, label, n) == 0 &&
+        if (text_find_ci(detail, label) == detail &&
             (detail[n] == 0 || detail[n] == '.' || detail[n] == ' ')) {
             detail += n;
             while (*detail == '.' || *detail == ' ') detail++;

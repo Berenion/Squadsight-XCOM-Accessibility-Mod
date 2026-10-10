@@ -1,6 +1,7 @@
 // What is on a tile: the part that does not touch the game.  See tile.h.
 
 #include "tile.h"
+#include "strings.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -76,8 +77,9 @@ int tile_vtable_slot(const unsigned char* code, size_t n)
 // West (1,0); diagonal North (-.71,.71), South (.71,-.71), East (-.71,-.71),
 // West (.71,.71). Each vector points from the tile towards its cover.
 enum { D_N, D_NE, D_E, D_SE, D_S, D_SW, D_W, D_NW, D_COUNT };
-static const char* const DIR_NAME[D_COUNT] = {
-    "north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest",
+static const StrId DIR_NAME[D_COUNT] = {
+    TILE_DIR_N, TILE_DIR_NE, TILE_DIR_E, TILE_DIR_SE, TILE_DIR_S, TILE_DIR_SW, TILE_DIR_W,
+    TILE_DIR_NW,
 };
 static const int STRAIGHT[4] = { D_N, D_S, D_W, D_E };
 static const int DIAGONAL[4] = { D_NW, D_SE, D_SW, D_NE };
@@ -90,20 +92,24 @@ static void append(char* out, size_t out_sz, size_t* used, const char* s)
 }
 
 // "High cover north and east. " -- the directions in clockwise order.
-static void cover_sentence(const char* kind, const int* dirs_on, char* out,
+static void cover_sentence(StrId kind, const int* dirs_on, char* out,
                            size_t out_sz, size_t* used)
 {
     int n = 0, total = 0;
     for (int d = 0; d < D_COUNT; d++) total += dirs_on[d];
     if (!total) return;
-    append(out, out_sz, used, kind);
+    char dirs[256] = "";
+    size_t dw = 0;
     for (int d = 0; d < D_COUNT; d++) {
         if (!dirs_on[d]) continue;
         n++;
-        append(out, out_sz, used, n == 1 ? " " : n == total ? " and " : ", ");
-        append(out, out_sz, used, DIR_NAME[d]);
+        if (n > 1) append(dirs, sizeof dirs, &dw, n == total ? T(TXT_AND) : ", ");
+        append(dirs, sizeof dirs, &dw, T(DIR_NAME[d]));
     }
-    append(out, out_sz, used, ". ");
+    char t[320];
+    tfmt(t, sizeof t, kind, dirs);
+    append(out, out_sz, used, t);
+    append(out, out_sz, used, " ");
 }
 
 void tile_describe(const TileReport* r, char* out, size_t out_sz)
@@ -113,13 +119,16 @@ void tile_describe(const TileReport* r, char* out, size_t out_sz)
     out[0] = 0;
 
     if (r->no_route) {
-        append(out, out_sz, &used, "No route within reach. ");
+        append(out, out_sz, &used, T(TILE_NO_ROUTE));
+        append(out, out_sz, &used, " ");
     } else if (r->turns >= 2) {
-        char t[32];
-        _snprintf_s(t, sizeof t, _TRUNCATE, "%d turns. ", r->turns);
+        char t[64];
+        tpfmt(t, sizeof t, TILE_TURNS, r->turns, r->turns);
         append(out, out_sz, &used, t);
+        append(out, out_sz, &used, " ");
     } else if (r->dash) {
-        append(out, out_sz, &used, "Dash. ");
+        append(out, out_sz, &used, T(TILE_DASH));
+        append(out, out_sz, &used, " ");
     }
 
     int high[D_COUNT] = { 0 }, low[D_COUNT] = { 0 };
@@ -132,10 +141,11 @@ void tile_describe(const TileReport* r, char* out, size_t out_sz)
         else                              high[map[b]] = 1;
     }
     if (any) {
-        cover_sentence("High cover", high, out, out_sz, &used);
-        cover_sentence("Low cover", low, out, out_sz, &used);
+        cover_sentence(TILE_HIGH_COVER_AT, high, out, out_sz, &used);
+        cover_sentence(TILE_LOW_COVER_AT, low, out, out_sz, &used);
     } else {
-        append(out, out_sz, &used, "No cover. ");
+        append(out, out_sz, &used, T(TILE_NO_COVER));
+        append(out, out_sz, &used, " ");
     }
 
     // Exposure comes straight after the cover, because it is what says
@@ -146,12 +156,13 @@ void tile_describe(const TileReport* r, char* out, size_t out_sz)
     // being got around, and on open ground "Seen by 2" has said it already.
     if (r->enemies_known > 0) {
         if (r->seen_by <= 0) {
-            append(out, out_sz, &used, "Out of sight. ");
+            append(out, out_sz, &used, T(TILE_OUT_OF_SIGHT));
+            append(out, out_sz, &used, " ");
         } else {
-            char t[48];
-            _snprintf_s(t, sizeof t, _TRUNCATE, "Seen by %d%s. ",
-                        r->seen_by, any && r->flanked ? ", flanked" : "");
+            char t[96];
+            tfmt(t, sizeof t, any && r->flanked ? TILE_SEEN_BY_FLANKED : TILE_SEEN_BY, r->seen_by);
             append(out, out_sz, &used, t);
+            append(out, out_sz, &used, " ");
         }
     }
 
@@ -159,22 +170,25 @@ void tile_describe(const TileReport* r, char* out, size_t out_sz)
     // tile would flank (XComActionIconManager.AddFlankingIcons), so it is
     // said with the exposure it answers.
     if (r->flanks[0]) {
-        char t[128];
-        _snprintf_s(t, sizeof t, _TRUNCATE, "Flanks %s. ", r->flanks);
+        char t[256];
+        tfmt(t, sizeof t, TILE_FLANKS, r->flanks);
         append(out, out_sz, &used, t);
+        append(out, out_sz, &used, " ");
     }
 
     // Height advantage either way: the game's rule is a storey (192) of
     // difference between the shooter's floor and the target's.
     if (r->height_over[0]) {
-        char t[160];
-        _snprintf_s(t, sizeof t, _TRUNCATE, "Height advantage on %s. ", r->height_over);
+        char t[320];
+        tfmt(t, sizeof t, TILE_HEIGHT_OVER, r->height_over);
         append(out, out_sz, &used, t);
+        append(out, out_sz, &used, " ");
     }
     if (r->height_under[0]) {
-        char t[160];
-        _snprintf_s(t, sizeof t, _TRUNCATE, "%s above you. ", r->height_under);
+        char t[320];
+        tfmt(t, sizeof t, TILE_HEIGHT_UNDER, r->height_under);
         append(out, out_sz, &used, t);
+        append(out, out_sz, &used, " ");
     }
 
     // Who an ability reaches from here: the game rings them while the move
@@ -184,8 +198,8 @@ void tile_describe(const TileReport* r, char* out, size_t out_sz)
         append(out, out_sz, &used, " ");
     }
 
-    if (r->smoke)  append(out, out_sz, &used, "Smoke. ");
-    if (r->poison) append(out, out_sz, &used, "Poison. ");
+    if (r->smoke)  { append(out, out_sz, &used, T(TILE_SMOKE)); append(out, out_sz, &used, " "); }
+    if (r->poison) { append(out, out_sz, &used, T(TILE_POISON)); append(out, out_sz, &used, " "); }
 
     // The last sentence's trailing space.
     while (used > 0 && out[used - 1] == ' ') out[--used] = 0;
@@ -214,10 +228,10 @@ TileRefusal tile_refusal(const TileLayerFlags* layers, int n)
 const char* tile_refusal_text(TileRefusal r)
 {
     switch (r) {
-    case TILE_REFUSE_NO_STOP:  return "Cannot stop here.";
-    case TILE_REFUSE_BLOCKED:  return "Blocked.";
-    case TILE_REFUSE_NO_FLOOR: return "No floor.";
-    default:                   return "No path.";
+    case TILE_REFUSE_NO_STOP:  return T(TILE_CANNOT_STOP);
+    case TILE_REFUSE_BLOCKED:  return T(TILE_BLOCKED);
+    case TILE_REFUSE_NO_FLOOR: return T(TILE_NO_FLOOR);
+    default:                   return T(TILE_NO_PATH);
     }
 }
 
@@ -240,12 +254,10 @@ int tile_no_route(int dx, int dy, int cost, int max)
 void tile_offset_text(int dx, int dy, char* out, size_t out_sz)
 {
     if (!out || !out_sz) return;
-    if (!dx && !dy) { _snprintf_s(out, out_sz, _TRUNCATE, "here"); return; }
-    char ns[32] = "", ew[32] = "";
-    if (dy) _snprintf_s(ns, sizeof ns, _TRUNCATE, "%d %s", dy > 0 ? dy : -dy,
-                        dy > 0 ? "north" : "south");
-    if (dx) _snprintf_s(ew, sizeof ew, _TRUNCATE, "%d %s", dx > 0 ? dx : -dx,
-                        dx > 0 ? "east" : "west");
+    if (!dx && !dy) { strncpy_s(out, out_sz, T(TILE_HERE), _TRUNCATE); return; }
+    char ns[64] = "", ew[64] = "";
+    if (dy) tfmt(ns, sizeof ns, dy > 0 ? TILE_N_NORTH : TILE_N_SOUTH, dy > 0 ? dy : -dy);
+    if (dx) tfmt(ew, sizeof ew, dx > 0 ? TILE_N_EAST : TILE_N_WEST, dx > 0 ? dx : -dx);
     _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s", ns, ns[0] && ew[0] ? ", " : "", ew);
 }
 
@@ -275,7 +287,7 @@ void tile_contacts(const TileContact* c, int n, const char* none,
     }
     for (int i = 0; i < n; i++) {
         const TileContact* t = &c[order[i]];
-        char where[64];
+        char where[128];
         tile_offset_text(t->dx, t->dy, where, sizeof where);
         if (i) append(out, out_sz, &used, " ");
         append(out, out_sz, &used, t->name);
@@ -287,19 +299,18 @@ void tile_contacts(const TileContact* c, int n, const char* none,
 
 void tile_height_step(float delta, char* out, size_t out_sz)
 {
-    const char* way = delta >= 0.0f ? "up" : "down";
+    int up = delta >= 0.0f;
     float d = delta >= 0.0f ? delta : -delta;
     int halves = (int)(d / 96.0f + 0.5f);          // half storeys
     if (halves == 0)
-        _snprintf_s(out, out_sz, _TRUNCATE, "A step %s.", way);
+        tfmt(out, out_sz, up ? TILE_STEP_UP : TILE_STEP_DOWN);
     else if (halves == 1)
-        _snprintf_s(out, out_sz, _TRUNCATE, "Half a storey %s.", way);
-    else if (halves == 2)
-        _snprintf_s(out, out_sz, _TRUNCATE, "One storey %s.", way);
+        tfmt(out, out_sz, up ? TILE_HALF_UP : TILE_HALF_DOWN);
     else if (halves % 2)
-        _snprintf_s(out, out_sz, _TRUNCATE, "%d and a half storeys %s.", halves / 2, way);
+        tpfmt(out, out_sz, up ? TILE_STOREYS_HALF_UP : TILE_STOREYS_HALF_DOWN, halves / 2,
+              halves / 2);
     else
-        _snprintf_s(out, out_sz, _TRUNCATE, "%d storeys %s.", halves / 2, way);
+        tpfmt(out, out_sz, up ? TILE_STOREYS_UP : TILE_STOREYS_DOWN, halves / 2, halves / 2);
 }
 
 // "Floater" -> "Floaters", "Thin Man" -> "Thin Men", "Chryssalis" ->
@@ -317,10 +328,8 @@ static void plural(const char* name, char* out, size_t out_sz)
 
 void tile_floor_step(int levels, char* out, size_t out_sz)
 {
-    const char* way = levels >= 0 ? "up" : "down";
     int n = levels >= 0 ? levels : -levels;
-    if (n == 1) _snprintf_s(out, out_sz, _TRUNCATE, "One floor %s.", way);
-    else _snprintf_s(out, out_sz, _TRUNCATE, "%d floors %s.", n, way);
+    tpfmt(out, out_sz, levels >= 0 ? TILE_FLOORS_UP : TILE_FLOORS_DOWN, n, n);
 }
 
 void tile_names_counted(const char* const* names, int n, int total, char* out, size_t out_sz)
@@ -336,11 +345,15 @@ void tile_names_counted(const char* const* names, int n, int total, char* out, s
         int same = 1;
         for (int j = i + 1; j < n; j++)
             if (!done[j] && strcmp(names[j], names[i]) == 0) { done[j] = 1; same++; }
-        char t[96];
+        char t[192];
         if (same > 1) {
-            char many[80];
-            plural(names[i], many, sizeof many);
-            _snprintf_s(t, sizeof t, _TRUNCATE, "%d %s", same, many);
+            // English makes the name plural itself; any other language
+            // cannot from here (the names are the game's, in its language),
+            // so the line takes the name as it is ("%2$s x%1$d").
+            char many[160];
+            if (strings_is_english()) plural(names[i], many, sizeof many);
+            else strncpy_s(many, sizeof many, names[i], _TRUNCATE);
+            tfmt(t, sizeof t, TILE_NAME_COUNTED, same, many);
         } else {
             _snprintf_s(t, sizeof t, _TRUNCATE, "%s", names[i]);
         }
@@ -348,8 +361,8 @@ void tile_names_counted(const char* const* names, int n, int total, char* out, s
         append(out, out_sz, &used, t);
     }
     if (total > n) {
-        char t[32];
-        _snprintf_s(t, sizeof t, _TRUNCATE, "%s%d more", parts ? ", and " : "", total - n);
+        char t[64];
+        tfmt(t, sizeof t, parts ? TILE_AND_N_MORE : TILE_N_MORE, total - n);
         append(out, out_sz, &used, t);
     }
 }
@@ -366,30 +379,36 @@ void tile_where_text(const TileWhere* before, const TileWhere* now, int force,
     if (!changed && !force) return;
 
     if (now->state == TILE_WHERE_OUTSIDE) {
-        _snprintf_s(out, out_sz, _TRUNCATE, "Outside.");
+        strncpy_s(out, out_sz, T(TILE_OUTSIDE), _TRUNCATE);
         return;
     }
     if (now->state == TILE_WHERE_ROOF) {
-        _snprintf_s(out, out_sz, _TRUNCATE, "On the roof.");
+        strncpy_s(out, out_sz, T(TILE_ON_ROOF), _TRUNCATE);
         return;
     }
 
-    // A one-storey building has no floor worth numbering.
-    char floor[48] = "";
-    if (now->storeys > 1)
-        _snprintf_s(floor, sizeof floor, _TRUNCATE, "floor %d of %d", now->floor, now->storeys);
-    else if (now->storeys == 0 && now->floor > 1)
-        _snprintf_s(floor, sizeof floor, _TRUNCATE, "floor %d", now->floor);
+    // A one-storey building has no floor worth numbering. Each wording has a
+    // line of its own -- inside a sentence, and starting one -- rather than
+    // a capital made by hand.
+    char floor[96] = "", floor_alone[96] = "";
+    if (now->storeys > 1) {
+        tfmt(floor, sizeof floor, TILE_FLOOR_OF, now->floor, now->storeys);
+        tfmt(floor_alone, sizeof floor_alone, TILE_FLOOR_OF_ALONE, now->floor, now->storeys);
+    } else if (now->storeys == 0 && now->floor > 1) {
+        tfmt(floor, sizeof floor, TILE_FLOOR_N, now->floor);
+        tfmt(floor_alone, sizeof floor_alone, TILE_FLOOR_N_ALONE, now->floor);
+    }
 
     // The building is taller somewhere else than over this tile.
-    const char* above = floor[0] && now->no_above ? " No floor above here." : "";
+    char above[96] = "";
+    if (floor[0] && now->no_above) _snprintf_s(above, sizeof above, _TRUNCATE, " %s", T(TILE_NO_FLOOR_ABOVE));
     if (force || moved_in) {
-        const char* what = now->kind == TILE_UFO      ? "Inside the UFO"
-                         : now->kind == TILE_DROPSHIP ? "Inside the dropship"
-                         :                              "Inside building";
+        const char* what = T(now->kind == TILE_UFO      ? TILE_INSIDE_UFO
+                           : now->kind == TILE_DROPSHIP ? TILE_INSIDE_DROPSHIP
+                           :                              TILE_INSIDE_BUILDING);
         _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s.%s", what, floor[0] ? ", " : "", floor,
                     above);
     } else if (floor[0]) {
-        _snprintf_s(out, out_sz, _TRUNCATE, "F%s.%s", floor + 1, above);
+        _snprintf_s(out, out_sz, _TRUNCATE, "%s%s", floor_alone, above);
     }
 }

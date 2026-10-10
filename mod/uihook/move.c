@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include "move.h"
+#include "strings.h"
 #include "game.h"
 #include "units.h"
 #include "cursor.h"
@@ -355,7 +356,7 @@ int move_confirmed(int tx, int ty, float floor)
 
     UnitName* u = unit_by_unit(unit);
     if (u) unit_label(u, g_move.name, sizeof g_move.name);
-    if (!g_move.name[0]) strcpy_s(g_move.name, sizeof g_move.name, "The soldier");
+    if (!g_move.name[0]) strncpy_s(g_move.name, sizeof g_move.name, T(MOVE_THE_SOLDIER), _TRUNCATE);
 
     float end[3];
     int have = 0;
@@ -383,14 +384,17 @@ int move_confirmed(int tx, int ty, float floor)
                 g_hold.ty = ty;
                 g_hold.floor = floor;
                 g_hold.at = now;
-                char where[64], words[48], off[64], say[256];
+                char where[128], words[128], off[192], say[512], stop[384];
                 where_is(g_move.tx, g_move.ty, end[2] - NAVH_LIFT, where, sizeof where);
                 offset_words(g_move.tx - tx, g_move.ty - ty, words, sizeof words);
                 if (words[0])
-                    _snprintf_s(off, sizeof off, _TRUNCATE, "%s of the target", words);
+                    tfmt(off, sizeof off, MOVE_OF_TARGET, words);
                 else
-                    strcpy_s(off, sizeof off, end[2] - NAVH_LIFT < floor ? "Below the target"
-                                                                         : "Above the target");
+                    strncpy_s(off, sizeof off, T(end[2] - NAVH_LIFT < floor ? MOVE_BELOW_TARGET
+                                                                          : MOVE_ABOVE_TARGET),
+                              _TRUNCATE);
+                // Where the path stops, as the lines below put it.
+                _snprintf_s(stop, sizeof stop, _TRUNCATE, "%s%s%s", where, where[0] ? " " : "", off);
                 int door = door_at_end(&g, end);
                 GUARDED("move: held why", held_why(&g, tx, ty, floor, end));
                 // The pawn's own verdict on the target (report.c,
@@ -413,27 +417,15 @@ int move_confirmed(int tx, int ty, float floor)
                     logf_("move: no route within reach -- cost %d of %d, the path %s\n",
                           cost, max, goes ? "goes somewhere" : "stays on the soldier's tile");
                 if (door)
-                    _snprintf_s(say, sizeof say, _TRUNCATE,
-                                "The path stops at a closed door, %d, %d. "
-                                "Numpad 0 again to go to it, then open it with V.",
-                                g_move.tx, g_move.ty);
+                    tfmt(say, sizeof say, MOVE_STOPS_AT_DOOR, g_move.tx, g_move.ty);
                 else if (none && !goes)
-                    strcpy_s(say, sizeof say, "No route there within reach.");
+                    strncpy_s(say, sizeof say, T(MOVE_NO_ROUTE), _TRUNCATE);
                 else if (none)
-                    _snprintf_s(say, sizeof say, _TRUNCATE,
-                                "No route there within reach. The path stops at %s%s%s, "
-                                "%d, %d. Numpad 0 again to go there.",
-                                where, where[0] ? " " : "", off, g_move.tx, g_move.ty);
+                    tfmt(say, sizeof say, MOVE_NO_ROUTE_STOPS, stop, g_move.tx, g_move.ty);
                 else if (oor == 1)
-                    _snprintf_s(say, sizeof say, _TRUNCATE,
-                                "Out of reach this turn. The path stops short. %s%s%s, %d, %d. "
-                                "Numpad 0 again to go there.",
-                                where, where[0] ? " " : "", off, g_move.tx, g_move.ty);
+                    tfmt(say, sizeof say, MOVE_OUT_OF_REACH_STOPS, stop, g_move.tx, g_move.ty);
                 else
-                    _snprintf_s(say, sizeof say, _TRUNCATE,
-                                "The path stops short. %s%s%s, %d, %d. "
-                                "Numpad 0 again to go there.",
-                                where, where[0] ? " " : "", off, g_move.tx, g_move.ty);
+                    tfmt(say, sizeof say, MOVE_STOPS_SHORT, stop, g_move.tx, g_move.ty);
                 speech_say_now(say);
                 return 0;
             }
@@ -458,13 +450,12 @@ int move_confirmed(int tx, int ty, float floor)
     return 1;
 }
 
-// "2 south, 1 east" -- the scanner's words for an offset (+y is north).
+// "2 south, 1 east" -- the scanner's words for an offset (+y is north);
+// nothing for none.
 static void offset_words(int dx, int dy, char* out, size_t out_sz)
 {
-    char ns[24] = "", ew[24] = "";
-    if (dy) _snprintf_s(ns, sizeof ns, _TRUNCATE, "%d %s", abs(dy), dy > 0 ? "north" : "south");
-    if (dx) _snprintf_s(ew, sizeof ew, _TRUNCATE, "%d %s", abs(dx), dx > 0 ? "east" : "west");
-    _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s", ns, ns[0] && ew[0] ? ", " : "", ew);
+    if (!dx && !dy) { out[0] = 0; return; }
+    tile_offset_text(dx, dy, out, out_sz);
 }
 
 static void move_finish(const float* loc, const char* why)
@@ -476,11 +467,11 @@ static void move_finish(const float* loc, const char* why)
     float feet = loc[2] - NAVH_LIFT;
     int dx = ax - g_move.tx, dy = ay - g_move.ty;
     float dz = loc[2] - g_move.z;
-    char where[64];
+    char where[128];
     // In flight, inside / outside is the ground's word: a soldier hovering
     // over a street was "Outside." (the 2026-10-09 (23:12) log).
     int hover = 0;
-    GUARDED("move: hover", hover = fly_hover_words(loc, where, sizeof where), hover = 0);
+    GUARDED("move: hover", hover = fly_hover_words(loc, 1, where, sizeof where), hover = 0);
     if (!hover) where_is(ax, ay, feet, where, sizeof where);
 
     if (!dx && !dy && fabsf(dz) <= MOVE_Z_SLACK) {
@@ -489,9 +480,9 @@ static void move_finish(const float* loc, const char* why)
         // A ground arrival is what the step already said; one in the air is
         // said, as nothing else tells the flight held rather than landed.
         if (hover) {
-            char say[160];
-            _snprintf_s(say, sizeof say, _TRUNCATE, "%s %c%s", g_move.name,
-                        tolower((unsigned char)where[0]), where + 1);
+            char say[256];
+            // `where` is the words for after a name ("hovering, one storey up").
+            tfmt(say, sizeof say, MOVE_NAME_HOVERING, g_move.name, where);
             history_add(say);
             if (g_speak) speech_say(say);
         }
@@ -502,17 +493,17 @@ static void move_finish(const float* loc, const char* why)
           g_move.ty, g_move.z, g_move.action[0] ? g_move.action : "none",
           where[0] ? " -- " : "", where, why);
 
-    char off[64];
+    char off[192];
     if (dx || dy) {
-        char words[48];
+        char words[128];
         offset_words(dx, dy, words, sizeof words);
-        _snprintf_s(off, sizeof off, _TRUNCATE, "%s of the target", words);
+        tfmt(off, sizeof off, MOVE_OF_TARGET, words);
     } else {
-        strcpy_s(off, sizeof off, dz < 0 ? "Below the target" : "Above the target");
+        strncpy_s(off, sizeof off, T(dz < 0 ? MOVE_BELOW_TARGET : MOVE_ABOVE_TARGET), _TRUNCATE);
     }
-    char say[256];
-    _snprintf_s(say, sizeof say, _TRUNCATE, "%s stopped short. %s%s%s, %d, %d.",
-                g_move.name, where, where[0] ? " " : "", off, ax, ay);
+    char say[512], stop[384];
+    _snprintf_s(stop, sizeof stop, _TRUNCATE, "%s%s%s", where, where[0] ? " " : "", off);
+    tfmt(say, sizeof say, MOVE_STOPPED_SHORT, g_move.name, stop, ax, ay);
     history_add(say);
     if (g_speak) speech_say(say);
 }
@@ -553,11 +544,13 @@ static int interact_words(void* actor, const char** what, const char** verb)
     }
     int icon = 0;
     if (field_ptr(actor, "IconSocket", &g_mv_icon, 1, &v)) icon = *(const uint8_t*)v;
+    // The whole sentence is one line per thing (MOVE_HERE_*): the verb and
+    // the thing agree differently in every language.
+    *what = "door";
     *verb = "open";
-    if (object_is_a(actor, "XComRadarArrayActor")) { *what = "Comm array"; *verb = "use"; }
-    else if (icon == 1) *what = "Window";
-    else if (icon == 2) { *what = "Panel"; *verb = "use"; }
-    else *what = "Door";
+    if (object_is_a(actor, "XComRadarArrayActor")) { *what = "comm array"; *verb = "use"; }
+    else if (icon == 1) *what = "window";
+    else if (icon == 2) { *what = "panel"; *verb = "use"; }
     return 1;
 }
 
@@ -597,7 +590,7 @@ static void interact_poll(void)
         return;
     }
 
-    const char* what = "Door";
+    const char* what = "door";
     const char* verb = "open";
     char aname[80] = "?";
     object_name(actor, aname, sizeof aname);
@@ -610,8 +603,12 @@ static void interact_poll(void)
     if (u) unit_label(u, name, sizeof name);
     logf_("move: %s in reach of %s (%s), %d interaction point%s\n",
           name[0] ? name : "the soldier", aname, what, n, n == 1 ? "" : "s");
-    char say[160];
-    _snprintf_s(say, sizeof say, _TRUNCATE, "%s here. Shift+Home, then V to %s it.", what, verb);
+    char say[256];
+    StrId line = !strcmp(what, "comm array") ? MOVE_HERE_COMM_ARRAY
+               : !strcmp(what, "window")     ? MOVE_HERE_WINDOW
+               : !strcmp(what, "panel")      ? MOVE_HERE_PANEL
+               :                               MOVE_HERE_DOOR;
+    strncpy_s(say, sizeof say, T(line), _TRUNCATE);
     history_add(say);
     if (g_speak) speech_say(say);
 }
@@ -772,8 +769,8 @@ void move_poll(void)
         logf_("move: %s never moved (action %s)\n", g_move.name,
               action[0] ? action : "none");
         g_move.on = 0;
-        char say[128];
-        _snprintf_s(say, sizeof say, _TRUNCATE, "%s did not move.", g_move.name);
+        char say[192];
+        tfmt(say, sizeof say, MOVE_DID_NOT_MOVE, g_move.name);
         history_add(say);
         if (g_speak) speech_say(say);
     }

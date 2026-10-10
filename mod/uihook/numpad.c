@@ -7,6 +7,7 @@
 #include <string.h>
 #include <math.h>
 #include "numpad.h"
+#include "strings.h"
 #include "ue3.h"
 #include "natives.h"
 #include "names.h"
@@ -640,7 +641,7 @@ static void radar(int friendly)
     int sx, sy;
     float sz;
     if (!cursor_grid(&g) || !soldier_tile(&g, &sx, &sy, &sz)) {
-        speech_say_now("No soldier.");
+        speech_say_now(T(SCAN_NO_SOLDIER));
         return;
     }
     void* soldier = NULL;
@@ -648,7 +649,7 @@ static void radar(int friendly)
     void* squad = squad_player();
     if (!squad) {
         logf_("radar: the soldier's player is unreadable\n");
-        speech_say_now("No soldier.");
+        speech_say_now(T(SCAN_NO_SOLDIER));
         return;
     }
 
@@ -693,7 +694,7 @@ static void radar(int friendly)
     }
     static char say[2048];
     tile_contacts(c, n,
-                  !friendly ? "No enemies in sight." : "No squad in sight.",
+                  T(!friendly ? NUMPAD_NO_ENEMIES_IN_SIGHT : NUMPAD_NO_SQUAD_IN_SIGHT),
                   say, sizeof say);
     logf_("radar: %s from %d, %d%s%s: %s\n", friendly ? "squad" : "enemies", ox, oy,
           from_soldier ? " (the soldier)" : " (the target)",
@@ -833,7 +834,7 @@ static void nav_confirm(void)
         int fuel = g_fly_air ? fly_fuel() : -1;
         if (g_fly_air && fuel >= 0 && fuel < FLY_HOVER_FUEL) {
             logf_("nav: confirm in the air with fuel %d -- the game refuses the hover\n", fuel);
-            speech_say_now("Not enough fuel to hover there.");
+            speech_say_now(T(NUMPAD_NO_FUEL_THERE));
             return;
         }
     }
@@ -1078,7 +1079,7 @@ static void nav_press(int digit, int gliding)
         // otherwise say this twenty times a second.
         if (gliding) return;
         logf_("nav: numpad %d with no grid or cursor yet\n", digit);
-        speech_say_now("No map yet.");
+        speech_say_now(T(NUMPAD_NO_MAP));
         return;
     }
 
@@ -1166,11 +1167,10 @@ static void nav_press(int digit, int gliding)
     if (aiming) GUARDED("nav: self check", self = shot_used_on_self(aim_action()));
     if (self) {
         if (gliding) return;
-        char say[160] = "Nothing to aim. Used on this soldier. Enter to use, Escape to cancel.";
+        char say[320];
+        strncpy_s(say, sizeof say, T(NUMPAD_NOTHING_TO_AIM), _TRUNCATE);
         UnitName* u = unit_by_unit(soldier_unit());
-        if (u && u->name[0])
-            _snprintf_s(say, sizeof say, _TRUNCATE,
-                        "Nothing to aim. Used on %s. Enter to use, Escape to cancel.", u->name);
+        if (u && u->name[0]) tfmt(say, sizeof say, NUMPAD_NOTHING_TO_AIM_ON, u->name);
         logf_("nav: numpad %d while aiming an ability used on the soldier -> \"%s\"\n",
               digit, say);
         speech_say_now(say);
@@ -1635,7 +1635,7 @@ static void fly_pick(void)
 // rounded down: a hovering pawn stands about 95 above the plane it was sent to
 // -- the 2026-10-09 (23:12) log, Hagen sent to 576 came to rest at z 735, feet
 // at 671 -- so rounding down names the plane.
-int fly_hover_words(const float* loc, char* out, size_t out_sz)
+int fly_hover_words(const float* loc, int after_name, char* out, size_t out_sz)
 {
     if (!soldier_flying()) return 0;
     void* world = cursor_world();
@@ -1646,12 +1646,12 @@ int fly_hover_words(const float* loc, char* out, size_t out_sz)
     float s = floorz(world, NULL, at, 1);       // bUnlimitedSearch
     if (s == feet || s > feet - FLY_AIR_MIN) return 0;
     int storeys = (int)((feet - s) / 192.0f);
+    // On its own, or after a soldier's name ("Vargas hovering, ..."): lines
+    // of their own, since the case and the verb are the language's.
     if (storeys <= 0)
-        _snprintf_s(out, out_sz, _TRUNCATE, "Hovering, under a storey up.");
-    else if (storeys == 1)
-        _snprintf_s(out, out_sz, _TRUNCATE, "Hovering, one storey up.");
+        strncpy_s(out, out_sz, T(after_name ? NUMPAD_HOVER_LOW_AFTER : NUMPAD_HOVER_LOW), _TRUNCATE);
     else
-        _snprintf_s(out, out_sz, _TRUNCATE, "Hovering, %d storeys up.", storeys);
+        tpfmt(out, out_sz, after_name ? NUMPAD_HOVER_AFTER : NUMPAD_HOVER, storeys, storeys);
     logf_("nav: hovering with feet at %.1f, the surface under them at %.1f\n", feet, s);
     return 1;
 }
@@ -1661,18 +1661,15 @@ static void fly_where(char* out, size_t out_sz)
 {
     float d = g_fly_z - g_fly_below;
     int halves = (int)(d / 96.0f + 0.5f);
-    char h[48];
+    char h[96];
     if (halves <= 1)
-        _snprintf_s(h, sizeof h, _TRUNCATE, "half a storey");
-    else if (halves == 2)
-        _snprintf_s(h, sizeof h, _TRUNCATE, "one storey");
+        strncpy_s(h, sizeof h, T(NUMPAD_HALF_STOREY), _TRUNCATE);
     else if (halves % 2)
-        _snprintf_s(h, sizeof h, _TRUNCATE, "%d and a half storeys", halves / 2);
+        tpfmt(h, sizeof h, NUMPAD_N_HALF_STOREYS, halves / 2, halves / 2);
     else
-        _snprintf_s(h, sizeof h, _TRUNCATE, "%d storeys", halves / 2);
+        tpfmt(h, sizeof h, NUMPAD_N_STOREYS, halves / 2, halves / 2);
     int fuel = fly_fuel();
-    _snprintf_s(out, out_sz, _TRUNCATE, "In the air, %s up%s.", h,
-                fuel >= 0 && fuel < FLY_HOVER_FUEL ? ", not enough fuel to hover" : "");
+    tfmt(out, out_sz, fuel >= 0 && fuel < FLY_HOVER_FUEL ? NUMPAD_IN_AIR_NO_FUEL : NUMPAD_IN_AIR, h);
 }
 
 // F / C in flight: noted now, applied once the game has moved its plane.
@@ -1714,7 +1711,7 @@ static void fly_floor_apply(void)
     if (!moved) {
         logf_("nav: flight height stays at %.1f after %d ms\n", cam, FLY_KEY_MS);
         speech_cancel_pending();
-        speech_say_now(dir > 0 ? "Highest flight level." : "Lowest flight level.");
+        speech_say_now(T(dir > 0 ? NUMPAD_HIGHEST_FLIGHT : NUMPAD_LOWEST_FLIGHT));
         return;
     }
     int tx = g_fly_key_tile[0], ty = g_fly_key_tile[1];
@@ -1778,12 +1775,12 @@ static void nav_floor(int dir)
     if (!found) {
         logf_("nav: %s at %d, %d from %.1f -- no floor that way (%s)\n",
               dir > 0 ? "F" : "C", tx, ty, from, seen);
-        char missed[128] = "", say[160];
+        char missed[256] = "", say[384];
         GUARDED("nav: floor missed",
                 floor_missed(tx, ty, from, 0, from, dir, missed, sizeof missed),
                 missed[0] = 0);
         _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s",
-                    dir > 0 ? "No floor above here." : "No floor below here.",
+                    T(dir > 0 ? TILE_NO_FLOOR_ABOVE : NUMPAD_NO_FLOOR_BELOW),
                     missed[0] ? " " : "", missed);
         speech_cancel_pending();
         speech_say_now(say);
@@ -1967,14 +1964,13 @@ static void kinetic_say(void* unit)
         }
     }
     if (seen && who[0])
-        _snprintf_s(say, sizeof say, _TRUNCATE,
-                    friendly ? "Strikes squadmate %s." : "Strikes: %s.", who);
+        tfmt(say, sizeof say, friendly ? NUMPAD_STRIKES_SQUADMATE : NUMPAD_STRIKES, who);
     else if (info.k.cover_type == 1)
-        strcpy_s(say, sizeof say, "Strikes high cover.");
+        strncpy_s(say, sizeof say, T(NUMPAD_STRIKES_HIGH), _TRUNCATE);
     else if (info.k.cover_type == 2)
-        strcpy_s(say, sizeof say, "Strikes low cover.");
+        strncpy_s(say, sizeof say, T(NUMPAD_STRIKES_LOW), _TRUNCATE);
     else
-        strcpy_s(say, sizeof say, "Nothing in reach.");
+        strncpy_s(say, sizeof say, T(NUMPAD_NOTHING_IN_REACH), _TRUNCATE);
     logf_("blast: kinetic strike at %.0f, %.0f, %.0f -> unit %p (%s, %s), cover type %d at "
           "%.0f, %.0f, %.0f, direction %.2f, %.2f -> \"%s\"\n",
           feet[0], feet[1], feet[2], hit, who[0] ? who : "-",
@@ -2059,11 +2055,9 @@ static void grapple_say(void* shot)
           tx, ty, floor, sx, sy, dist, reach, valid);
 
     if (!valid && reach > 0 && dist > (float)reach) {
-        _snprintf_s(verdict, sizeof verdict, _TRUNCATE,
-                    "Cannot grapple here, out of range: %d tiles, the grapple reaches %d.",
-                    (int)(dist + 0.5f), reach);
+        tfmt(verdict, sizeof verdict, NUMPAD_GRAPPLE_RANGE, (int)(dist + 0.5f), reach);
     } else if (!valid) {
-        strcpy_s(verdict, sizeof verdict, "Cannot grapple here.");
+        strncpy_s(verdict, sizeof verdict, T(NUMPAD_GRAPPLE_NO), _TRUNCATE);
     } else if (field_ptr(shot, "GrapplePoint", &g_grapple_point, 3 * sizeof(float), &v) &&
                cursor_grid(&g)) {
         const float* p = (const float*)v;
@@ -2075,11 +2069,14 @@ static void grapple_say(void* shot)
         floor = aim_floor(&g, tx, ty, p[2]);
         char where[128] = "";
         where_is(tx, ty, floor, where, sizeof where);
-        _snprintf_s(verdict, sizeof verdict, _TRUNCATE, "Can grapple, lands on %d, %d.%s%s",
-                    tx, ty, where[0] ? " " : "", where);
+        tfmt(verdict, sizeof verdict, NUMPAD_GRAPPLE_LANDS, tx, ty);
+        if (where[0]) {
+            strncat_s(verdict, sizeof verdict, " ", _TRUNCATE);
+            strncat_s(verdict, sizeof verdict, where, _TRUNCATE);
+        }
         logf_("grapple: valid, point %.1f, %.1f, %.1f, floor %.1f\n", p[0], p[1], p[2], floor);
     } else {
-        strcpy_s(verdict, sizeof verdict, "Can grapple.");
+        strncpy_s(verdict, sizeof verdict, T(NUMPAD_GRAPPLE_YES), _TRUNCATE);
     }
     if (have_tile) {
         Fault f;
@@ -2124,7 +2121,7 @@ static void blast_say(void)
     // read all the same, and said as flames rather than a blast.
     int cone = type == 80;
     if (!cone && !(radius > 0.0f)) return;        // not an area attack
-    const char* area = cone ? "the flames" : "the blast";
+
     if (!field_ptr(action, "m_arrMarkedTargets", &g_marked_slot, sizeof(FArray), &v)) return;
     const FArray* arr = (const FArray*)v;
     int num = arr->Num;
@@ -2222,7 +2219,7 @@ static void blast_say(void)
         total[list]++;
         if (kept[list] >= TILE_NAMES_MAX) continue;
         char* out = names[list][kept[list]];
-        scan_mesh_words(mesh, list ? "Cover" : "Explosive", out, SCAN_NAME);
+        scan_mesh_words(mesh, T(list ? NUMPAD_COVER : WORLD_EXPLOSIVE), out, SCAN_NAME);
         namep[list][kept[list]++] = out;
         if (mused < sizeof meshes) {
             int w = _snprintf_s(meshes + mused, sizeof meshes - mused, _TRUNCATE, "%s%s",
@@ -2233,33 +2230,37 @@ static void blast_say(void)
 
     // "In the blast: 2 Floaters. Squad in the blast: Vargas. Explodes: Car.
     // High cover: Wall. Low cover: 2 Crates. 8 other objects."
-    char say[768], text[256];
+    // Whole sentences for the blast and for the flames, rather than "In %s"
+    // with "the blast" put in: a language may need the two worded apart.
+    char say[1536], text[512];
     size_t used = 0;
     say[0] = 0;
     if (tthem) {
         tile_names_counted(them, nthem, tthem, text, sizeof text);
-        used += (size_t)_snprintf_s(say + used, sizeof say - used, _TRUNCATE,
-                                    "In %s: %s.", area, text);
+        tfmt_cat(say, sizeof say, &used, cone ? NUMPAD_IN_FLAMES : NUMPAD_IN_BLAST, text);
     }
     if (tours && used < sizeof say) {
         tile_names_counted(ours, nours, tours, text, sizeof text);
-        used += (size_t)_snprintf_s(say + used, sizeof say - used, _TRUNCATE,
-                                    "%sSquad in %s: %s.", used ? " " : "", area, text);
+        if (used && used + 1 < sizeof say) { say[used++] = ' '; say[used] = 0; }
+        tfmt_cat(say, sizeof say, &used, cone ? NUMPAD_SQUAD_IN_FLAMES : NUMPAD_SQUAD_IN_BLAST, text);
     }
     if (!tthem && !tours) {
-        _snprintf_s(say, sizeof say, _TRUNCATE, "No one in %s.", area);
+        strncpy_s(say, sizeof say, T(cone ? NUMPAD_NONE_IN_FLAMES : NUMPAD_NONE_IN_BLAST), _TRUNCATE);
         used = strlen(say);
     }
-    static const char* heads[3] = { "Explodes", "High cover", "Low cover" };
+    static const StrId heads[3] = { NUMPAD_EXPLODES, NUMPAD_HIGH_COVER, NUMPAD_LOW_COVER };
     for (int l = 0; l < 3; l++) {
-        if (!total[l] || used >= sizeof say) continue;
+        if (!total[l] || used + 1 >= sizeof say) continue;
         tile_names_counted(namep[l], kept[l], total[l], text, sizeof text);
-        used += (size_t)_snprintf_s(say + used, sizeof say - used, _TRUNCATE,
-                                    " %s: %s.", heads[l], text);
+        say[used++] = ' ';
+        say[used] = 0;
+        tfmt_cat(say, sizeof say, &used, heads[l], text);
     }
-    if (others && used < sizeof say)
-        _snprintf_s(say + used, sizeof say - used, _TRUNCATE, " %d other object%s.", others,
-                    others == 1 ? "" : "s");
+    if (others && used + 1 < sizeof say) {
+        say[used++] = ' ';
+        say[used] = 0;
+        tpfmt_cat(say, sizeof say, &used, NUMPAD_OTHER_OBJECTS, others, others);
+    }
     logf_("blast: %s, radius %.0f, %d marked, %d of them, %d of ours, %d explode, %d high cover, "
           "%d low cover, %d other objects (%d on a wall), %d wrecked -> \"%s\"  [%s]\n",
           cone ? "flamethrower cone" : "splash", radius, num, tthem, tours, total[0], total[1], total[2], others, dressing, wrecked,
@@ -2544,7 +2545,7 @@ static void nav_poll(void)
     } else if (walls && !g_walls_down) {
         int on = settings_step(SET_FIELD, 1);
         logf_("walls: field %s\n", on ? "on" : "off");
-        speech_say_now(on ? "Wall sound on." : "Wall sound off.");
+        speech_say_now(T(on ? NUMPAD_WALLS_ON : NUMPAD_WALLS_OFF));
     }
     g_walls_down = walls;
 
@@ -2571,7 +2572,7 @@ static void nav_poll(void)
         mission_list(say, sizeof say);
         if (mission_visible() == 0) {
             logf_("mission: M, the list hidden: \"%s\"\n", say);
-            strcpy_s(say, sizeof say, "No objectives on screen.");
+            strncpy_s(say, sizeof say, T(NUMPAD_NO_OBJECTIVES_ON_SCREEN), _TRUNCATE);
         }
         // The turn counters top right after the list: "Turns until Air
         // Strike, 8." They are drawn whether the list is or not, so they
@@ -2863,7 +2864,7 @@ static void nav_aim_landed(const CursorGrid* g, int px, int py)
     nav_describe(px, py, g_step_coords, sizeof g_step_coords);
     // Who was found on arrival stands on the tile asked for, not this one.
     g_step_nunits = 0;
-    nav_step_say("Out of range.");
+    nav_step_say(T(NUMPAD_OUT_OF_RANGE));
 }
 
 // What the game made of the target. Logged when the tile changes, so the log

@@ -1,48 +1,50 @@
 // The mod's options. See settings.h.
 
 #include "settings.h"
+#include "strings.h"
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
 
 typedef struct {
     const char* key;            // in the file
-    const char* name;           // in the menu
+    StrId       name;           // in the menu
     int         lo, hi, dflt;
-    const char* const* words;   // one per value, or NULL for On / Off
+    const StrId* words;         // one per value, or NULL for On / Off
 } Spec;
 
 // A level's names, notch 0..4. Five notches three decibels apart around
 // the built-in level, which is the middle one (audio.c, VOLUME_NOTCHES and
 // VOLUME_MIDDLE); learn_apply_levels checks the mixer agrees.
-static const char* const LEVEL_WORDS[] = { "Quietest", "Quiet", "Normal", "Loud", "Loudest" };
-static const char* const GLIDE_WORDS[] = { "Slow", "Normal", "Fast" };
+static const StrId LEVEL_WORDS[] = { SET_LEVEL_QUIETEST, SET_LEVEL_QUIET, SET_LEVEL_NORMAL,
+                                     SET_LEVEL_LOUD, SET_LEVEL_LOUDEST };
+static const StrId GLIDE_WORDS[] = { SET_GLIDE_SLOW, SET_GLIDE_NORMAL, SET_GLIDE_FAST };
 
 static const Spec SPEC[SET_COUNT] = {
-    [SET_FIELD]       = { "WallField",    "Wall sound",          0, 1, 1, NULL },
-    [SET_WALL_LEVEL]  = { "WallLevel",    "Wall sound level",    0, 4, 2, LEVEL_WORDS },
-    [SET_HEARTS]      = { "Hearts",       "Ally heartbeats",     0, 1, 1, NULL },
-    [SET_HEART_SOLO]  = { "HeartSolo",    "Follow one soldier",  0, 1, 0, NULL },
-    [SET_HEART_LEVEL] = { "HeartLevel",   "Ally heartbeat level", 0, 4, 2, LEVEL_WORDS },
-    [SET_ALIENS]      = { "Aliens",       "Alien heartbeats",    0, 1, 1, NULL },
-    [SET_ALIEN_LEVEL] = { "AlienLevel",   "Alien heartbeat level", 0, 4, 2, LEVEL_WORDS },
-    [SET_DOORS]       = { "Doors",        "Door sounds",         0, 1, 1, NULL },
-    [SET_DOOR_LEVEL]  = { "DoorLevel",    "Door sound level",    0, 4, 2, LEVEL_WORDS },
-    [SET_WINDOWS]     = { "Windows",      "Window sounds",       0, 1, 1, NULL },
-    [SET_WINDOW_LEVEL] = { "WindowLevel", "Window sound level",  0, 4, 2, LEVEL_WORDS },
-    [SET_STEPS]       = { "Steps",        "Height change sounds", 0, 1, 1, NULL },
-    [SET_STEP_LEVEL]  = { "StepLevel",    "Height change level", 0, 4, 2, LEVEL_WORDS },
-    [SET_DAYS]        = { "DayTick",      "Day passing sound",   0, 1, 1, NULL },
-    [SET_DAY_LEVEL]   = { "DayTickLevel", "Day passing level",   0, 4, 2, LEVEL_WORDS },
-    [SET_GLIDE]      = { "GlideSpeed",   "Glide speed",         0, 2, GLIDE_NORMAL, GLIDE_WORDS },
-    [SET_COMBAT]     = { "Combat",       "Combat narration",    0, 1, 1, NULL },
-    [SET_SIGHT]      = { "Sightings",    "Enemy sightings",     0, 1, 1, NULL },
-    [SET_TURN]       = { "TurnHandover", "Turn changes",        0, 1, 1, NULL },
-    [SET_TICKER]     = { "Ticker",       "Message ticker",      0, 1, 1, NULL },
-    [SET_OBJECTIVES] = { "Objectives",   "Objective changes",   0, 1, 1, NULL },
-    [SET_NARRATIVE]  = { "Narrative",    "Comm-link messages",  0, 1, 1, NULL },
-    [SET_MOUSE]      = { "BlockMouse",   "Block the mouse",     0, 1, 1, NULL },
-    [SET_DEBUG]      = { "DebugLog",     "Debug log",           0, 1, 1, NULL },
+    [SET_FIELD]       = { "WallField",    SET_NAME_FIELD,          0, 1, 1, NULL },
+    [SET_WALL_LEVEL]  = { "WallLevel",    SET_NAME_WALL_LEVEL,    0, 4, 2, LEVEL_WORDS },
+    [SET_HEARTS]      = { "Hearts",       SET_NAME_HEARTS,     0, 1, 1, NULL },
+    [SET_HEART_SOLO]  = { "HeartSolo",    SET_NAME_HEART_SOLO,  0, 1, 0, NULL },
+    [SET_HEART_LEVEL] = { "HeartLevel",   SET_NAME_HEART_LEVEL, 0, 4, 2, LEVEL_WORDS },
+    [SET_ALIENS]      = { "Aliens",       SET_NAME_ALIENS,    0, 1, 1, NULL },
+    [SET_ALIEN_LEVEL] = { "AlienLevel",   SET_NAME_ALIEN_LEVEL, 0, 4, 2, LEVEL_WORDS },
+    [SET_DOORS]       = { "Doors",        SET_NAME_DOORS,         0, 1, 1, NULL },
+    [SET_DOOR_LEVEL]  = { "DoorLevel",    SET_NAME_DOOR_LEVEL,    0, 4, 2, LEVEL_WORDS },
+    [SET_WINDOWS]     = { "Windows",      SET_NAME_WINDOWS,       0, 1, 1, NULL },
+    [SET_WINDOW_LEVEL] = { "WindowLevel", SET_NAME_WINDOW_LEVEL,  0, 4, 2, LEVEL_WORDS },
+    [SET_STEPS]       = { "Steps",        SET_NAME_STEPS, 0, 1, 1, NULL },
+    [SET_STEP_LEVEL]  = { "StepLevel",    SET_NAME_STEP_LEVEL, 0, 4, 2, LEVEL_WORDS },
+    [SET_DAYS]        = { "DayTick",      SET_NAME_DAYS,   0, 1, 1, NULL },
+    [SET_DAY_LEVEL]   = { "DayTickLevel", SET_NAME_DAY_LEVEL,   0, 4, 2, LEVEL_WORDS },
+    [SET_GLIDE]      = { "GlideSpeed",   SET_NAME_GLIDE,         0, 2, GLIDE_NORMAL, GLIDE_WORDS },
+    [SET_COMBAT]     = { "Combat",       SET_NAME_COMBAT,    0, 1, 1, NULL },
+    [SET_SIGHT]      = { "Sightings",    SET_NAME_SIGHT,     0, 1, 1, NULL },
+    [SET_TURN]       = { "TurnHandover", SET_NAME_TURN,        0, 1, 1, NULL },
+    [SET_TICKER]     = { "Ticker",       SET_NAME_TICKER,      0, 1, 1, NULL },
+    [SET_OBJECTIVES] = { "Objectives",   SET_NAME_OBJECTIVES,   0, 1, 1, NULL },
+    [SET_NARRATIVE]  = { "Narrative",    SET_NAME_NARRATIVE,  0, 1, 1, NULL },
+    [SET_MOUSE]      = { "BlockMouse",   SET_NAME_MOUSE,     0, 1, 1, NULL },
+    [SET_DEBUG]      = { "DebugLog",     SET_NAME_DEBUG,           0, 1, 1, NULL },
 };
 
 #define SECTION "settings"
@@ -127,7 +129,7 @@ int settings_step(int id, int delta)
 
 const char* settings_name(int id)
 {
-    return id >= 0 && id < SET_COUNT ? SPEC[id].name : "";
+    return id >= 0 && id < SET_COUNT ? T(SPEC[id].name) : "";
 }
 
 void settings_value_text(int id, char* out, size_t out_sz)
@@ -136,6 +138,6 @@ void settings_value_text(int id, char* out, size_t out_sz)
     out[0] = 0;
     if (id < 0 || id >= SET_COUNT) return;
     int v = settings_get(id);
-    const char* w = SPEC[id].words ? SPEC[id].words[v - SPEC[id].lo] : (v ? "On" : "Off");
+    const char* w = T(SPEC[id].words ? SPEC[id].words[v - SPEC[id].lo] : v ? SET_ON : SET_OFF);
     strncpy_s(out, out_sz, w, _TRUNCATE);
 }

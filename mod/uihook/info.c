@@ -2,6 +2,7 @@
 
 #include "info.h"
 #include "soldier.h"
+#include "strings.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -97,13 +98,13 @@ void info_soldier(const char* name, const char* nick, const char* cls,
         _snprintf_s(piece, sizeof piece, _TRUNCATE, "%s%s%s.", r, *r && *words ? ", " : "", words);
         add(g.who, sizeof g.who, " ", piece);
     }
-    if (promotion == 1) add(g.who, sizeof g.who, " ", "Promotion available.");
+    if (promotion == 1) add(g.who, sizeof g.who, " ", T(INFO_PROMOTION));
 }
 
 void info_alien(const char* name)
 {
     g.any = 1;
-    _snprintf_s(g.who, sizeof g.who, _TRUNCATE, "%s.", name && *name ? name : "Unknown");
+    _snprintf_s(g.who, sizeof g.who, _TRUNCATE, "%s.", name && *name ? name : T(TXT_UNKNOWN));
 }
 
 void info_stats(const char* const* stats, int n)
@@ -192,7 +193,7 @@ static void hit_line(char* out, size_t out_sz)
 
 static void crit_line(char* out, size_t out_sz)
 {
-    labelled(g.crit_label[0] ? g.crit_label : "Chance to crit:", g.crit, out, out_sz);
+    labelled(g.crit_label[0] ? g.crit_label : T(INFO_CRIT_LABEL), g.crit, out, out_sz);
     add(out, out_sz, "", ".");
 }
 
@@ -216,7 +217,7 @@ static void mods_line(int k, char* out, size_t out_sz)
 void info_summary(char* out, size_t out_sz)
 {
     char piece[INFO_TEXT];
-    _snprintf_s(out, out_sz, _TRUNCATE, "Target information.");
+    strncpy_s(out, out_sz, T(INFO_HEADING), _TRUNCATE);
     add(out, out_sz, " ", g.who);
     stats_line(piece, sizeof piece);
     add(out, out_sz, " ", piece);
@@ -234,7 +235,7 @@ void info_summary(char* out, size_t out_sz)
     for (int i = 0; i < INFO_LISTS; i++) {
         if (!g.lists[i].n) continue;
         _snprintf_s(piece, sizeof piece, _TRUNCATE, "%s, %d.",
-                    g.lists[i].title[0] ? g.lists[i].title : "List", g.lists[i].n);
+                    g.lists[i].title[0] ? g.lists[i].title : T(INFO_LIST), g.lists[i].n);
         add(out, out_sz, " ", piece);
     }
 }
@@ -275,7 +276,7 @@ static int lines(int want, char* out, size_t out_sz)
         // like the end of the screen, and Mind Merge was one press away
         // (2026-09-27). The lines below still give each description.
         int w = _snprintf_s(piece, sizeof piece, _TRUNCATE, "%s, %d:",
-                            L->title[0] ? L->title : "List", L->n);
+                            L->title[0] ? L->title : T(INFO_LIST), L->n);
         for (int i = 0; i < L->n && w > 0 && (size_t)w < sizeof piece; i++) {
             int more = _snprintf_s(piece + w, sizeof piece - (size_t)w, _TRUNCATE, "%s %s",
                                    i ? "," : "", L->name[i]);
@@ -320,11 +321,11 @@ void info_step(int dir, char* out, size_t out_sz)
     if (g_at >= n) g_at = n - 1;
     int to = g_at + dir;
     const char* edge = "";
-    if (to < 0) { to = 0; edge = "Top. "; }
-    else if (to >= n) { to = n - 1; edge = "End. "; }
+    if (to < 0) { to = 0; edge = T(TXT_TOP); }
+    else if (to >= n) { to = n - 1; edge = T(TXT_END); }
     g_at = to;
     info_line(g_at, line, sizeof line);
-    _snprintf_s(out, out_sz, _TRUNCATE, "%s%s", edge, line);
+    _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s", edge, *edge ? " " : "", line);
 }
 
 void info_current(char* out, size_t out_sz)

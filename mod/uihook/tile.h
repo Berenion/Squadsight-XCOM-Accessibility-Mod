@@ -53,7 +53,7 @@ typedef struct {
 #define TILE_COVER_WLOW     0x0080
 #define TILE_COVER_DIAGONAL 0x10000
 
-#define TILE_MAX_TEXT 192
+#define TILE_MAX_TEXT 512
 
 // The vtable offset an exec thunk dispatches through, or -1 when the code does
 // not have the shape above. `code` is the thunk's first bytes; the scan stops
@@ -116,18 +116,18 @@ typedef struct {
     // The seen enemies a soldier here would flank, named, repeats counted
     // (tile_names_counted): "Sectoid", "2 Sectoids, Muton". Empty for none.
     // The game's own mark -- see tile_exposure in main.c.
-    char flanks[96];
+    char flanks[256];
     // The rings the game draws round units while a move is hovered
     // (XGUnit.DrawRanges) that this tile lies inside, as sentences:
     // "Medikit reaches White. Arc Thrower reaches Sectoid." Empty for none.
     // See tile_rings in main.c.
-    char reach[192];
+    char reach[384];
     // Seen enemies with a line to this tile that a soldier here would stand a
     // storey or more above (height advantage, +20 aim), and ones that would
     // stand as far above the soldier: "Sectoid", "2 Sectoids, Muton". See
     // tile_exposure in main.c.
-    char height_over[96];
-    char height_under[96];
+    char height_over[256];
+    char height_under[256];
 } TileReport;
 
 // "Dash. High cover north. Low cover east and west. Smoke." -- or "No cover."

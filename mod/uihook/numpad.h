@@ -20,7 +20,7 @@ int  soldier_flying(void);
 
 // "Hovering, 3 storeys up." when the flying soldier's pawn at `loc` is in
 // the air; 0 (and nothing written) otherwise.
-int  fly_hover_words(const float* loc, char* out, size_t out_sz);
+int  fly_hover_words(const float* loc, int after_name, char* out, size_t out_sz);
 
 // Lets go of the numpad's target; `why` is for the log.
 void nav_stop(const char* why);

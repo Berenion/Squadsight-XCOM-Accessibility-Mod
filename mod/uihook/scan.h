@@ -33,7 +33,7 @@
 // list from the game each time the player asks.
 
 #define SCAN_MAX        256     // items held in one scan
-#define SCAN_NAME       64
+#define SCAN_NAME       128
 #define SCAN_MAX_TEXT   192
 
 typedef enum {
@@ -68,7 +68,7 @@ typedef struct {
     // Said after the name: "45%, low cover, 8 of 8 HP". Kept apart from the
     // name because the name is what the selection is held by, and a hit
     // chance that moves with the soldier must not lose the selection.
-    char         detail[96];
+    char         detail[160];
     // Sorts ahead of distance, higher first; 0 for everything sorted by
     // distance alone. The targets use it for best shot first.
     int          rank;

@@ -25,6 +25,49 @@ int writable(const void* p, size_t n);
 #define FSTRING_MAX 4096
 int read_fstring(const FString* s, char* out, size_t out_sz);
 
+// A localized string of the game's, in the player's language: element `index`
+// of `field` on Default__<cls>, the class default object, which the engine
+// fills from XComGame.int / .deu / ... at load. For matching or naming
+// anything the game words itself -- "CRITICAL!", a rank, a medal -- rather
+// than a copy of the English. Kept once read (the default object is found by
+// a walk of the object table, ~50 ms); a miss is retried at most every 10 s.
+// 0 when it cannot be read, and the caller decides what that means.
+int game_loc(const char* cls, const char* field, int index, char* out, size_t out_sz);
+
+// Whether the game is Enemy Within (XComEW.exe) rather than Enemy Unknown:
+// the two number some enums apart (EItemType: the Medikit is 69 in EW and 76
+// in EU), so an index into a localized array by enum is chosen per build.
+int  game_is_ew(void);
+void game_set_ew(int ew);
+
+// A line of the game's localization files, as UnrealScript's
+// Localize(section, key, package) reads it: [section] key=value in
+// XComGame\Localization\<LANG>\<package>.<lang> (UTF-16), for the
+// language the game is set to (strings_lang). For text the game words with
+// Localize rather than a localized property -- the XCOM Database's "Expand
+// Menu". Found from the game's own folder: the exe is in Binaries\Win32 of
+// it (EW: XEW\Binaries\Win32). Kept once read. 0 when there is no such line.
+int game_localize(const char* package, const char* section, const char* key,
+                  char* out, size_t out_sz);
+
+// The same, from `root` (the folder with XComGame in it) and the language
+// given; for the offline check. No cache.
+int game_localize_from(const char* root, const char* lang, const char* package,
+                       const char* section, const char* key, char* out, size_t out_sz);
+
+// Every line of `package` whose key contains `key_part` and whose ENGLISH
+// text contains `english_part` (any case), as the game words that same line
+// in the player's language: the English file names the lines, the player's
+// file gives their text. For telling the game's own text apart when no word
+// of it can be matched in every language -- the objectives that send the
+// squad to the evac zone ("m_strCovExObj2" ... "EVAC zone") in German or
+// Russian. Into `out`, at most `max` (64); the count. Not cached.
+int game_localize_like(const char* package, const char* key_part, const char* english_part,
+                       char (*out)[256], int max);
+int game_localize_like_from(const char* root, const char* lang, const char* package,
+                            const char* key_part, const char* english_part,
+                            char (*out)[256], int max);
+
 // Whether an object is still one: objects_live, or yes while the object
 // table has not been found (unit_is_live in game.c says why).
 int unit_is_live(void* obj);

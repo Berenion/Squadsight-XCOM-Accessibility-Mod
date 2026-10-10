@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "scanner.h"
+#include "strings.h"
 #include "scan.h"
 #include "units.h"
 #include "world.h"
@@ -152,7 +153,7 @@ static void scan_add_units(void)
         } else {
             it.kind = SCAN_ENEMIES;
             if (unit_overwatch(s.unit))
-                strcpy_s(it.detail, sizeof it.detail, "on overwatch");
+                strncpy_s(it.detail, sizeof it.detail, T(SCAN_ON_OVERWATCH), _TRUNCATE);
         }
         unit_label(&g_units[i], it.name, sizeof it.name);
         if (scan_item_at(&it, s.loc, NAVH_LIFT)) scan_add(&it);
@@ -353,7 +354,7 @@ static void scan_add_evac(void)
     ScanItem it;
     memset(&it, 0, sizeof it);
     it.kind = SCAN_OBJECTIVES;
-    strcpy_s(it.name, sizeof it.name, "Evac zone");
+    strncpy_s(it.name, sizeof it.name, T(SCAN_EVAC_ZONE), _TRUNCATE);
     if (scan_item_at(&it, at, 0.0f)) scan_add(&it);
 }
 
@@ -395,9 +396,8 @@ static void scan_add_civilian_count(void)
     memset(&it, 0, sizeof it);
     it.kind = SCAN_OBJECTIVES;
     it.unplaced = 1;
-    strcpy_s(it.name, sizeof it.name, "Civilians");
-    _snprintf_s(it.detail, sizeof it.detail, _TRUNCATE, "%d remaining, %d saved, %d lost",
-                live - saved, saved, dead);
+    strncpy_s(it.name, sizeof it.name, T(SCAN_CAT_CIVILIANS), _TRUNCATE);
+    tfmt(it.detail, sizeof it.detail, SCAN_CIVILIAN_COUNT, live - saved, saved, dead);
     scan_add(&it);
 }
 
@@ -415,7 +415,7 @@ static void scan_add_counters(void)
         memset(&it, 0, sizeof it);
         it.kind = SCAN_OBJECTIVES;
         it.unplaced = 1;
-        strncpy_s(it.name, sizeof it.name, c[i].label[0] ? c[i].label : "Counter", _TRUNCATE);
+        strncpy_s(it.name, sizeof it.name, c[i].label[0] ? c[i].label : T(SCAN_COUNTER), _TRUNCATE);
         strncpy_s(it.detail, sizeof it.detail, c[i].detail, _TRUNCATE);
         scan_add(&it);
     }
@@ -441,7 +441,7 @@ static void scan_add_tutorial(void)
     ScanItem it;
     memset(&it, 0, sizeof it);
     it.kind = SCAN_OBJECTIVES;
-    strncpy_s(it.name, sizeof it.name, "Tutorial target", _TRUNCATE);
+    strncpy_s(it.name, sizeof it.name, T(SCAN_TUTORIAL_TARGET), _TRUNCATE);
     int placed = scan_item_at(&it, pt, TUTORIAL_POINT_LIFT);
     if (placed) scan_add(&it);
 
@@ -522,7 +522,7 @@ static void scan_add_climbs(void)
             memset(&it, 0, sizeof it);
             it.kind = SCAN_INTERACT;
             strncpy_s(it.name, sizeof it.name,
-                      onto ? "Ledge up" : "Low wall", _TRUNCATE);
+                      T(onto ? SCAN_LEDGE_UP : SCAN_LOW_WALL), _TRUNCATE);
             float here[3] = { wx, wy, z };
             if (scan_item_at(&it, here, 0.0f)) scan_add(&it);
         }
@@ -701,7 +701,7 @@ static void scan_home(int shift)
 
     if (shift) {
         if (!cursor_grid(&g) || !soldier_tile(&g, &tx, &ty, &z)) {
-            scan_say("No soldier.");
+            scan_say(T(SCAN_NO_SOLDIER));
             return;
         }
         nav_focus(tx, ty, z - NAVH_LIFT, "the soldier");
@@ -734,12 +734,12 @@ static void scan_distance(int shift)
         float sz, cz;
         if (!cursor_grid(&g) || !soldier_tile(&g, &sx, &sy, &sz) ||
             !cursor_tile(&g, &cx, &cy, &cz)) {
-            scan_say("No soldier.");
+            scan_say(T(SCAN_NO_SOLDIER));
             return;
         }
         char where[64];
         tile_offset_text(sx - cx, sy - cy, where, sizeof where);
-        _snprintf_s(say, sizeof say, _TRUNCATE, "Soldier, %s.", where);
+        tfmt(say, sizeof say, SCAN_SOLDIER_AT, where);
         scan_say(say);
         return;
     }

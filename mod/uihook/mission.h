@@ -41,9 +41,14 @@ int mission_dirty(void);
 // player would notice changed.
 void mission_changes(char* out, size_t out_sz);
 
-// Whether an objective still open mentions `word`, in any case: "Escort the
-// survivor to the EVAC Zone." for "evac".
-int mission_open_mentions(const char* word);
+// Whether an objective still open mentions any of `words` (split by |), in
+// any case: "Escort the survivor to the EVAC Zone." for "evac". The words
+// are a translated line, since the objectives are in the game's language.
+int mission_open_mentions(const char* words);
+
+// Whether an objective still open is the game's line `text` (or holds it),
+// in any case: for the objectives read from the game's own localization.
+int mission_open_has(const char* text);
 
 // The whole list, in the order drawn, each with its state after it:
 // "Objectives: Find the source of the infestation. Investigate the response

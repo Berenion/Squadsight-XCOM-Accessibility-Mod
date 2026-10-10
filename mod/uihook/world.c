@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "world.h"
+#include "strings.h"
 #include "where.h"
 #include "units.h"
 #include "game.h"
@@ -354,14 +355,14 @@ static void scan_describe_interactive(WorldActor* wa)
         // One never switched on is a decoy on the extraction map, no objective.
         if (st == 0 && !marked) return;
         it.kind = SCAN_OBJECTIVES;
-        strncpy_s(it.name, sizeof it.name, "Comm array", _TRUNCATE);
-        if (st == 2) strcpy_s(it.detail, sizeof it.detail, "used");
+        strncpy_s(it.name, sizeof it.name, T(WORLD_COMM_ARRAY), _TRUNCATE);
+        if (st == 2) strncpy_s(it.detail, sizeof it.detail, T(WORLD_USED), _TRUNCATE);
     } else if (icon == ICON_WINDOW) {
         it.kind = SCAN_WINDOWS;
-        strncpy_s(it.name, sizeof it.name, "Window", _TRUNCATE);
+        strncpy_s(it.name, sizeof it.name, T(WORLD_WINDOW), _TRUNCATE);
     } else if (icon == ICON_BUTTON) {
         it.kind = panel_objective(actor) ? SCAN_OBJECTIVES : SCAN_INTERACT;
-        strncpy_s(it.name, sizeof it.name, "Panel", _TRUNCATE);
+        strncpy_s(it.name, sizeof it.name, T(WORLD_PANEL), _TRUNCATE);
         // An objective panel is no more on the screen than a door is until
         // the fog lifts off it, unless an arrow points at it. The Furies
         // console (DLC2_3_Furies_Stream) gets its arrow only when a soldier
@@ -387,10 +388,10 @@ static void scan_describe_interactive(WorldActor* wa)
         }
     } else {
         it.kind = SCAN_DOORS;
-        strncpy_s(it.name, sizeof it.name, "Door", _TRUNCATE);
+        strncpy_s(it.name, sizeof it.name, T(WORLD_DOOR), _TRUNCATE);
         int shut = world_door_shut(actor, NULL, 0);
         if (shut >= 0)
-            strcpy_s(it.detail, sizeof it.detail, shut ? "closed" : "open");
+            strncpy_s(it.detail, sizeof it.detail, T(shut ? WORLD_CLOSED : WORLD_OPEN), _TRUNCATE);
     }
 
     float world[3];
@@ -447,19 +448,18 @@ static void scan_describe_explosive(WorldActor* wa)
         *(void* const*)v &&
         field_ptr(*(void* const*)v, "StaticMesh", &g_blast_mesh, sizeof(void*), &v))
         object_name(*(void* const*)v, mesh, sizeof mesh);
-    scan_mesh_words(mesh, "Explosive", it.name, sizeof it.name);
+    scan_mesh_words(mesh, T(WORLD_EXPLOSIVE), it.name, sizeof it.name);
 
     float radius = 0.0f;
     if (field_ptr(action, "DamageRadius", &g_blast_radius, sizeof(float), &v))
         radius = *(const float*)v;
     int tiles = (int)(radius / CURSOR_TILE + 0.5f);
     int damaged = health > 0 && most > 0 && health < most * 3 / 4;
-    if (tiles > 0)
-        _snprintf_s(it.detail, sizeof it.detail, _TRUNCATE, "blast %d tile%s%s",
-                    tiles, tiles == 1 ? "" : "s", damaged ? ", damaged" : "");
-    else
-        _snprintf_s(it.detail, sizeof it.detail, _TRUNCATE, "explodes%s",
-                    damaged ? ", damaged" : "");
+    size_t dw = 0;
+    it.detail[0] = 0;
+    if (tiles > 0) tpfmt_cat(it.detail, sizeof it.detail, &dw, WORLD_BLAST_TILES, tiles, tiles);
+    else           tfmt_cat(it.detail, sizeof it.detail, &dw, WORLD_EXPLODES);
+    if (damaged)   tfmt_cat(it.detail, sizeof it.detail, &dw, WORLD_DAMAGED);
 
     // A blast on an archetype (ARC_...) has the archetype as its Outer, which
     // is no car on the map: it stands at the origin, which can fall on a real
@@ -483,7 +483,7 @@ static void scan_describe_window(WorldActor* wa)
     ScanItem it;
     memset(&it, 0, sizeof it);
     it.kind = SCAN_WINDOWS;
-    strncpy_s(it.name, sizeof it.name, "Window", _TRUNCATE);
+    strncpy_s(it.name, sizeof it.name, T(WORLD_WINDOW), _TRUNCATE);
     float world[3];
     if (!actor_location(actor, &g_window_loc, world)) return;
     if (world_item_at(&it, world) && !world_unseen(wa, &it, FOG_REACH_WALL, FOG_UP_LAYERS))
@@ -496,7 +496,7 @@ static void scan_describe_ladder(WorldActor* wa)
     ScanItem it;
     memset(&it, 0, sizeof it);
     it.kind = SCAN_INTERACT;
-    strncpy_s(it.name, sizeof it.name, "Ladder", _TRUNCATE);
+    strncpy_s(it.name, sizeof it.name, T(WORLD_LADDER), _TRUNCATE);
     float world[3];
     if (!actor_location(actor, &g_ladder_loc, world)) return;
     if (world_item_at(&it, world) && !world_unseen(wa, &it, FOG_REACH_WALL, FOG_UP_LADDER))
@@ -508,7 +508,7 @@ static void scan_describe_meld(void* actor)
     ScanItem it;
     memset(&it, 0, sizeof it);
     it.kind = SCAN_MELD;
-    strncpy_s(it.name, sizeof it.name, "Meld canister", _TRUNCATE);
+    strncpy_s(it.name, sizeof it.name, T(WORLD_MELD_CANISTER), _TRUNCATE);
 
     // How long it lasts is the whole decision about a canister: -1 when it
     // has no timer (the Meld tutorial's), 0 once it has run out.
@@ -542,20 +542,19 @@ static void scan_describe_meld(void* actor)
         if (s_got) props_read_object_bool(s_got, actor, &got);
     }
 
-    char timer[32] = "";
+    char timer[64] = "";
     if (turns > 0)
-        _snprintf_s(timer, sizeof timer, _TRUNCATE, "%d turn%s left", turns,
-                    turns == 1 ? "" : "s");
+        tpfmt(timer, sizeof timer, WORLD_TURNS_LEFT, turns, turns);
     if (got || turns == 0) {
         it.unplaced = 1;
-        strncpy_s(it.detail, sizeof it.detail, got ? "collected" : "lost", _TRUNCATE);
+        strncpy_s(it.detail, sizeof it.detail, T(got ? WORLD_COLLECTED : WORLD_LOST), _TRUNCATE);
         world_keep(&it);
         return;
     }
     if (!seen) {
         it.unplaced = 1;
         // The HUD's counter shows "?" for its turns until it is seen.
-        strncpy_s(it.detail, sizeof it.detail, "location unknown, turns unknown", _TRUNCATE);
+        strncpy_s(it.detail, sizeof it.detail, T(WORLD_MELD_UNKNOWN), _TRUNCATE);
         world_keep(&it);
         return;
     }
@@ -688,7 +687,7 @@ static const char* capture_zone_name(void* actor)
     void* vol = *(void* const*)v;
     if (!vol || !unit_is_live(vol)) return NULL;
     if (!field_ptr(vol, "m_iCaptureSequenceIndex", &g_cp_index, sizeof(int32_t), &v)) return NULL;
-    return *(const int32_t*)v == 0 ? "Encoder capture zone" : "Transmitter capture zone";
+    return T(*(const int32_t*)v == 0 ? WORLD_ENCODER_ZONE : WORLD_TRANSMITTER_ZONE);
 }
 
 static void scan_add_arrows(void)
@@ -726,7 +725,7 @@ static void scan_add_arrows(void)
         memset(&it, 0, sizeof it);
         it.kind = SCAN_OBJECTIVES;
         const char* zone = capture_zone_name(actor);
-        strncpy_s(it.name, sizeof it.name, zone ? zone : "Objective marker", _TRUNCATE);
+        strncpy_s(it.name, sizeof it.name, zone ? zone : T(WORLD_OBJECTIVE_MARKER), _TRUNCATE);
         if (!world_item_at(&it, world)) continue;
 
         // The transponders' arrows hang over their panels, which are listed
@@ -755,7 +754,7 @@ static void scan_add_arrows(void)
             ScanItem at = it;
             if (world_item_at(&at, stand)) {
                 it = at;
-                if (moved) strcpy_s(it.detail, sizeof it.detail, "the nearest tile to stand on");
+                if (moved) strncpy_s(it.detail, sizeof it.detail, T(WORLD_NEAREST_STAND), _TRUNCATE);
             } else {
                 found = 0;
             }

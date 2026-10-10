@@ -11,6 +11,7 @@
 #include "names.h"
 #include "ue3.h"
 #include "props.h"
+#include "strings.h"
 
 // Every unit has a flag over its head, and UIUnitFlag.SetNames(unitName,
 // unitNickName) arrives through the text hooks once per flag: a soldier's
@@ -756,7 +757,7 @@ void unit_label(const UnitName* u, char* out, size_t out_sz)
     if (u->flag && field_ptr(u->flag, "m_kUnit", &g_flag_unit, sizeof(void*), &v) &&
         civilian_saved(*(void* const*)v)) {
         size_t used = strlen(out);
-        if (used < out_sz) _snprintf_s(out + used, out_sz - used, _TRUNCATE, ", saved");
+        if (used < out_sz) tfmt_cat(out, out_sz, &used, UNIT_SAVED);
     }
 }
 
@@ -896,9 +897,10 @@ static void flagless_name_base(void* unit, char* out, size_t out_sz)
     if (field_ptr(unit, "m_kBehavior", &g_fl_behavior, sizeof(void*), &v) &&
         *(void* const*)v && object_class_name(*(void* const*)v, cls, sizeof cls) &&
         strcmp(cls, "XGAIBehavior_Survivor") == 0)
-        strcpy_s(out, out_sz, "Survivor");
-    else
-        strcpy_s(out, out_sz, "Civilian");
+        strncpy_s(out, out_sz, T(UNIT_SURVIVOR), _TRUNCATE);
+    // The game's own word, in its language (XGCharacter_Civilian.m_sCivilian).
+    else if (!game_loc("XGCharacter_Civilian", "m_sCivilian", 0, out, out_sz))
+        strncpy_s(out, out_sz, T(UNIT_CIVILIAN), _TRUNCATE);
 }
 
 // With ", saved" for a terror civilian already saved (civilian_saved). The
@@ -910,7 +912,7 @@ static void flagless_name(void* unit, char* out, size_t out_sz)
     flagless_name_base(unit, out, out_sz);
     size_t used = strlen(out);
     if (civilian_saved(unit) && used < out_sz)
-        _snprintf_s(out + used, out_sz - used, _TRUNCATE, ", saved");
+        tfmt_cat(out, out_sz, &used, UNIT_SAVED);
 }
 
 int flagless_unit(void* unit, FlaglessUnit* out)

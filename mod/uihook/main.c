@@ -86,6 +86,7 @@
 #include "scanner.h"
 #include "menus.h"
 #include "numpad.h"
+#include "strings.h"
 
 #define MAX_NATIVES 8192
 #define MAX_STR     4096
@@ -287,6 +288,20 @@ void strip_markup(char* s)
     *out = 0;
 }
 
+// " credit" / " credits" after a sum the game drew, in the plural the
+// language gives the number: its digits read past any separators ("1,000"
+// is a thousand, not one).
+static void credits_word(const char* digits, char* out, size_t out_sz)
+{
+    long n = 0;
+    for (const char* p = digits; *p; p++) {
+        if (*p >= '0' && *p <= '9') n = n * 10 + (*p - '0');
+        else if (*p != ',' && *p != '.' && *p != ' ') break;
+        if (n > 1000000000L) break;
+    }
+    tpfmt(out, out_sz, TXT_CREDITS_AFTER, (int)n);
+}
+
 // A sum as the game draws it, "§50", as said: "50 credits". The section sign
 // (U+00A7) reads "section". "-" and "" are left as they are.
 static void money_text(const char* in, char* out, size_t out_sz)
@@ -298,8 +313,11 @@ static void money_text(const char* in, char* out, size_t out_sz)
     }
     out[w] = 0;
     const char* d = (out[0] == '+' || out[0] == '-') ? out + 1 : out;
-    if (*d >= '0' && *d <= '9')
-        strncat_s(out, out_sz, strcmp(d, "1") == 0 ? " credit" : " credits", _TRUNCATE);
+    if (*d >= '0' && *d <= '9') {
+        char word[64];
+        credits_word(d, word, sizeof word);
+        strncat_s(out, out_sz, word, _TRUNCATE);
+    }
 }
 
 // Plenty of these "strings" are asset references rather than prose --
@@ -411,9 +429,36 @@ static char      g_soldier_info[256];
 // both the name and the icon).
 static const char* const MEDAL_ICON[] = { "urbancombat", "defender", "international",
                                           "honor", "starofterra" };
-static char g_medal_name[5][96] = { "Urban Combat Badge", "Defender's Medal",
-                                    "International Service Cross", "Council Medal of Honor",
-                                    "Star of Terra" };
+// Empty until the Medals screen shows one; until then the game's default
+// name in the player's language (medal_default).
+static char g_medal_name[5][96];
+
+static const char* medal_default(int i, char* buf, size_t buf_sz)
+{
+    static const char* const english[5] = { "Urban Combat Badge", "Defender's Medal",
+                                            "International Service Cross",
+                                            "Council Medal of Honor", "Star of Terra" };
+    // XGFacility_Barracks.m_arrMedalNames[EMedalType]: eMedal_None is 0.
+    if (game_loc("XGFacility_Barracks", "m_arrMedalNames", i + 1, buf, buf_sz)) return buf;
+    return english[i];
+}
+
+// Whether a soldier slot's name is the screen's "(EMPTY)" (UISoldierSlots),
+// in the player's language.
+static int slot_empty_label(const char* name)
+{
+    static const char* const where[3][2] = {
+        { "XGPsiLabsUI", "m_strItemEmpty" }, { "XGGeneLabUI", "m_strLabelEmpty" },
+        { "XGCyberneticsUI", "m_strLabelEmpty" },
+    };
+    if (!name || !name[0]) return 0;
+    if (strcmp(name, "(EMPTY)") == 0) return 1;
+    for (int i = 0; i < 3; i++) {
+        char e[64];
+        if (game_loc(where[i][0], where[i][1], 0, e, sizeof e) && text_equal_ci(name, e)) return 1;
+    }
+    return 0;
+}
 
 static void medal_learn(const char* icon, const char* name)
 {
@@ -433,11 +478,12 @@ static void medal_line(const char* icons, char* out, size_t out_sz)
     char* ctx = NULL;
     for (char* t = strtok_s(buf, ",", &ctx); t; t = strtok_s(NULL, ",", &ctx)) {
         const char* name = t;
-        for (int i = 0; i < 5; i++) if (strcmp(t, MEDAL_ICON[i]) == 0) name = g_medal_name[i];
-        int w = _snprintf_s(out + used, out_sz - used, _TRUNCATE, "%s%s",
-                            used ? ", " : "Medals: ", name);
-        if (w < 0) break;
-        used += (size_t)w;
+        char def[96];
+        for (int i = 0; i < 5; i++)
+            if (strcmp(t, MEDAL_ICON[i]) == 0)
+                name = g_medal_name[i][0] ? g_medal_name[i] : medal_default(i, def, sizeof def);
+        if (used) tfmt_cat(out, out_sz, &used, TXT_LIST_NEXT, name);
+        else      tfmt_cat(out, out_sz, &used, MAIN_MEDALS, name);
     }
 }
 static char      g_soldier_stats[128];
@@ -523,9 +569,10 @@ static void eom_walk(LONG n, const char* screen, int down)
     if (g_eom_said && g_eom_n) {
         const char* edge = "";
         g_eom_at += down ? 1 : -1;
-        if (g_eom_at >= g_eom_n) { g_eom_at = g_eom_n - 1; edge = "End. "; }
-        if (g_eom_at < 0)        { g_eom_at = 0;           edge = "Top. "; }
-        _snprintf_s(line, sizeof line, _TRUNCATE, "%s%s", edge, g_eom[g_eom_at]);
+        if (g_eom_at >= g_eom_n) { g_eom_at = g_eom_n - 1; edge = T(TXT_END); }
+        if (g_eom_at < 0)        { g_eom_at = 0;           edge = T(TXT_TOP); }
+        _snprintf_s(line, sizeof line, _TRUNCATE, "%s%s%s", edge, *edge ? " " : "",
+                    g_eom[g_eom_at]);
         say = line;
     }
     if (!say[0]) return;
@@ -574,13 +621,19 @@ static void hire_text(const char* in, char* out, size_t out_sz)
             r += 2;
             const char* d = r;
             while (*r >= '0' && *r <= '9' && w + 12 < out_sz) out[w++] = *r++;
-            w += (size_t)_snprintf_s(out + w, out_sz - w, _TRUNCATE,
-                                     r - d == 1 && *d == '1' ? " credit" : " credits");
+            char num[16], word[64];
+            _snprintf_s(num, sizeof num, _TRUNCATE, "%.*s", (int)(r - d), d);
+            credits_word(num, word, sizeof word);
+            out[w] = 0;
+            strncat_s(out, out_sz, word, _TRUNCATE);
+            w = strlen(out);
             r--;
             continue;
         }
         if (*r == '/' && r > in && r[-1] >= '0' && r[-1] <= '9' && r[1] >= '0' && r[1] <= '9') {
-            w += (size_t)_snprintf_s(out + w, out_sz - w, _TRUNCATE, " of ");
+            out[w] = 0;
+            strncat_s(out, out_sz, T(TXT_OF_SEP), _TRUNCATE);
+            w = strlen(out);
             continue;
         }
         out[w++] = *r;
@@ -601,10 +654,10 @@ static void fin_walk(LONG n, const char* screen, int down)
     if (!g_fin_n) return;
     const char* edge = "";
     g_fin_at += down ? 1 : -1;
-    if (g_fin_at >= g_fin_n) { g_fin_at = g_fin_n - 1; edge = "End. "; }
-    if (g_fin_at < 0)        { g_fin_at = 0;           edge = "Top. "; }
-    char say[600];
-    _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s", edge, g_fin[g_fin_at]);
+    if (g_fin_at >= g_fin_n) { g_fin_at = g_fin_n - 1; edge = T(TXT_END); }
+    if (g_fin_at < 0)        { g_fin_at = 0;           edge = T(TXT_TOP); }
+    char say[640];
+    _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s", edge, *edge ? " " : "", g_fin[g_fin_at]);
     logf_("[%ld] Input        %s  FINANCES %d \"%s\"\n", n, screen, g_fin_at, say);
     speech_cancel_pending();
     if (g_speak) speech_say_now(say);
@@ -1196,7 +1249,7 @@ static void announce(const char* text);
 static void announce_as(int setting, const char* text);
 static void soldier_stats_note(LONG n, const Payload* p);
 static int weapon_note(LONG n, const char* obj, const char* fn, const Payload* p,
-                       void* node, uint8_t* locals);
+                       void* node, uint8_t* locals, void* stack);
 static void soldier_selected(void* flag);
 static void shot_target_now(void* stack);
 
@@ -1559,8 +1612,9 @@ static void alert_say(LONG n, const char* tag, const char* obj_name, void* objec
         char label[FOCUS_MAX_LABEL];
         if (!focus_label_at(object, i, label, sizeof label)) continue;
         size_t used = strlen(say);
-        const char* lead = !used ? "Options: "
-                         : say[used - 1] == '.' ? " Options: " : ". Options: ";
+        char lead[64];
+        _snprintf_s(lead, sizeof lead, _TRUNCATE, "%s%s ",
+                    !used ? "" : say[used - 1] == '.' ? " " : ". ", T(MAIN_OPTIONS));
         _snprintf_s(say + used, sizeof say - used, _TRUNCATE, "%s%s",
                     i == 0 ? lead : ", ", label);
     }
@@ -1667,7 +1721,7 @@ static int alert_note_locked(LONG n, const char* tag, const char* obj_name, cons
     if (strcmp(fn_name, "AS_SetButtonData") == 0 && p->nnumbers && p->nstrings) {
         char label[FOCUS_MAX_LABEL];
         _snprintf_s(label, sizeof label, _TRUNCATE, "%s%s", p->strings[0],
-                    p->nbools && p->bools[0] ? ", unavailable" : "");
+                    p->nbools && p->bools[0] ? T(HQ_UNAVAILABLE) : "");
         focus_set(object, (int)p->numbers[0], label);
         return 1;
     }
@@ -1719,7 +1773,7 @@ static void unlock_note(LONG n, const char* tag, const char* obj_name, const cha
         frame_string(node, locals, 0, req, sizeof req);
         int missing = p->nstrings && p->hues[0] == HUE_BAD;
         _snprintf_s(g_unlock_req, sizeof g_unlock_req, _TRUNCATE, "%s%s", req,
-                    missing && req[0] ? ", not built yet" : "");
+                    missing && req[0] ? T(MAIN_NOT_BUILT_YET) : "");
     } else if (strcmp(fn_name, "AS_SetGeneModData") == 0) {
         frame_args(node, locals, &a);
         const char* parts[2] = { a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "" };
@@ -1737,7 +1791,8 @@ static void unlock_note(LONG n, const char* tag, const char* obj_name, const cha
     } else if (strcmp(fn_name, "AS_SetButtonData") == 0) {
         char button[FOCUS_MAX_LABEL], key[FOCUS_MAX_LABEL + 16];
         frame_string(node, locals, 0, button, sizeof button);
-        _snprintf_s(key, sizeof key, _TRUNCATE, "%s%s", button[0] ? "Enter: " : "", button);
+        _snprintf_s(key, sizeof key, _TRUNCATE, "%s%s%s", button[0] ? T(KEY_ENTER) : "",
+                    button[0] ? ": " : "", button);
         static char say[MAX_STR + FOCUS_MAX_LABEL * 4];
         const char* parts[4] = { g_unlock_title, g_unlock_body, g_unlock_req, key };
         focus_join_detail(parts, 4, say, sizeof say);
@@ -1856,7 +1911,8 @@ static struct {
     int       fresh;          // nothing said yet on this visit
     int       build_off;      // the BUILD NEW MEC button is disabled
     char      title[64], sub[64], build[64], build_cost[192];
-    char      name[128], cost[256], perk[3][512], soldier[96], status[48];
+    char      name[128], cost[256], perk[3][512], soldier[96], status[96];
+    int       cost_reason;    // `cost` is words (strCantUpgradeReason), not a sum
     char      said[1536];     // the item last said, without the arrival's lead
     ULONGLONG said_at;
 } g_mec;
@@ -1886,9 +1942,13 @@ static void mec_cost(const char* raw, char* out, size_t out_sz)
         if (start && piece++ > 0 && *r >= '0' && *r <= '9') {
             const char* d = r;
             while (*d >= '0' && *d <= '9') d++;
-            if (!*d || *d == ',' || strncmp(d, " (not enough)", 13) == 0) {
+            // " (not enough)" is hq_cost_text's own mark, in the mod's language.
+            const char* lack = T(HQ_NOT_ENOUGH);
+            if (!*d || *d == ',' || strncmp(d, lack, strlen(lack)) == 0) {
                 while (r < d && w + 8 < out_sz) out[w++] = *r++;
-                w += (size_t)_snprintf_s(out + w, out_sz - w, _TRUNCATE, " Meld");
+                out[w] = 0;
+                strncat_s(out, out_sz, T(MAIN_MELD_AFTER), _TRUNCATE);
+                w = strlen(out);
                 continue;
             }
         }
@@ -1932,10 +1992,10 @@ static int mec_where(void* screen, int* widget, int* row, int* count)
 static const char* mecup_state_word(int state)
 {
     switch (state) {
-    case 0:  return "the MEC has this level";
-    case 1:  return "available now";
-    case 2:  return "researched, a later upgrade";
-    case 3:  return "needs research";
+    case 0:  return T(MAIN_MECUP_HAS);
+    case 1:  return T(MAIN_MECUP_AVAILABLE);
+    case 2:  return T(MAIN_MECUP_LATER);
+    case 3:  return T(MAIN_MECUP_RESEARCH);
     default: return "";
     }
 }
@@ -2053,7 +2113,26 @@ static int base_call(const Call* c)
     if (strncmp(obj_name, "UIInterceptionEngagement", 24) == 0) {
         static int hp[2], hp_max[2], ability[3] = { 3, 3, 3 }, secs_said = -1;
         static char title[128];
-        static const char* const names[3] = { "Aim", "Dodge", "Track" };
+        // The abilities as the screen names them, in the player's language
+        // (m_strAimAbility, "AIM"), in sentence case for the speech.
+        static const char* const fields[3] = { "m_strAimAbility", "m_strDodgeAbility",
+                                               "m_strTrackAbility" };
+        static const StrId english[3] = { INPUT_AIM, INPUT_DODGE, INPUT_TRACK };
+        char names[4][64];
+        for (int k = 0; k < 3; k++) {
+            char raw[64];
+            if (game_loc("UIInterceptionEngagement", fields[k], 0, raw, sizeof raw))
+                text_sentence_case(raw, names[k], sizeof names[k]);
+            else
+                strncpy_s(names[k], sizeof names[k], T(english[k]), _TRUNCATE);
+        }
+        {
+            char raw[64];
+            if (game_loc("UIInterceptionEngagement", "m_strAbortMission", 0, raw, sizeof raw))
+                text_sentence_case(raw, names[3], sizeof names[3]);
+            else
+                strncpy_s(names[3], sizeof names[3], T(INPUT_ABORT), _TRUNCATE);
+        }
         char say[FRAME_ARG_TEXT + 256];
         say[0] = 0;
         int now = 1;                    // said at once, cutting what was said
@@ -2071,11 +2150,10 @@ static int base_call(const Call* c)
                 hp[ship] = v;
                 int pct = hp_max[ship] > 0 ? (v * 100 + hp_max[ship] - 1) / hp_max[ship] : 0;
                 if (v <= 0)
-                    strcpy_s(say, sizeof say, ship == 0 ? "UFO down." : "Interceptor shot down.");
-                else if (ship == 0)
-                    _snprintf_s(say, sizeof say, _TRUNCATE, "UFO hit, %d%%.", pct);
+                    strncpy_s(say, sizeof say, T(ship == 0 ? MAIN_UFO_DOWN : MAIN_INTERCEPTOR_DOWN),
+                              _TRUNCATE);
                 else
-                    _snprintf_s(say, sizeof say, _TRUNCATE, "We're hit, %d%%.", pct);
+                    tfmt(say, sizeof say, ship == 0 ? MAIN_UFO_HIT : MAIN_WE_ARE_HIT, pct);
             }
         } else if ((strcmp(fn_name, "AS_SetAimButton") == 0 ||
                     strcmp(fn_name, "AS_SetDodgeButton") == 0 ||
@@ -2084,22 +2162,24 @@ static int base_call(const Call* c)
             ability[k] = (int)p->numbers[0];
         } else if (strcmp(fn_name, "AS_BeginIntroSequence") == 0) {
             size_t w = 0;
-            w += _snprintf_s(say, sizeof say, _TRUNCATE, "%s. UFO %d, interceptor %d.",
-                             title[0] ? title : "Interception", hp_max[0], hp_max[1]);
+            tfmt_cat(say, sizeof say, &w, MAIN_INTERCEPT_START,
+                     title[0] ? title : T(MAIN_INTERCEPTION), hp_max[0], hp_max[1]);
             int any = 0;
             for (int k = 0; k < 3; k++) {
                 if (ability[k] != 0) continue;
-                w += _snprintf_s(say + w, sizeof say - w, _TRUNCATE, "%s%d %s",
-                                 any ? ", " : " ", k + 1, names[k]);
+                if (w < sizeof say)
+                    w += (size_t)_snprintf_s(say + w, sizeof say - w, _TRUNCATE, "%s%d %s",
+                                             any ? ", " : " ", k + 1, names[k]);
                 any = 1;
             }
-            _snprintf_s(say + w, sizeof say - w, _TRUNCATE, "%s4 Abort.", any ? ", " : " ");
+            if (w < sizeof say)
+                _snprintf_s(say + w, sizeof say - w, _TRUNCATE, "%s4 %s.", any ? ", " : " ", names[3]);
         } else if (strcmp(fn_name, "AS_SetEnemyEscapeTimer") == 0 && p->nnumbers) {
             // Whole seconds, rounded up: 4.3 s left is "5" until it is 4.
             int secs = ((int)p->numbers[0] + 9) / 10;
             static const int marks[] = { 10, 5, 3, 2, 1 };
             if (secs_said < 0) {
-                _snprintf_s(say, sizeof say, _TRUNCATE, "Contact loss in %d seconds.", secs);
+                tpfmt(say, sizeof say, MAIN_CONTACT_LOSS, secs, secs);
                 now = 0;
             } else if (secs > secs_said) {
                 secs_said = secs;       // tracking ended and the clock was reset
@@ -2116,18 +2196,27 @@ static int base_call(const Call* c)
             if (p->nbools && p->bools[0]) {
                 frame_lines(node, locals, "effectDescription", say, sizeof say);
             } else if (k >= 0 && k < 3) {
-                _snprintf_s(say, sizeof say, _TRUNCATE, "%s over.", names[k]);
+                tfmt(say, sizeof say, MAIN_ABILITY_OVER, names[k]);
             }
         } else if (strcmp(fn_name, "AS_SetAbortLabel") == 0) {
-            char label[64];
+            // "ABORTING..." (m_strAbortingMission) is said; "ABORTED" is not.
+            // Matched on the game's own word, in the player's language.
+            char label[128], aborting[128];
             frame_string(node, locals, 0, label, sizeof label);
-            if (_strnicmp(label, "ABORTING", 8) == 0) strcpy_s(say, sizeof say, label);
+            if (!game_loc("UIInterceptionEngagement", "m_strAbortingMission", 0, aborting,
+                          sizeof aborting))
+                strcpy_s(aborting, sizeof aborting, "ABORTING");
+            if (label[0] && text_equal_ci(label, aborting))
+                text_sentence_case(label, say, sizeof say);
+            else if (label[0] && !strcmp(aborting, "ABORTING") && _strnicmp(label, "ABORTING", 8) == 0)
+                strcpy_s(say, sizeof say, label);
         } else if (strcmp(fn_name, "AS_ShowResults") == 0) {
             char report[FRAME_ARG_TEXT], leave[64];
             frame_lines(node, locals, "report", report, sizeof report);
             frame_string(node, locals, 1, leave, sizeof leave);
-            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s", report,
-                        leave[0] ? " Enter: " : "", leave, leave[0] ? "." : "");
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s%s", report,
+                        leave[0] ? " " : "", leave[0] ? T(KEY_ENTER) : "", leave[0] ? ": " : "",
+                        leave, leave[0] ? "." : "");
         } else if (strcmp(fn_name, "AS_AttackEvent") == 0 ||
                    strcmp(fn_name, "AS_MovementEvent") == 0) {
             return 1;                     // every shot; the hits are said
@@ -2218,17 +2307,20 @@ static int base_call(const Call* c)
         // With a gamepad the game names it with its glyph; in mouse mode it
         // says "CLICK TO EDIT" with none, or "QUEUE LOCKED" while it cannot
         // be edited (an order open, the Foundry, the queue already active).
-        // Only the English lock is told apart: elsewhere a locked queue is
-        // listed too, and 6 on it does nothing.
+        // The lock is told apart by the screen's own word for it in the
+        // player's language (UIStrategyHUD_BuildQueue.m_strQueue_Locked).
         if (strcmp(fn_name, "AS_SetHelp") == 0) {
             static FrameArgs a;
             frame_args(node, locals, &a);
             const char* label = a.ns > 0 ? a.s[0] : "";
             const char* icon  = a.ns > 1 ? a.s[1] : "";
-            if (!*label || _stricmp(label, "QUEUE LOCKED") == 0)
+            char locked[96];
+            if (!game_loc("UIStrategyHUD_BuildQueue", "m_strQueue_Locked", 0, locked, sizeof locked))
+                strcpy_s(locked, sizeof locked, "QUEUE LOCKED");
+            if (!*label || text_equal_ci(label, locked))
                 help_set(object, 0, "", "", 0);
             else
-                help_set(object, 0, *icon ? label : "Review an order", "Icon_Y_TRIANGLE", 0);
+                help_set(object, 0, *icon ? label : T(MAIN_REVIEW_ORDER), "Icon_Y_TRIANGLE", 0);
             logf_("[%ld] %s %s.%s  QUEUE help \"%s\" on %s\n", n, tag, obj_name, fn_name,
                   label, *icon ? icon : "(no icon)");
             return 1;
@@ -2239,9 +2331,8 @@ static int base_call(const Call* c)
         // order and the first Up on the last.
         if (strcmp(fn_name, "ActivateEditing") == 0) {
             g_queue_editing = 1;
-            char say[128];
-            _snprintf_s(say, sizeof say, _TRUNCATE, "Review an order, %d in the queue",
-                        focus_count(object));
+            char say[192];
+            tfmt(say, sizeof say, MAIN_REVIEW_ORDER_N, focus_count(object));
             logf_("[%ld] %s %s.%s  QUEUE reviewing \"%s\"\n", n, tag, obj_name, fn_name, say);
             speech_cancel_pending();
             if (g_speak && !muted()) speech_say_now(say);
@@ -2315,10 +2406,12 @@ static int base_call(const Call* c)
             }
             cost[w] = 0;
             int bought = disabled && cost[0] && !(cost[0] >= '0' && cost[0] <= '9');
+            char credits[64] = "";
+            if (!bought && cost[0]) credits_word(cost, credits, sizeof credits);
             _snprintf_s(s_row[i], FOCUS_MAX_LABEL, _TRUNCATE, "%s, %s%s%s", a.s[0],
-                        bought ? "purchased" : cost, !bought && cost[0] ? " credits" : "",
-                        bought ? "" : disabled ? ", locked"
-                                   : dear ? ", not enough credits" : "");
+                        bought ? T(MAIN_PURCHASED) : cost, credits,
+                        bought ? "" : disabled ? T(MAIN_LOCKED)
+                                   : dear ? T(MAIN_NOT_ENOUGH_CREDITS) : "");
             if (i >= s_n) s_n = i + 1;
             return 1;
         }
@@ -2342,7 +2435,7 @@ static int base_call(const Call* c)
                         s_fresh && s_title[0] ? s_title : "", s_fresh && s_title[0] ? ". " : "",
                         s_sel >= 0 && s_sel < s_n ? s_row[s_sel] : "?",
                         s_help[0] ? " " : "", s_help, desc,
-                        s_fresh ? " Enter purchases." : "");
+                        s_fresh ? T(MAIN_ENTER_PURCHASES) : "");
             s_fresh = 0;
             logf_("[%ld] %s %s.%s  OTS %d \"%s\"\n", n, tag, obj_name, fn_name, s_sel, say);
             speech_cancel_pending();
@@ -2439,14 +2532,15 @@ static int base_call(const Call* c)
             }
 
             int marked = r && r->sell[0] && strcmp(r->sell, "-") != 0;
-            char item[512] = "";
-            if (r)
-                _snprintf_s(item, sizeof item, _TRUNCATE, "%s, %s in storage%s%s%s%s%s%s%s.",
-                            r->name, strcmp(r->store, "-") == 0 ? "none" : r->store,
-                            r->can && r->price[0] ? ", " : "", r->can ? r->price : "",
-                            r->can && r->price[0] ? " each" : "",
-                            marked ? ", selling " : "", marked ? r->sell : "",
-                            marked ? " for " : "", marked ? r->total : "");
+            char item[768] = "";
+            if (r) {
+                size_t iw = 0;
+                tfmt_cat(item, sizeof item, &iw, MAIN_GREY_STORED, r->name,
+                         strcmp(r->store, "-") == 0 ? T(MAIN_GREY_NONE) : r->store);
+                if (r->can && r->price[0]) tfmt_cat(item, sizeof item, &iw, MAIN_GREY_EACH, r->price);
+                if (marked) tfmt_cat(item, sizeof item, &iw, MAIN_GREY_SELLING, r->sell, r->total);
+                if (iw + 1 < sizeof item) { item[iw++] = '.'; item[iw] = 0; }
+            }
 
             int fresh = !s_prev.name[0];
             int same = r && strcmp(r->name, s_prev.name) == 0;
@@ -2456,18 +2550,17 @@ static int base_call(const Call* c)
                        (!s_head_total[0] || strncmp(s_head_total, "0 ", 2) == 0);
             char say[2048] = "";
             if (fresh)
-                _snprintf_s(say, sizeof say, _TRUNCATE,
-                            "%s%s%s %s Right sells one more, Left takes one back, "
-                            "Enter completes the sale.",
-                            s_title, s_title[0] ? ". " : "", item, info);
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s %s %s",
+                            s_title, s_title[0] ? ". " : "", item, info, T(MAIN_GREY_KEYS));
             else if (sold)
-                _snprintf_s(say, sizeof say, _TRUNCATE, "Sold for %s. %s", s_prev_total, item);
+                tfmt(say, sizeof say, MAIN_GREY_SOLD, s_prev_total, item);
             else if (counted && marked)
-                _snprintf_s(say, sizeof say, _TRUNCATE, "Selling %s, %s. Total %s.",
-                            r->sell, r->total, s_head_total);
-            else if (counted)
-                _snprintf_s(say, sizeof say, _TRUNCATE, "None selling. Total %s.",
-                            s_head_total[0] ? s_head_total : "0 credits");
+                tfmt(say, sizeof say, MAIN_GREY_SELLING_TOTAL, r->sell, r->total, s_head_total);
+            else if (counted) {
+                char zero[64];
+                money_text("0", zero, sizeof zero);
+                tfmt(say, sizeof say, MAIN_GREY_NONE_SELLING, s_head_total[0] ? s_head_total : zero);
+            }
             else if (!same)
                 _snprintf_s(say, sizeof say, _TRUNCATE, "%s %s", item, info);
             if (r) s_prev = *r;
@@ -2529,7 +2622,7 @@ static int base_call(const Call* c)
             int locked = a.nb > 0 && a.b[0];
             if (!locked && a.ns > 2) medal_learn(a.s[2], a.s[0]);
             if (locked)
-                strcpy_s(s_row[i], FOCUS_MAX_LABEL, "Locked");
+                strncpy_s(s_row[i], FOCUS_MAX_LABEL, T(MAIN_MEDAL_LOCKED), _TRUNCATE);
             else
                 _snprintf_s(s_row[i], FOCUS_MAX_LABEL, _TRUNCATE, "%s%s%s", a.s[0],
                             a.ns > 1 && a.s[1][0] ? ", " : "", a.ns > 1 ? a.s[1] : "");
@@ -2538,9 +2631,8 @@ static int base_call(const Call* c)
             // arrival is said once the rows stop: each one puts it back.
             if (s_view == 0 && s_fresh && i >= s_sel0) {
                 char say[FOCUS_MAX_LABEL + 256];
-                _snprintf_s(say, sizeof say, _TRUNCATE,
-                            "%s%s%s. Up and Down choose, Enter opens a medal.",
-                            s_title, s_title[0] ? ". " : "", s_row[s_sel0]);
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s. %s",
+                            s_title, s_title[0] ? ". " : "", s_row[s_sel0], T(MAIN_MEDALS_KEYS));
                 speech_cancel_pending();
                 if (g_speak && !muted()) speech_say_after(say, SETTLE_MS);
             }
@@ -2578,22 +2670,19 @@ static int base_call(const Call* c)
             } else if (s_view == 1 && i >= 0 && i < 3) {
                 char btn[FOCUS_MAX_LABEL + 16];
                 _snprintf_s(btn, sizeof btn, _TRUNCATE, "%s%s.", s_btn[i],
-                            s_btn_on[i] ? "" : ", unavailable");
+                            s_btn_on[i] ? "" : T(HQ_UNAVAILABLE));
                 if (s_fresh)
                     _snprintf_s(say, sizeof say, _TRUNCATE,
-                                "%s. %s. %s. %s%s%s Up and Down choose, Enter picks.",
+                                "%s. %s. %s. %s%s%s %s",
                                 s_edit[0], s_edit[1], s_edit[2], s_help, s_help[0] ? " " : "",
-                                btn);
+                                btn, T(MAIN_MEDAL_EDIT_KEYS));
                 else
                     strcpy_s(say, sizeof say, btn);
             } else if (s_view == 2 && i >= 0 && i < 2) {
                 if (s_fresh)
-                    _snprintf_s(say, sizeof say, _TRUNCATE,
-                                "%s. Left and Right choose, Enter assigns. Power 1: %s Power 2: "
-                                "%s On power %d.",
-                                s_title, s_power[0], s_power[1], i + 1);
+                    tfmt(say, sizeof say, MAIN_MEDAL_POWERS, s_title, s_power[0], s_power[1], i + 1);
                 else
-                    _snprintf_s(say, sizeof say, _TRUNCATE, "Power %d: %s", i + 1, s_power[i]);
+                    tfmt(say, sizeof say, MAIN_MEDAL_POWER_N, i + 1, s_power[i]);
             }
             s_fresh = 0;
             logf_("[%ld] %s %s.%s  MEDALS view %d, %d \"%s\"\n", n, tag, obj_name, fn_name,
@@ -2614,9 +2703,10 @@ static int base_call(const Call* c)
         char title[256], text[256], say[640];
         frame_string(node, locals, 0, title, sizeof title);
         frame_string(node, locals, 1, text, sizeof text);
-        _snprintf_s(say, sizeof say, _TRUNCATE,
-                    "%s %s%s%s Type, then Enter accepts, Escape cancels.", title,
-                    text[0] ? "Now: " : "", text, text[0] ? "." : "");
+        char now[320] = "";
+        if (text[0]) tfmt(now, sizeof now, MAIN_INPUT_NOW, text);
+        _snprintf_s(say, sizeof say, _TRUNCATE, "%s %s%s%s", title, now, now[0] ? " " : "",
+                    T(MAIN_INPUT_KEYS));
         logf_("[%ld] %s %s.%s  INPUT \"%s\"\n", n, tag, obj_name, fn_name, say);
         speech_cancel_pending();
         if (g_speak && !muted()) speech_say_now(say);
@@ -2679,20 +2769,25 @@ static int base_call(const Call* c)
         if (strcmp(fn_name, "RealizeSelected") == 0) {
             int i;
             if (!string_index(p, &i) || i < 0 || i >= s_n) return 1;
-            // "Expand Menu" means the section is shut.
-            int shut = strstr(s_btn, "Expand") != NULL;
+            // "Expand Menu" means the section is shut: the button's text is
+            // Localize("UITellMeMore", "ExpandText", "XComStrategyGame")
+            // (UITellMeMore.SetCategory), read here in the player's language.
+            char expand[96];
+            if (!game_localize("XComStrategyGame", "UITellMeMore", "ExpandText", expand,
+                               sizeof expand))
+                strcpy_s(expand, sizeof expand, "Expand");
+            int shut = s_btn[0] && text_find_ci(s_btn, expand) != NULL;
             static char say[4096 + 512];
             if (s_head[i])
-                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s, %s.%s", s_fresh ? s_title : "",
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s, %s.%s%s", s_fresh ? s_title : "",
                             s_fresh && s_title[0] ? ". " : "", s_row[i],
-                            shut ? "closed" : "open",
-                            s_fresh ? " Up and Down choose, Enter opens or closes a section, "
-                                      "and on a topic plays its narration." : "");
+                            T(shut ? MAIN_TMM_CLOSED : MAIN_TMM_OPEN), s_fresh ? " " : "",
+                            s_fresh ? T(MAIN_TMM_SECTION_KEYS) : "");
             else
-                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s. %s%s", s_fresh ? s_title : "",
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s. %s%s%s", s_fresh ? s_title : "",
                             s_fresh && s_title[0] ? ". " : "",
-                            s_topic[0] ? s_topic : s_row[i], s_text,
-                            s_fresh ? " Up and Down choose, Enter plays the narration." : "");
+                            s_topic[0] ? s_topic : s_row[i], s_text, s_fresh ? " " : "",
+                            s_fresh ? T(MAIN_TMM_TOPIC_KEYS) : "");
             s_fresh = 0;
             logf_("[%ld] %s %s.%s  TMM %d \"%.200s\"\n", n, tag, obj_name, fn_name, i, say);
             speech_cancel_pending();
@@ -2770,8 +2865,7 @@ static int base_call(const Call* c)
             if (strcmp(say, g_fin_said) != 0) {
                 strncpy_s(g_fin_said, sizeof g_fin_said, say, _TRUNCATE);
                 if (u < sizeof say)
-                    _snprintf_s(say + u, sizeof say - u, _TRUNCATE,
-                                " Up and Down read it a line at a time. Escape: back.");
+                    _snprintf_s(say + u, sizeof say - u, _TRUNCATE, " %s", T(MAIN_FIN_KEYS));
                 logf_("[%ld] %s %s.%s  FINANCES \"%s\"\n", n, tag, obj_name, fn_name, say);
                 speech_cancel_pending();
                 if (g_speak && !muted()) speech_say_after(say, SETTLE_MS);
@@ -2806,10 +2900,16 @@ static int base_call(const Call* c)
             const char* status = a.ns > 1 ? a.s[1] : "";
             const char* button = a.ns > 2 ? a.s[2] : "";
             int off = a.nb > 0 && a.b[0];
-            _snprintf_s(g_slots_row[g_slots_n], FOCUS_MAX_LABEL, _TRUNCATE, "%s%s%s.%s%s%s",
-                        strcmp(name, "(EMPTY)") == 0 ? "Empty" : name, status[0] ? ", " : "",
-                        status, button[0] ? " Enter: " : "", button,
-                        button[0] ? (off ? ", unavailable." : ".") : "");
+            // An empty slot is drawn "(EMPTY)", the screen's own word in the
+            // player's language: XGPsiLabsUI.m_strItemEmpty, or
+            // XGGeneLabUI / XGCyberneticsUI.m_strLabelEmpty.
+            int empty = slot_empty_label(name);
+            char enter[64] = "";
+            if (button[0]) _snprintf_s(enter, sizeof enter, _TRUNCATE, " %s: ", T(KEY_ENTER));
+            _snprintf_s(g_slots_row[g_slots_n], FOCUS_MAX_LABEL, _TRUNCATE, "%s%s%s.%s%s%s%s",
+                        empty ? T(MAIN_SLOT_EMPTY) : name, status[0] ? ", " : "",
+                        status, enter, button, button[0] && off ? T(HQ_UNAVAILABLE) : "",
+                        button[0] ? "." : "");
             g_slots_button[g_slots_n] = button[0] != 0;
             g_slots_n++;
             return 1;
@@ -2841,11 +2941,12 @@ static int base_call(const Call* c)
             // Escape is the way on.
             char lead[160];
             if (strncmp(obj_name, "UIPsiLabs", 9) == 0 && psilabs_view(object) == 2)
-                _snprintf_s(lead, sizeof lead, _TRUNCATE, "%s%sEscape leaves the Psi Labs. ",
-                            g_slots_title, g_slots_title[0] ? ". " : "");
+                _snprintf_s(lead, sizeof lead, _TRUNCATE, "%s%s%s ",
+                            g_slots_title, g_slots_title[0] ? ". " : "", T(MAIN_PSI_ESCAPE));
             else
-                _snprintf_s(lead, sizeof lead, _TRUNCATE, "%s%s", g_slots_title,
-                            g_slots_title[0] ? ". Up and Down choose a slot. " : "");
+                _snprintf_s(lead, sizeof lead, _TRUNCATE, "%s%s%s%s", g_slots_title,
+                            g_slots_title[0] ? ". " : "", g_slots_title[0] ? T(MAIN_SLOTS_KEYS) : "",
+                            g_slots_title[0] ? " " : "");
             slots_select(n, i, lead);
             return 1;
         }
@@ -2949,46 +3050,70 @@ static int base_call(const Call* c)
             if (meld[0] || cash[0]) {
                 char c[64];
                 hire_text(cash, c, sizeof c);
-                _snprintf_s(cost, sizeof cost, _TRUNCATE, " Costs %s Meld, %s.", meld, c);
+                tfmt(cost, sizeof cost, MAIN_GENE_COSTS, meld, c);
             }
             int here = s_row >= 0 && s_row < 5 && s_col >= 0 && s_col < 2;
-            const char* state = here && s_installed[s_row][s_col] ? "Installed."
-                              : strstr(s_button, "REMOVE") ? "Chosen."
-                              : strstr(s_button, "INSUFFICIENT") ? "Not enough resources."
-                              : s_button[0] ? "Not chosen." : "";
+            // The button says which: the screen's REMOVE or INSUFFICIENT
+            // RESOURCES (UISoldierGeneMods.m_strRemoveActionLabel[PC],
+            // m_strInsufficientResourcesActionLabel), in the player's language.
+            char remove[96], remove_pc[96], lack[96];
+            if (!game_loc("UISoldierGeneMods", "m_strRemoveActionLabel", 0, remove, sizeof remove))
+                strcpy_s(remove, sizeof remove, "REMOVE");
+            if (!game_loc("UISoldierGeneMods", "m_strRemoveActionLabelPC", 0, remove_pc,
+                          sizeof remove_pc))
+                strcpy_s(remove_pc, sizeof remove_pc, "CLICK TO REMOVE");
+            if (!game_loc("UISoldierGeneMods", "m_strInsufficientResourcesActionLabel", 0, lack,
+                          sizeof lack))
+                strcpy_s(lack, sizeof lack, "INSUFFICIENT");
+            int chosen = s_button[0] && (text_find_ci(s_button, remove) ||
+                                         text_find_ci(s_button, remove_pc));
+            const char* state = here && s_installed[s_row][s_col] ? T(MAIN_GENE_INSTALLED)
+                              : chosen ? T(MAIN_GENE_CHOSEN)
+                              : s_button[0] && text_find_ci(s_button, lack) ? T(MAIN_GENE_LACK)
+                              : s_button[0] ? T(MAIN_GENE_NOT_CHOSEN) : "";
             // The installed mods, on arrival and for a new soldier: named by
             // the game's name when the cell has been selected this visit, by
             // the icon's image name otherwise (BuildPerk in XComPerkManager:
-            // "SecondaryHeart", "MuscleDensity", ...), turned into the
-            // English name.
-            char installed[512] = "";
+            // BuildPerk(4, 0, "SecondaryHeart"), ...), named as the game names
+            // that perk (m_strPassiveTitle[EPerkType], in the player's
+            // language; gene mods are EW's alone, so EW's numbers).
+            char installed[1024] = "";
             if (s_fresh || s_icons_new) {
-                static const char* const k_names[][2] = {
-                    { "SecondaryHeart", "Secondary Heart" },
-                    { "Adrenal", "Adrenal Neurosympathy" },
-                    { "NeuralDamping", "Neural Damping" },
-                    { "NeuralFeedback", "Neural Feedback" },
-                    { "ReactivePupils", "Hyper Reactive Pupils" },
-                    { "DepthPerception", "Depth Perception" },
-                    { "BioelectricSkin", "Bioelectric Skin" },
-                    { "MimeticSkin", "Mimetic Skin" },
-                    { "MuscleDensity", "Muscle Fiber Density" },
-                    { "BoneMarrow", "Adaptive Bone Marrow" },
+                static const struct { const char* image; int perk; const char* english; } k_names[] = {
+                    { "SecondaryHeart", 4, "Secondary Heart" },
+                    { "Adrenal", 20, "Adrenal Neurosympathy" },
+                    { "NeuralDamping", 28, "Neural Damping" },
+                    { "NeuralFeedback", 29, "Neural Feedback" },
+                    { "ReactivePupils", 30, "Hyper Reactive Pupils" },
+                    { "DepthPerception", 38, "Depth Perception" },
+                    { "BioelectricSkin", 42, "Bioelectric Skin" },
+                    { "MimeticSkin", 95, "Mimetic Skin" },
+                    { "MuscleDensity", 50, "Muscle Fiber Density" },
+                    { "BoneMarrow", 45, "Adaptive Bone Marrow" },
                 };
                 int count = 0;
+                size_t len = 0;
                 for (int r = 0; r < 5; r++)
                     for (int c = 0; c < 2; c++) {
                         if (!s_installed[r][c]) continue;
                         const char* nm = s_cellname[r][c][0] ? s_cellname[r][c] : s_image[r][c];
+                        char perk[96];
                         if (!s_cellname[r][c][0])
                             for (int k = 0; k < (int)(sizeof k_names / sizeof k_names[0]); k++)
-                                if (strcmp(s_image[r][c], k_names[k][0]) == 0) nm = k_names[k][1];
-                        size_t len = strlen(installed);
-                        _snprintf_s(installed + len, sizeof installed - len, _TRUNCATE, "%s%s",
-                                    count ? ", " : "Installed: ", nm);
+                                if (strcmp(s_image[r][c], k_names[k].image) == 0)
+                                    nm = game_loc("XComPerkManager", "m_strPassiveTitle",
+                                                  k_names[k].perk, perk, sizeof perk)
+                                         ? perk : k_names[k].english;
+                        tfmt_cat(installed, sizeof installed, &len,
+                                 count ? TXT_LIST_NEXT : MAIN_GENE_INSTALLED_LIST, nm);
                         count++;
                     }
-                strcat_s(installed, sizeof installed, count ? ". " : "No gene mods installed. ");
+                if (count) {
+                    strncat_s(installed, sizeof installed, ". ", _TRUNCATE);
+                } else {
+                    strncat_s(installed, sizeof installed, T(MAIN_GENE_NONE_INSTALLED), _TRUNCATE);
+                    strncat_s(installed, sizeof installed, " ", _TRUNCATE);
+                }
                 s_icons_new = 0;
             }
             char say[2048];
@@ -2997,13 +3122,14 @@ static int base_call(const Call* c)
                 if (strcmp(s_button, s_said_button) == 0) return 1;
                 strcpy_s(say, sizeof say, state);
             } else {
-                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s%s, mod %d of 2. %s%s%s%s%s",
+                char mod[256];
+                tfmt(mod, sizeof mod, MAIN_GENE_MOD_N, s_name, s_col + 1);
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s%s. %s%s%s%s%s%s",
                             s_fresh ? s_title : "", s_fresh && s_title[0] ? ". " : "", installed,
                             s_row != s_said_row && s_row >= 0 && s_row < 5 ? s_rowname[s_row] : "",
-                            s_row != s_said_row ? ". " : "", s_name, s_col + 1,
-                            state, state[0] ? " " : "", s_desc, cost,
-                            s_fresh ? " Up and Down choose the body part, Left and Right the "
-                                      "mod, Enter chooses it, 1 confirms." : "");
+                            s_row != s_said_row ? ". " : "", mod,
+                            state, state[0] ? " " : "", s_desc, cost, s_fresh ? " " : "",
+                            s_fresh ? T(MAIN_GENE_KEYS) : "");
             }
             s_fresh = 0;
             s_said_row = s_row;
@@ -3073,7 +3199,7 @@ static int base_call(const Call* c)
                 char meld[16];
                 strncpy_s(meld, sizeof meld, sp + 1, _TRUNCATE);
                 *sp = 0;
-                _snprintf_s(s_cost, sizeof s_cost, _TRUNCATE, "%s, %s Meld", c, meld);
+                tfmt(s_cost, sizeof s_cost, MAIN_COST_MELD, c, meld);
             } else {
                 strcpy_s(s_cost, sizeof s_cost, c);
             }
@@ -3088,15 +3214,16 @@ static int base_call(const Call* c)
             if (p->nbools < 1 || !p->bools[0]) return 1;
             int i = (int)p->numbers[0];
             if (i < 0 || i > 1) return 1;
-            char button[160];
-            _snprintf_s(button, sizeof button, _TRUNCATE, "%s%s, %d of 2.", s_btn[i],
-                        s_off[i] ? ", unavailable" : "", i + 1);
+            char button[256], what[192];
+            _snprintf_s(what, sizeof what, _TRUNCATE, "%s%s", s_btn[i],
+                        s_off[i] ? T(HQ_UNAVAILABLE) : "");
+            tfmt(button, sizeof button, MAIN_N_OF_2, what, i + 1);
             static char say[2048];
             if (s_fresh) {
                 _snprintf_s(say, sizeof say, _TRUNCATE,
-                            "%s. %s. %s: %s. %s %s: %s %s%sUp and Down choose, Enter: select. %s",
+                            "%s. %s. %s: %s. %s %s: %s %s%s%s %s",
                             s_title, s_soldier, s_bonus, s_perk, s_perk_desc, s_warn, s_warning,
-                            s_cost, s_cost[0] ? ". " : "", button);
+                            s_cost, s_cost[0] ? ". " : "", T(MAIN_AUGMENT_KEYS), button);
             } else {
                 strcpy_s(say, sizeof say, button);
             }
@@ -3172,7 +3299,8 @@ static int base_call(const Call* c)
             // research (not enough)", the 2026-10-05 (11:30) log).
             if (!frame_local_raw(node, locals, "Cost", raw, sizeof raw))
                 strcpy_s(raw, sizeof raw, a.ns > 1 ? a.s[1] : "");
-            if (strstr(raw, "\xC2\xA7")) mec_cost(raw, g_mec.cost, sizeof g_mec.cost);
+            g_mec.cost_reason = !strstr(raw, "\xC2\xA7");
+            if (!g_mec.cost_reason) mec_cost(raw, g_mec.cost, sizeof g_mec.cost);
             else strcpy_s(g_mec.cost, sizeof g_mec.cost, a.ns > 1 ? a.s[1] : "");
             for (int i = 0; i < 3; i++)
                 strcpy_s(g_mec.perk[i], sizeof g_mec.perk[i], a.ns > 2 + i ? a.s[2 + i] : "");
@@ -3188,16 +3316,15 @@ static int base_call(const Call* c)
             mec_where(object, &widget, &row, &count);
             char item[1536] = "";
             if (widget == 1 && count == 0) {
-                strcpy_s(item, sizeof item, "MEC list: no MECs built yet.");
+                strncpy_s(item, sizeof item, T(MAIN_MEC_NONE_BUILT), _TRUNCATE);
             } else if (widget == 1) {
-                char who[160] = "";
+                char who[256] = "";
                 if (g_mec.status[0])
                     _snprintf_s(who, sizeof who, _TRUNCATE, " %s%s%s.", g_mec.status,
                                 g_mec.soldier[0] ? ", " : "", g_mec.soldier);
                 size_t w = 0;
                 char line[640];
-                _snprintf_s(line, sizeof line, _TRUNCATE, "%s, MEC %d of %d", g_mec.name, row + 1,
-                            count);
+                tfmt(line, sizeof line, MAIN_MEC_N_OF, g_mec.name, row + 1, count);
                 mec_sentence(item, sizeof item, &w, line);
                 mec_sentence(item, sizeof item, &w, who);
                 // A perk per tech level, "NAME||description||icon label"
@@ -3213,9 +3340,10 @@ static int base_call(const Call* c)
                 // strCantUpgradeReason in the cost's place ("Cannot upgrade:
                 // missing research", GenerateUpgradeMEC), said below, so an
                 // empty level is only said to be empty; the first one is the
-                // upgrade the cost is for.
+                // upgrade the cost is for. Told by its having no sum in it,
+                // which holds in any language.
                 int next_said = 0;
-                int blocked = strncmp(g_mec.cost, "Cannot upgrade", 14) == 0;
+                int blocked = g_mec.cost_reason && g_mec.cost[0];
                 for (int i = 0; i < 3; i++) {
                     if (!g_mec.perk[i][0]) continue;
                     char part[512];
@@ -3229,44 +3357,46 @@ static int base_call(const Call* c)
                         if (icon) { *icon = 0; icon += 2; }
                     }
                     if (icon && strcmp(icon, "Locked") == 0) {
-                        _snprintf_s(line, sizeof line, _TRUNCATE, "Level %d: not built yet%s",
-                                    i + 1, !next_said && !blocked && g_mec.cost[0]
-                                               ? ", the next upgrade" : "");
+                        tfmt(line, sizeof line,
+                             !next_said && !blocked && g_mec.cost[0] ? MAIN_MEC_LEVEL_NEXT
+                                                                     : MAIN_MEC_LEVEL_NOT_BUILT,
+                             i + 1);
                         next_said = 1;
                         mec_sentence(item, sizeof item, &w, line);
                         continue;
                     }
-                    _snprintf_s(line, sizeof line, _TRUNCATE, "Level %d: %s", i + 1, part);
+                    tfmt(line, sizeof line, MAIN_MEC_LEVEL, i + 1, part);
                     mec_sentence(item, sizeof item, &w, line);
                     if (desc) mec_sentence(item, sizeof item, &w, desc);
                 }
                 mec_sentence(item, sizeof item, &w, g_mec.cost);
                 if (confirm[0]) {
-                    _snprintf_s(line, sizeof line, _TRUNCATE, "Enter: %s", confirm);
+                    _snprintf_s(line, sizeof line, _TRUNCATE, "%s: %s", T(KEY_ENTER), confirm);
                     mec_sentence(item, sizeof item, &w, line);
                 } else if (!g_mec.cost[0]) {
-                    mec_sentence(item, sizeof item, &w, "Cannot be upgraded now");
+                    mec_sentence(item, sizeof item, &w, T(MAIN_MEC_NO_UPGRADE));
                 }
             } else {
                 size_t w = 0;
-                char line[128];
+                char line[256];
                 _snprintf_s(line, sizeof line, _TRUNCATE, "%s%s",
                             g_mec.build[0] ? g_mec.build : g_mec.name,
-                            g_mec.build_off ? ", unavailable" : "");
+                            g_mec.build_off ? T(HQ_UNAVAILABLE) : "");
                 mec_sentence(item, sizeof item, &w, line);
                 mec_sentence(item, sizeof item, &w, g_mec.build_cost);
                 mec_sentence(item, sizeof item, &w, g_mec.cost);
-                _snprintf_s(line, sizeof line, _TRUNCATE, "Enter: %s", confirm[0] ? confirm : "build");
+                _snprintf_s(line, sizeof line, _TRUNCATE, "%s: %s", T(KEY_ENTER),
+                            confirm[0] ? confirm : T(MAIN_MEC_BUILD));
                 mec_sentence(item, sizeof item, &w, line);
             }
             static char say[2048];
             if (g_mec.fresh) {
-                char mecs[48];
-                if (count > 0) _snprintf_s(mecs, sizeof mecs, _TRUNCATE, "%d MEC%s. ", count,
-                                           count == 1 ? "" : "s");
-                else strcpy_s(mecs, sizeof mecs, "No MECs yet. ");
-                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s. %sUp and Down choose. %s",
-                            g_mec.title, g_mec.sub[0] ? ", " : "", g_mec.sub, mecs, item);
+                char mecs[96];
+                if (count > 0) tpfmt(mecs, sizeof mecs, MAIN_MEC_COUNT, count, count);
+                else strncpy_s(mecs, sizeof mecs, T(MAIN_MEC_NONE_YET), _TRUNCATE);
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s. %s %s %s",
+                            g_mec.title, g_mec.sub[0] ? ", " : "", g_mec.sub, mecs,
+                            T(MAIN_UP_DOWN_CHOOSE), item);
             } else {
                 strcpy_s(say, sizeof say, item);
             }
@@ -3351,17 +3481,18 @@ static int base_call(const Call* c)
             g_mecup.sel_col = col;
             g_mecup.sel_row = row;
             g_mecup.said_col = col;
-            char levels[640] = "";
+            char levels[1024] = "";
             size_t w = 0;
-            for (int i = 0; i < 3; i++)
-                w += (size_t)_snprintf_s(levels + w, sizeof levels - w, _TRUNCATE,
-                                         " Level %d, %s, %s.", i + 1, g_mecup.col[i],
-                                         mecup_state_word(g_mecup.state[i]));
+            for (int i = 0; i < 3; i++) {
+                if (w + 1 < sizeof levels) { levels[w++] = ' '; levels[w] = 0; }
+                tfmt_cat(levels, sizeof levels, &w, MAIN_MECUP_LEVEL, i + 1, g_mecup.col[i],
+                         mecup_state_word(g_mecup.state[i]));
+            }
             static char say[2048];
-            _snprintf_s(say, sizeof say, _TRUNCATE,
-                        "%s. %s. %s.%s On level %d. Up and Down choose the level, Left and "
-                        "Right the tactical system, Enter chooses it.",
-                        g_mecup.title, g_mecup.sub, g_mecup.cost, levels, col + 1);
+            char on[64];
+            tfmt(on, sizeof on, MAIN_MECUP_ON_LEVEL, col + 1);
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s. %s. %s.%s %s %s",
+                        g_mecup.title, g_mecup.sub, g_mecup.cost, levels, on, T(MAIN_MECUP_KEYS));
             logf_("[%ld] %s %s.%s  MECUP arrival %d, %d \"%s\"\n", n, tag, obj_name, fn_name,
                   col, row, say);
             speech_cancel_pending();
@@ -3377,13 +3508,17 @@ static int base_call(const Call* c)
             int c = g_mecup.sel_col, r = g_mecup.sel_row;
             if (c < 0 || c > 2) c = 0;
             if (r < 0 || r > 1) r = 0;
-            char level[192] = "";
-            if (c != g_mecup.said_col)
-                _snprintf_s(level, sizeof level, _TRUNCATE, "Level %d, %s, %s. ", c + 1,
-                            g_mecup.col[c], mecup_state_word(g_mecup.state[c]));
+            char level[320] = "";
+            if (c != g_mecup.said_col) {
+                tfmt(level, sizeof level, MAIN_MECUP_LEVEL, c + 1, g_mecup.col[c],
+                     mecup_state_word(g_mecup.state[c]));
+                strncat_s(level, sizeof level, " ", _TRUNCATE);
+            }
             static char say[2048];
-            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s, system %d of 2%s. %s", level, name,
-                        r + 1, g_mecup.has[c][r] ? ", installed" : "", desc);
+            char sys_line[256];
+            tfmt(sys_line, sizeof sys_line, g_mecup.has[c][r] ? MAIN_MECUP_SYSTEM_IN : MAIN_MECUP_SYSTEM,
+                 name, r + 1);
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s %s", level, sys_line, desc);
             g_mecup.said_col = c;
             logf_("[%ld] %s %s.%s  MECUP %d, %d \"%s\"\n", n, tag, obj_name, fn_name, c, r,
                   say);
@@ -3542,11 +3677,14 @@ static int base_call(const Call* c)
             strncpy_s(count, sizeof count, p->strings[0], _TRUNCATE);
             char say[1024] = "";
             if (g_hire.fresh)
-                _snprintf_s(say, sizeof say, _TRUNCATE,
-                            "%s%s%s. %s %s Up and Down change the number, Enter: %s, "
-                            "Escape: cancel.",
+            {
+                char keys[192];
+                tfmt(keys, sizeof keys, MAIN_HIRE_KEYS,
+                     g_hire.confirm[0] ? g_hire.confirm : T(MAIN_HIRE_CONFIRM));
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s. %s %s %s",
                             g_hire.title, g_hire.title[0] ? ". " : "", count, g_hire.cost,
-                            g_hire.cap, g_hire.confirm[0] ? g_hire.confirm : "confirm");
+                            g_hire.cap, keys);
+            }
             else if (strcmp(count, g_hire.count) != 0)
                 _snprintf_s(say, sizeof say, _TRUNCATE, "%s. %s %s", count, g_hire.cost,
                             g_hire.cap);
@@ -3865,7 +4003,7 @@ static int tactical_call(const Call* c)
     }
     // The weapon panels: the equipped weapon and the ammo each has. Kept for
     // the soldier's readouts, not said as they pass (weapon_note).
-    if (weapon_note(n, obj_name, fn_name, p, node, locals)) return 1;
+    if (weapon_note(n, obj_name, fn_name, p, node, locals, stack)) return 1;
     // Whose turn it is. See combat_turn in combat.h.
     if (strncmp(obj_name, "UITurnOverlay", 13) == 0) {
         const char* strs[8];
@@ -4108,7 +4246,7 @@ static int screens_call(const Call* c)
             if (nships < 8) {
                 _snprintf_s(ships[nships], sizeof ships[nships], _TRUNCATE, "%s, %s, %s%s",
                             a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
-                            a.ns > 2 ? a.s[2] : "", a.nb > 0 && a.b[0] ? ", unavailable" : "");
+                            a.ns > 2 ? a.s[2] : "", a.nb > 0 && a.b[0] ? T(HQ_UNAVAILABLE) : "");
                 logf_("[%ld] %s %s.%s  SHIP %d = \"%s\"\n", n, tag, obj_name, fn_name, nships,
                       ships[nships]);
                 nships++;
@@ -4121,8 +4259,13 @@ static int screens_call(const Call* c)
             g_alert_due = NULL;
             g_alert_title[0] = g_alert_text[0] = g_alert_sub[0] = g_alert_rebates[0] = 0;
             size_t w = 0;
-            w += _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%d interceptor%s", label,
-                             label[0] ? ". " : "", nships, nships == 1 ? "" : "s");
+            if (label[0]) {
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s. ", label);
+                w = strlen(say);
+            } else {
+                say[0] = 0;
+            }
+            tpfmt_cat(say, sizeof say, &w, MAIN_INTERCEPTORS, nships, nships);
             for (int i = 0; i < nships && w < sizeof say; i++)
                 w += _snprintf_s(say + w, sizeof say - w, _TRUNCATE, "%s%s",
                                  i ? ". " : ": ", ships[i]);
@@ -4296,10 +4439,11 @@ static int screens_call(const Call* c)
             if (!s_rep_n) return 1;
             const char* edge = "";
             s_rep_at += down ? 1 : -1;
-            if (s_rep_at >= s_rep_n) { s_rep_at = s_rep_n - 1; edge = "End. "; }
-            if (s_rep_at < 0)        { s_rep_at = 0;           edge = "Top. "; }
-            char say[HQ_REPORT_TEXT + 8];
-            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s", edge, s_rep[s_rep_at]);
+            if (s_rep_at >= s_rep_n) { s_rep_at = s_rep_n - 1; edge = T(TXT_END); }
+            if (s_rep_at < 0)        { s_rep_at = 0;           edge = T(TXT_TOP); }
+            char say[HQ_REPORT_TEXT + 64];
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s", edge, *edge ? " " : "",
+                        s_rep[s_rep_at]);
             logf_("[%ld] %s %s.%s  REPORT %d \"%s\"\n", n, tag, obj_name, fn_name, s_rep_at,
                   say);
             speech_cancel_pending();
@@ -4504,9 +4648,9 @@ static int screens_call(const Call* c)
             }
             if (*label) help_set(object, 0, label, *icon ? icon : "Icon_A_X", 0);
             char say[2048];
-            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s", s_head,
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s%s%s", s_head,
                         s_head[0] && s_factors[0] ? ". " : "", s_factors,
-                        *label ? ". Enter: " : "", label);
+                        *label ? ". " : "", *label ? T(KEY_ENTER) : "", *label ? ": " : "", label);
             s_head[0] = s_factors[0] = 0;
             logf_("[%ld] %s %s.%s  SUMMARY \"%s\"\n", n, tag, obj_name, fn_name, say);
             speech_cancel_pending();
@@ -4543,7 +4687,7 @@ static int screens_call(const Call* c)
     // on the soldier page and scroll the science page (AS_ScrollUp/Down);
     // both are followed and the line under them said.
     if (strncmp(obj_name, "UIDebrief", 9) == 0) {
-        static char s_op[128], s_title[5][128], s_continue[64] = "CONTINUE";
+        static char s_op[128], s_title[5][128], s_continue[64] = "";
         static char s_page[3072], s_council[1536], s_covert[1536];
         static char s_lines[32][384];
         static int  s_nlines, s_line = -1, s_promoted, s_building;
@@ -4584,22 +4728,24 @@ static int screens_call(const Call* c)
                 cpromo = a.ns > 7 ? a.s[7] : "";
                 status = a.ns > 8 ? a.s[8] : "";
             }
-            // The class is an icon name, "heavy" or "none"; it is left out
-            // when the promotion already names it ("Class Assigned: Sniper").
-            char cls_word[32] = "";
-            if (*cls && strcmp(cls, "none") != 0 && !*cpromo) {
-                strncpy_s(cls_word, sizeof cls_word, cls, _TRUNCATE);
-                cls_word[0] = (char)toupper((unsigned char)cls_word[0]);
-            }
+            // The class is an icon name, "heavy" or "none", said as the game
+            // names the class (soldier_class_words); it is left out when the
+            // promotion already names it ("Class Assigned: Sniper").
+            char cls_word[160] = "";
+            if (*cls && strcmp(cls, "none") != 0 && !*cpromo)
+                soldier_class_words(cls, cls_word, sizeof cls_word);
             // The name already carries the nickname ("Cpl. Christophe 'D.O.A.'
             // Leroy"). The nickname slot is not one: XGDebriefUI fills it only
             // when a nickname was just earned, with m_strEarnedNickName --
             // "Earned Nickname: 'D.O.A.'" -- so it is news, said with the
             // promotions, not quoted after the name as it was.
+            char kill_words[64], mission_words[64];
+            tpfmt(kill_words, sizeof kill_words, MAIN_KILLS, kills, kills);
+            tpfmt(mission_words, sizeof mission_words, MAIN_MISSIONS, missions, missions);
             _snprintf_s(row, sizeof row, _TRUNCATE,
-                        "%s%s%s, %s%s%d kill%s, %d mission%s%s%s%s%s%s%s", name,
+                        "%s%s%s, %s%s%s, %s%s%s%s%s%s%s", name,
                         *cls_word ? ", " : "", cls_word, status, *status ? ", " : "",
-                        kills, kills == 1 ? "" : "s", missions, missions == 1 ? "" : "s",
+                        kill_words, mission_words,
                         *promo ? ". " : "", promo, *cpromo ? ". " : "", cpromo,
                         *nick ? ". " : "", nick);
             if (*promo) s_promoted = 1;
@@ -4710,12 +4856,12 @@ static int screens_call(const Call* c)
                 title = s_title[3];
                 body = s_covert;
             }
-            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s%s%s%s", s_op,
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s%s%s%s. %s: %s", s_op,
                         s_op[0] && title[0] ? ". " : "", title,
                         (s_op[0] || title[0]) && body[0] ? ". " : "", body,
-                        s_promoted && strstr(fn_name, "Soldier")
-                            ? ". Up and Down pick a promoted soldier, 1 promotes" : "",
-                        ". Enter: ", s_continue);
+                        s_promoted && strstr(fn_name, "Soldier") ? ". " : "",
+                        s_promoted && strstr(fn_name, "Soldier") ? T(MAIN_DEBRIEF_PROMOTE_KEYS) : "",
+                        "", T(KEY_ENTER), s_continue[0] ? s_continue : T(MAIN_CONTINUE));
             // The science page scrolls on the arrows and a soldier page with
             // a promotion moves between the promoted; everywhere else they do
             // nothing (UIDebrief.OnPressUp/Down), so they say the page again.
@@ -4753,8 +4899,8 @@ static int screens_call(const Call* c)
             g_eom_n = g_eom_head = g_eom_said = 0;      // a new report
             g_eom_link = 1;
             g_eom_at = -1;
-            _snprintf_s(g_eom_page, sizeof g_eom_page, _TRUNCATE, "%s%s%s Enter: Next.",
-                        status, status[0] && ready[0] ? " " : "", ready);
+            _snprintf_s(g_eom_page, sizeof g_eom_page, _TRUNCATE, "%s%s%s %s",
+                        status, status[0] && ready[0] ? " " : "", ready, T(MAIN_ENTER_NEXT));
             logf_("[%ld] %s %s.%s  REPORT \"%s\"\n", n, tag, obj_name, fn_name, g_eom_page);
             speech_cancel_pending();
             if (g_speak && !muted()) speech_say_now(g_eom_page);
@@ -4766,7 +4912,7 @@ static int screens_call(const Call* c)
             // GoToView(0) sends the link status here too, before OnInit
             // sends it again with "decoded"; only the defections are news.
             if (!t[0] || !g_eom_link || strncmp(g_eom_page, t, strlen(t)) == 0) return 1;
-            _snprintf_s(g_eom_page, sizeof g_eom_page, _TRUNCATE, "%s Enter: Next.", t);
+            _snprintf_s(g_eom_page, sizeof g_eom_page, _TRUNCATE, "%s %s", t, T(MAIN_ENTER_NEXT));
             logf_("[%ld] %s %s.%s  REPORT \"%s\"\n", n, tag, obj_name, fn_name, g_eom_page);
             history_add(t);
             speech_cancel_pending();
@@ -4813,16 +4959,16 @@ static int screens_call(const Call* c)
             int withdrawn = p->nbools && p->bools[0];
             _snprintf_s(g_eom[g_eom_n++], EOM_TEXT, _TRUNCATE, "%s%s%s%s%s%s.", name,
                         rewards[0] ? ", " : "", rewards, b[0] ? ", " : "", b,
-                        withdrawn ? ", withdrawn" : "");
+                        withdrawn ? T(MAIN_WITHDRAWN) : "");
             return 1;
         }
         if (strcmp(fn_name, "AS_UpdateCountry") == 0) {
             if (g_eom_n >= EOM_LINES) return 1;
-            char name[128], info[128], panic[32] = "";
+            char name[128], info[128], panic[96] = "";
             frame_string(node, locals, 0, name, sizeof name);
             frame_string(node, locals, 1, info, sizeof info);
             int blocks = p->nnumbers >= 3 ? (int)p->numbers[2] : -1;
-            if (blocks > 0) _snprintf_s(panic, sizeof panic, _TRUNCATE, ", panic %d of 5", blocks);
+            if (blocks > 0) tfmt(panic, sizeof panic, MAIN_PANIC_OF_5, blocks);
             _snprintf_s(g_eom[g_eom_n++], EOM_TEXT, _TRUNCATE, "%s%s%s%s.", name,
                         info[0] ? ", " : "", info, panic);
             return 1;
@@ -4844,8 +4990,7 @@ static int screens_call(const Call* c)
             }
             history_add(say);
             if (used < sizeof say)
-                _snprintf_s(say + used, sizeof say - used, _TRUNCATE,
-                            " Up and Down read the continents and countries. Enter: Carry On.");
+                _snprintf_s(say + used, sizeof say - used, _TRUNCATE, " %s", T(MAIN_EOM_KEYS));
             for (int i = 0; i < g_eom_n; i++)
                 logf_("[%ld] %s %s.%s  REPORT line %d \"%s\"\n", n, tag, obj_name, fn_name,
                       i, g_eom[i]);
@@ -4890,7 +5035,7 @@ static int screens_call(const Call* c)
             char* row = s_row[c][s_nrow[c]++];
             int empty = add && p->nnumbers >= 2 && (int)p->numbers[1] == -1;
             if (empty)
-                _snprintf_s(row, FOCUS_MAX_LABEL, _TRUNCATE, "Empty slot");
+                strncpy_s(row, FOCUS_MAX_LABEL, T(MAIN_EMPTY_SLOT), _TRUNCATE);
             else if (add)       // name, weapon, status
                 _snprintf_s(row, FOCUS_MAX_LABEL, _TRUNCATE, "%s%s%s%s%s", a.s[0],
                             a.ns > 1 && a.s[1][0] ? ", " : "", a.ns > 1 ? a.s[1] : "",
@@ -4907,8 +5052,7 @@ static int screens_call(const Call* c)
             return 1;
         }
         if (strcmp(fn_name, "AS_InitializeShipTransfer") == 0) {
-            const char* say = "Transfer. Up and Down choose a hangar, Enter transfers there, "
-                              "Escape cancels.";
+            const char* say = T(MAIN_TRANSFER_KEYS);
             logf_("[%ld] %s %s.%s  SHIPS \"%s\"\n", n, tag, obj_name, fn_name, say);
             speech_cancel_pending();
             if (g_speak && !muted()) speech_say_now(say);
@@ -4919,12 +5063,10 @@ static int screens_call(const Call* c)
             int c = (int)p->numbers[0], r = (int)p->numbers[1];
             if (c < 0 || c >= SHIP_CONTS || r < 0 || r >= s_nrow[c]) return 1;
             char say[FOCUS_MAX_LABEL * 3];
-            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s.%s",
-                        s_fresh ? "Ship list. " : "",
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s.%s%s",
+                        s_fresh ? T(MAIN_SHIP_LIST) : "", s_fresh ? " " : "",
                         c != s_said_cont ? s_cont[c] : "", c != s_said_cont ? ". " : "",
-                        s_row[c][r],
-                        s_fresh ? " Enter opens a ship, 1 transfers it, F1 for more "
-                                  "information." : "");
+                        s_row[c][r], s_fresh ? " " : "", s_fresh ? T(MAIN_SHIP_LIST_KEYS) : "");
             s_said_cont = c;
             s_fresh = 0;
             logf_("[%ld] %s %s.%s  SHIP %d, %d \"%s\"\n", n, tag, obj_name, fn_name, c, r, say);
@@ -4963,14 +5105,19 @@ static int screens_call(const Call* c)
             for (int i = 0; i < 2; i++) {
                 if (!s_btn[i][0]) continue;
                 size_t u = strlen(btns);
+                if (!u) {
+                    _snprintf_s(btns, sizeof btns, _TRUNCATE, " %s ", T(MAIN_BUTTONS));
+                    u = strlen(btns);
+                }
                 _snprintf_s(btns + u, sizeof btns - u, _TRUNCATE, "%s%s%s",
-                            u ? ", " : " Buttons: ", s_btn[i], s_off[i] ? ", unavailable" : "");
+                            u && btns[u - 1] != ' ' ? ", " : "", s_btn[i],
+                            s_off[i] ? T(HQ_UNAVAILABLE) : "");
             }
             char say[1024];
             _snprintf_s(say, sizeof say, _TRUNCATE,
-                        "%s. %s %s. %s. %s.%s%s Up and Down choose, Enter presses.",
+                        "%s. %s %s. %s. %s.%s%s %s",
                         s_name, s_wlabel, s_weapon, s_status, s_kills, btns,
-                        btns[0] ? "." : "");
+                        btns[0] ? "." : "", T(MAIN_SHIP_KEYS));
             logf_("[%ld] %s %s.%s  SHIP \"%s\"\n", n, tag, obj_name, fn_name, say);
             speech_cancel_pending();
             if (g_speak && !muted()) speech_say_now(say);
@@ -4981,7 +5128,7 @@ static int screens_call(const Call* c)
             if (!p->nbools || !p->bools[0] || i < 0 || i >= 2 || !s_btn[i][0]) return 1;
             char say[FOCUS_MAX_LABEL + 16];
             _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s.", s_btn[i],
-                        s_off[i] ? ", unavailable" : "");
+                        s_off[i] ? T(HQ_UNAVAILABLE) : "");
             logf_("[%ld] %s %s.%s  SHIP button %d \"%s\"\n", n, tag, obj_name, fn_name, i, say);
             speech_cancel_pending();
             if (g_speak && !muted()) speech_say_now(say);
@@ -5025,7 +5172,7 @@ static int screens_call(const Call* c)
             _snprintf_s(s_row[s_n++], FOCUS_MAX_LABEL, _TRUNCATE, "%s%s%s%s%s%s", a.s[0],
                         a.ns > 1 && a.s[1][0] ? ", " : "", s_qty[0] && a.ns > 1 && a.s[1][0] ? s_qty : "",
                         s_qty[0] && a.ns > 1 && a.s[1][0] ? " " : "", a.ns > 1 ? a.s[1] : "",
-                        off ? ", unavailable" : "");
+                        off ? T(HQ_UNAVAILABLE) : "");
             return 1;
         }
         if (strcmp(fn_name, "AS_SetStatData") == 0 && p->nnumbers) {
@@ -5051,7 +5198,7 @@ static int screens_call(const Call* c)
                         s_fresh && s_title[0] ? ". " : "",
                         s_sel >= 0 && s_sel < s_n ? s_row[s_sel] : "?",
                         s_stat[0], s_stat[1], s_stat[2], s_stat[3], s_stat[4], desc,
-                        s_fresh ? " Enter equips." : "");
+                        s_fresh ? T(MAIN_ENTER_EQUIPS) : "");
             s_fresh = 0;
             logf_("[%ld] %s %s.%s  LOADOUT \"%s\"\n", n, tag, obj_name, fn_name, say);
             speech_cancel_pending();
@@ -5085,8 +5232,7 @@ static int screens_call(const Call* c)
             if (!a.ns || !a.s[0][0]) return 1;               // a soldier's slot
             char row[FOCUS_MAX_LABEL];
             int add = a.ns > 1 && strcmp(a.s[1], "+") == 0;
-            _snprintf_s(row, sizeof row, _TRUNCATE, "%s%s", add ? "Empty slot, " : "Locked: ",
-                        a.s[0]);
+            tfmt(row, sizeof row, add ? MAIN_SQUAD_EMPTY_SLOT : MAIN_SQUAD_LOCKED, a.s[0]);
             focus_set(object, (int)p->numbers[0], row);
             logf_("[%ld] %s %s.%s  SQUAD %d = \"%s\"\n", n, tag, obj_name, fn_name,
                   (int)p->numbers[0], row);
@@ -5380,22 +5526,24 @@ static void capture_body(const char* tag, LONG n, void* stack)
             // Promotion, Customize and Gene Mods all take `case 514`
             // (Left Shift) and `case 571` (Tab), in both builds. The rest
             // are mouse buttons.
+            // hq_pc_icon_label's words are the mod's own lines, so they are
+            // told apart as such.
             const char* pc = !*icon ? hq_pc_icon_label(label) : NULL;
             if (pc) {
                 label = pc;
-                if (strcmp(pc, "Back") == 0) icon = "Icon_B_CIRCLE";
-                else if (strcmp(pc, "Accept") == 0) icon = "Icon_A_X";
+                if (strcmp(pc, T(HQ_PC_BACK)) == 0) icon = "Icon_B_CIRCLE";
+                else if (strcmp(pc, T(HQ_PC_ACCEPT)) == 0) icon = "Icon_A_X";
                 // On Build Items frame 3 is the item card, not Accept:
                 // UIBuildItem adds it with OnMouseAccept, which opens the
                 // card, as F1 does (case 600). Enter is MANUFACTURE, which
                 // the screen's own confirm button names.
-                if (strcmp(pc, "Accept") == 0 &&
+                if (strcmp(pc, T(HQ_PC_ACCEPT)) == 0 &&
                     GetTickCount64() - g_builditem_at < ENG_SAME_DRAW_MS) {
-                    label = "Details";
+                    label = T(MAIN_DETAILS);
                     icon = "Icon_KEY_F1";
                 }
-                else if (strcmp(pc, "Previous soldier") == 0) icon = "Icon_KEY_LEFT_SHIFT";
-                else if (strcmp(pc, "Next soldier") == 0) icon = "Icon_KEY_TAB";
+                else if (strcmp(pc, T(HQ_PC_PREV_SOLDIER)) == 0) icon = "Icon_KEY_LEFT_SHIFT";
+                else if (strcmp(pc, T(HQ_PC_NEXT_SOLDIER)) == 0) icon = "Icon_KEY_TAB";
             }
             int slot = (int)p->numbers[0];
             int disabled = p->nbools ? p->bools[0] : 0;
@@ -5700,10 +5848,10 @@ static void capture_body(const char* tag, LONG n, void* stack)
             ULONGLONG t_at;
             int head = focus_take_title(inv, title, sizeof title, &t_at) &&
                        GetTickCount64() - t_at < TITLE_FRESH_MS;
-            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s",
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s%s%s",
                         head ? title : "", head ? ". " : "",
-                        g_loadout_side != list ? (in_locker ? "Locker. " : "Inventory. ") : "",
-                        label);
+                        g_loadout_side != list ? T(in_locker ? MAIN_LOCKER : MAIN_INVENTORY) : "",
+                        g_loadout_side != list ? " " : "", label);
             g_loadout_side = list;
             if (!in_locker) { g_loadout_inv = object; g_loadout_inv_idx = idx; }
             logf_("[%ld] %s %s.%s  FOCUS %d -> \"%s\"\n", n, tag, obj_name, fn_name, idx, say);
@@ -5720,7 +5868,7 @@ static void capture_body(const char* tag, LONG n, void* stack)
         // keyboard key sends in the headquarters -- 1 stands in (input.c).
         if (strcmp(fn_name, "AS_SetLockerButtonHelp") == 0 && p->nstrings >= 2) {
             help_set(object, 0, p->strings[0], "Icon_A_X", 0);
-            if (p->nstrings >= 3) help_set(object, 1, "DETAILS: F1", "", 0);
+            if (p->nstrings >= 3) help_set(object, 1, T(MAIN_DETAILS_F1), "", 0);
             return;
         }
         if (strcmp(fn_name, "AS_SetRemoveInventorySlotButtonHelp") == 0 && p->nstrings) {
@@ -5786,7 +5934,7 @@ static void capture_body(const char* tag, LONG n, void* stack)
                 _snprintf_s(who, sizeof who, _TRUNCATE, "%s %s", a.s[7], a.s[0]);
             _snprintf_s(g_soldier_info, sizeof g_soldier_info, _TRUNCATE,
                         "%s%s%s%s. %s. %s. %s", who, a.s[5][0] ? ", " : "", a.s[5],
-                        a.nb && a.b[0] ? ", promotion" : "", a.s[2], a.s[8], a.s[9]);
+                        a.nb && a.b[0] ? T(HQ_PROMOTION) : "", a.s[2], a.s[8], a.s[9]);
             g_soldier_stats[0] = 0;
             g_soldier_info_at = GetTickCount64();
             logf_("[%ld] %s %s.%s  SOLDIER INFO \"%s\"\n", n, tag, obj_name, fn_name,
@@ -5976,9 +6124,8 @@ static void capture_body(const char* tag, LONG n, void* stack)
     if (is_slider_value_fn(fn_name) && p->nnumbers >= 2 && !p->nstrings) {
         int idx = (int)p->numbers[0];
         if (idx >= 0 && idx < FOCUS_MAX_ITEMS) {
-            char value[32];
-            _snprintf_s(value, sizeof value, _TRUNCATE, "%d percent",
-                        (int)p->numbers[1]);
+            char value[64];
+            tfmt(value, sizeof value, MAIN_PERCENT, (int)p->numbers[1]);
             int changed = focus_set_part(object, idx, FOCUS_PART_VALUE, value);
             logf_("[%ld] %s %s.%s  SLOT %d value = \"%s\"%s\n",
                   n, tag, obj_name, fn_name, idx, value,
@@ -6133,7 +6280,7 @@ static void capture_body(const char* tag, LONG n, void* stack)
             joined[used] = 0;
         }
         if (locked && joined[0]) {
-            const char* tag = ", unavailable";
+            const char* tag = T(HQ_UNAVAILABLE);
             if (used + strlen(tag) < sizeof joined) {
                 memcpy(joined + used, tag, strlen(tag) + 1);
                 used += strlen(tag);
@@ -6633,9 +6780,9 @@ static int rewrite_cmd(LONG n, void* stack)
             g_slots_leaving_at = GetTickCount64();
             logf_("[%ld] SLOTS leaving the Psi Labs from view %d\n", n, view);
         } else if ((cmd == FXS_KEY_ENTER || cmd == FXS_BUTTON_A) && view == 2) {
-            char say[160];
-            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%sEscape leaves the Psi Labs.",
-                        g_slots_title, g_slots_title[0] ? ". " : "");
+            char say[256];
+            _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s",
+                        g_slots_title, g_slots_title[0] ? ". " : "", T(MAIN_PSI_ESCAPE));
             logf_("[%ld] SLOTS Enter on the results: \"%s\"\n", n, say);
             speech_cancel_pending();
             if (g_speak) speech_say_now(say);
@@ -6784,8 +6931,9 @@ static void slots_select_as(LONG n, int i, int game, const char* lead)
         writable(v, sizeof(int32_t)))
         *(int32_t*)v = game;
     char say[FOCUS_MAX_LABEL + 256];
-    _snprintf_s(say, sizeof say, _TRUNCATE, "%sSlot %d of %d: %s", lead ? lead : "", i + 1,
-                g_slots_n, g_slots_row[i]);
+    char slot[FOCUS_MAX_LABEL + 96];
+    tfmt(slot, sizeof slot, MAIN_SLOT_N_OF, i + 1, g_slots_n, g_slots_row[i]);
+    _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s", lead ? lead : "", slot);
     logf_("[%ld] SLOTS %d \"%s\"\n", n, i, say);
     speech_cancel_pending();
     if (g_speak) speech_say_now(say);
@@ -6842,9 +6990,9 @@ static void hq_locked_note(LONG n, void* sub, const char* screen)
         // The option named first: it is the one Enter picks, not a locked
         // one. "Locked by the tutorial. LAUNCH SATELLITE" was heard as the
         // option being blocked (2026-09-25).
-        _snprintf_s(say, sizeof say, _TRUNCATE, "%s. The tutorial holds the cursor here.", label);
+        _snprintf_s(say, sizeof say, _TRUNCATE, "%s. %s", label, T(MAIN_TUTORIAL_HOLDS));
     else
-        strncpy_s(say, sizeof say, "The tutorial holds the cursor here.", _TRUNCATE);
+        strncpy_s(say, sizeof say, T(MAIN_TUTORIAL_HOLDS), _TRUNCATE);
     logf_("[%ld] Input        %s  LOCKED \"%s\"\n", n, screen, say);
     speech_cancel_pending();
     if (g_speak) speech_say_now(say);
@@ -6927,9 +7075,9 @@ static void loadout_leave_locker(LONG n, void* loadout, const char* screen)
     char label[FOCUS_MAX_LABEL], say[FOCUS_MAX_LABEL + 16];
     if (g_loadout_inv == loadout && g_loadout_inv_idx >= 0 &&
         focus_label_at(loadout, g_loadout_inv_idx, label, sizeof label))
-        _snprintf_s(say, sizeof say, _TRUNCATE, "Inventory. %s", label);
+        _snprintf_s(say, sizeof say, _TRUNCATE, "%s %s", T(MAIN_INVENTORY), label);
     else
-        strncpy_s(say, sizeof say, "Inventory.", _TRUNCATE);
+        strncpy_s(say, sizeof say, T(MAIN_INVENTORY), _TRUNCATE);
     logf_("[%ld] Input        %s  LOCKER left -> \"%s\"\n", n, screen, say);
     speech_cancel_pending();
     if (g_speak) speech_say_now(say);
@@ -7105,7 +7253,7 @@ static void combat_message(LONG n, void* stack, const Payload* p)
                 strncpy_s(raw, sizeof raw, p->strings[k], _TRUNCATE);
         logf_("[%ld] meld: collect prompt for %s, the game's words \"%s\"\n", n,
               p->strings[i], raw);
-        announce("Meld canister. V to collect.");
+        announce(T(MAIN_MELD_COLLECT));
         return;
     }
     for (int i = 0; i < p->nstrings; i++) {
@@ -7151,7 +7299,11 @@ static void combat_message(LONG n, void* stack, const Payload* p)
     char label[160] = "";
     if (who) unit_label(who, label, sizeof label);
     char say[COMBAT_MAX_TEXT];
-    if (!combat_describe(label, text, damage, say, sizeof say)) return;
+    // The critical mark in the game's language; English if it cannot be read.
+    char crit[64];
+    if (!game_loc("XGUnit", "m_sCriticalHitDamageDisplay", 0, crit, sizeof crit))
+        strcpy_s(crit, sizeof crit, "CRITICAL");
+    if (!combat_describe(label, text, damage, crit, say, sizeof say)) return;
 
     // Message can be asked twice for one event (an update of a message that
     // is already up); the same words twice in a moment are one event.
@@ -7224,8 +7376,8 @@ void combat_poll(void)
         int gone = 0;
         GUARDED("combat: gone", gone = unit_gone(u, flag));
         if (gone && name[0]) {
-            char say[128];
-            _snprintf_s(say, sizeof say, _TRUNCATE, "%s down.", name);
+            char say[192];
+            tfmt(say, sizeof say, MAIN_UNIT_DOWN, name);
             logf_("combat: no redraw after the hit, and %s is gone -> \"%s\"\n", name, say);
             announce_as(SET_COMBAT, say);
         }
@@ -7309,9 +7461,9 @@ static void shot_target_now(void* stack)
     // says how to use it instead (shot_used_on_self).
     if (shot_used_on_self(action)) {
         UnitName* me = unit_by_unit(unit);
-        char cue[128];
-        _snprintf_s(cue, sizeof cue, _TRUNCATE, "Used on %s. Enter to use",
-                    me && me->name[0] ? me->name : "this soldier");
+        char cue[192];
+        if (me && me->name[0]) tfmt(cue, sizeof cue, MAIN_USED_ON, me->name);
+        else strncpy_s(cue, sizeof cue, T(MAIN_USED_ON_SOLDIER), _TRUNCATE);
         shot_set_self(cue);
         return;
     }
@@ -7497,13 +7649,10 @@ static void*        g_soldier_said;     // the flag last announced
 static ULONGLONG    g_soldier_due;      // when to announce, 0 for never
 
 // Case-insensitive: does `hay` contain `needle`? "URSULA WRIGHT" / "Wright".
+// Names in the game's language, so not ASCII alone (text_find_ci).
 static int contains_ci(const char* hay, const char* needle)
 {
-    size_t n = strlen(needle);
-    if (!n) return 0;
-    for (; *hay; hay++)
-        if (_strnicmp(hay, needle, n) == 0) return 1;
-    return 0;
+    return needle && *needle && text_find_ci(hay, needle) != NULL;
 }
 
 static void soldier_stats_note(LONG n, const Payload* p)
@@ -7566,6 +7715,9 @@ static UnitName* unit_of_flag(void* flag)
 #define WEAPON_COSTS 32
 static SoldierWeapon g_weapon[2];
 static char          g_weapon_name[64];
+// Which panel the equipped weapon is in (0 the primary, 1 the secondary), as
+// SetWeapons handed them to the HUD; -1 when it could not be read.
+static int           g_weapon_active = -1;
 static struct { char type[48]; int cost; } g_weapon_cost[WEAPON_COSTS];
 static int           g_weapon_ncost;
 
@@ -7679,11 +7831,41 @@ static void weapon_words(char* active, size_t active_sz, char* all, size_t all_s
 
 static FieldSlot g_weapon_ability_type;
 
+// Which panel holds the equipped weapon, from the frame that drew the name:
+// UITacticalHUD_WeaponContainer.SetWeapons(ActiveWeapon, PrimaryWeapon,
+// secondaryWeapon) puts the primary in panel 0 and the secondary in panel 1,
+// then calls AS_SetWeaponName(ActiveWeapon.m_kTWeapon.strName) -- the frame
+// before this one. Compared as objects, so it holds in any language; the
+// name is the game's localized one, which an English type cannot be matched
+// against.
+static int weapon_active_panel(void* stack)
+{
+    if (!stack || !readable((uint8_t*)stack + FFRAME_PREVIOUS, sizeof(void*))) return -1;
+    void* frame = *(void**)((uint8_t*)stack + FFRAME_PREVIOUS);
+    if (!frame || !readable(frame, FFRAME_LOCALS + sizeof(void*))) return -1;
+    void* node = *(void**)((uint8_t*)frame + FFRAME_NODE);
+    uint8_t* locals = *(uint8_t**)((uint8_t*)frame + FFRAME_LOCALS);
+    char name[64];
+    if (!node || !locals || !object_name(node, name, sizeof name) ||
+        strcmp(name, "SetWeapons") != 0)
+        return -1;
+    void* active = frame_object(node, locals, "ActiveWeapon");
+    if (!active) return -1;
+    if (active == frame_object(node, locals, "PrimaryWeapon")) return 0;
+    if (active == frame_object(node, locals, "secondaryWeapon")) return 1;
+    return -1;
+}
+
 static int weapon_note(LONG n, const char* obj, const char* fn, const Payload* p,
-                       void* node, uint8_t* locals)
+                       void* node, uint8_t* locals, void* stack)
 {
     if (strncmp(obj, "UITacticalHUD_WeaponContainer", 29) == 0 && strstr(fn, "SetWeaponName")) {
         const char* name = p->nstrings ? p->strings[0] : "";
+        int panel = -1;
+        GUARDED("weapon: active panel", panel = weapon_active_panel(stack), panel = -1);
+        int moved = panel != g_weapon_active;
+        g_weapon_active = panel;
+        if (moved) logf_("[%ld] weapon: the equipped one is panel %d\n", n, panel);
         if (strcmp(name, g_weapon_name) == 0) return 1;
         strncpy_s(g_weapon_name, sizeof g_weapon_name, name, _TRUNCATE);
         int after_x = g_weapon_x_at && GetTickCount64() - g_weapon_x_at < WEAPON_SWITCH_MS;
@@ -7737,7 +7919,7 @@ static void weapon_words(char* active, size_t active_sz, char* all, size_t all_s
     SoldierWeapon w[2];
     memcpy(w, g_weapon, sizeof w);
     for (int i = 0; i < 2; i++) w[i].cost = weapon_cost(w[i].type);
-    soldier_weapons(g_weapon_name, w, 2, active, active_sz, all, all_sz);
+    soldier_weapons_at(g_weapon_name, g_weapon_active, w, 2, active, active_sz, all, all_sz);
 }
 
 static int soldier_state(const UnitName* u, SoldierState* s)
@@ -7790,7 +7972,7 @@ void soldier_readout(void)
     UnitName* u = unit_of_flag(g_selected_flag);
     if (!u) u = unit_by_unit(soldier_unit());
     if (!soldier_state(u, &s)) {
-        speech_say_now("No soldier selected.");
+        speech_say_now(T(MAIN_NO_SOLDIER_SELECTED));
         return;
     }
     soldier_full(&s, say, sizeof say);
@@ -8153,7 +8335,7 @@ static void status_poll(void)
                 k = countries_lines(lines[n], sizeof lines[0], HISTORY_PAGE_MAX - n), k = 0);
         n += k;
         menu_polled();
-        int opened = history_page_open("Countries", (const char (*)[HISTORY_PAGE_TEXT])lines,
+        int opened = history_page_open(T(MAIN_PAGE_COUNTRIES), (const char (*)[HISTORY_PAGE_TEXT])lines,
                                        n, say, sizeof say);
         logf_("sites: %s, %d entries, %d continents \"%s\"\n",
               opened ? "opened" : "nothing to open", n, k, say);
@@ -8167,7 +8349,7 @@ static void status_poll(void)
         static char say[HISTORY_PAGE_TEXT + 64];
         int n = hq_sit_lines(lines, HISTORY_PAGE_MAX);
         menu_polled();
-        int opened = history_page_open("Situation Room", (const char (*)[HISTORY_PAGE_TEXT])lines,
+        int opened = history_page_open(T(MAIN_PAGE_SITROOM), (const char (*)[HISTORY_PAGE_TEXT])lines,
                                        n, say, sizeof say);
         logf_("sitroom: %s, %d entries \"%s\"\n", opened ? "opened" : "nothing to open", n, say);
         speech_cancel_pending();
@@ -8179,7 +8361,7 @@ static void status_poll(void)
         static char say[HISTORY_PAGE_TEXT + 64];
         int n = hq_eng_lines(lines, HISTORY_PAGE_MAX);
         menu_polled();
-        int opened = history_page_open("Engineering", (const char (*)[HISTORY_PAGE_TEXT])lines,
+        int opened = history_page_open(T(MAIN_PAGE_ENGINEERING), (const char (*)[HISTORY_PAGE_TEXT])lines,
                                        n, say, sizeof say);
         logf_("engineering: %s, %d entries \"%s\"\n", opened ? "opened" : "nothing to open", n, say);
         speech_cancel_pending();
@@ -8188,7 +8370,7 @@ static void status_poll(void)
     }
     char say[1024];
     if (!hq_status_line(say, sizeof say))
-        strncpy_s(say, sizeof say, "Nothing known about the base yet.", _TRUNCATE);
+        strncpy_s(say, sizeof say, T(MAIN_NOTHING_KNOWN), _TRUNCATE);
     logf_("status: \"%s\"\n", say);
     speech_cancel_pending();
     if (g_speak) speech_say_now(say);
@@ -8196,11 +8378,40 @@ static void status_poll(void)
 
 static void hooks_sweep_retry(void);
 
+// ---- the game's language ------------------------------------------------
+//
+// The mod's own lines follow the language the game is set to (strings.h):
+// GetLanguage's buffer, found from its exec thunk at startup, is read here
+// and lang\<CODE>.txt loaded whenever it changes. Watched rather than read
+// once, because the launcher can attach before the engine has filled it in;
+// until then the lines are English.
+static const unsigned short* g_lang_buf;
+static char g_lang_dir[MAX_PATH];
+
+static void lang_poll(void)
+{
+    if (!g_lang_buf || !readable(g_lang_buf, 16)) return;
+    char code[8];
+    int n = 0;
+    for (; n < 7; n++) {
+        unsigned short c = g_lang_buf[n];
+        if (!c) break;
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))) return;   // not filled in yet
+        code[n] = (char)c;
+    }
+    code[n] = 0;
+    if (n < 2 || n > 4 || !_stricmp(code, strings_lang())) return;
+    char why[MAX_PATH + 160];
+    strings_load(g_lang_dir, code, why, sizeof why);
+    logf_("language: the game is %s -- %s\n", code, why);
+}
+
 static DWORD WINAPI review_pump(LPVOID unused)
 {
     (void)unused;
     while (!g_review_stop) {
         Sleep(REVIEW_POLL_MS);
+        GUARDED("language: poll", lang_poll());
         if (!game_has_focus()) continue;
         GUARDED("status: poll", status_poll());
         GUARDED("hooks: late UFunction pass", hooks_sweep_retry());
@@ -8481,6 +8692,24 @@ static void __cdecl on_invalid_parameter(const wchar_t* expr, const wchar_t* fun
     logf_("CRT invalid parameter at line %u -- call ignored\n", line);
 }
 
+// The game's words for soldier.c, in the player's language: the localized
+// arrays off the class default objects, by the enum the icon stands for.
+// XGTacticalGameCore's m_aRankNames (ESoldierRanks; declared on its native
+// base) and m_aSoldierClassNames (ESoldierClass), and the S.H.I.V. as
+// XLocalizedData.m_aCharacterName[eChar_Tank] (3) names it.
+static int soldier_loc(int kind, int index, char* out, size_t out_sz)
+{
+    switch (kind) {
+    case SOLDIER_LOC_RANK:
+        return game_loc("XGTacticalGameCore", "m_aRankNames", index, out, out_sz);
+    case SOLDIER_LOC_CLASS:
+        return game_loc("XGTacticalGameCore", "m_aSoldierClassNames", index, out, out_sz);
+    case SOLDIER_LOC_SHIV:
+        return game_loc("XLocalizedData", "m_aCharacterName", 3, out, out_sz);
+    }
+    return 0;
+}
+
 static DWORD WINAPI init(LPVOID param)
 {
     (void)param;
@@ -8504,7 +8733,9 @@ static DWORD WINAPI init(LPVOID param)
         if (s) *(s + 1) = 0;
         GetModuleFileNameA(NULL, exe, MAX_PATH);
         char* base = strrchr(exe, '\\');
-        weapon_costs_load(dir, _stricmp(base ? base + 1 : exe, "XComEW.exe") == 0);
+        int ew = _stricmp(base ? base + 1 : exe, "XComEW.exe") == 0;
+        game_set_ew(ew);
+        weapon_costs_load(dir, ew);
         char set_why[MAX_PATH + 64];
         settings_load(dir, set_why, sizeof set_why);
         logf_("options: %s\n", set_why);
@@ -8574,6 +8805,20 @@ static DWORD WINAPI init(LPVOID param)
         logf_("FATAL: native table not found -- unexpected build?\n");
         free(tbl);
         return 1;
+    }
+
+    // The game's language, before anything below speaks.
+    soldier_set_loc(soldier_loc);
+    strcpy_s(g_lang_dir, sizeof g_lang_dir, dll_dir);
+    g_lang_buf = strings_language_buffer(
+        (const unsigned char*)natives_find(tbl, n, "UObjectexecGetLanguage"));
+    if (g_lang_buf) {
+        lang_poll();
+        if (!_stricmp(strings_lang(), "INT"))
+            logf_("language: English (the game says \"%.8ls\" so far)\n",
+                  readable(g_lang_buf, 16) ? (const wchar_t*)g_lang_buf : L"?");
+    } else {
+        logf_("language: GetLanguage's buffer not found -- the mod speaks English\n");
     }
 
     int h_text[3];
@@ -8670,9 +8915,7 @@ static DWORD WINAPI init(LPVOID param)
     // Said aloud, because the log is the one part of this mod its user cannot
     // read.  Now that the launcher attaches during startup rather than on
     // request, this is the only sign that anything happened at all.
-    speech_say(armed == 3 && input_armed
-               ? "Accessibility mod ready."
-               : "Accessibility mod loaded with errors. Check the log.");
+    speech_say(T(armed == 3 && input_armed ? MAIN_READY : MAIN_READY_ERRORS));
     return 0;
 }
 

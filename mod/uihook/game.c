@@ -11,6 +11,9 @@
 #include "objects.h"
 #include "names.h"
 #include "ue3.h"
+#include "strings.h"
+#include <stdlib.h>
+#include <wchar.h>
 
 // The natives' slots, -1 until tile_arm (main.c) finds them.
 int   g_tile_slot_cover = -1, g_tile_slot_smoke = -1, g_tile_slot_poison = -1;
@@ -250,6 +253,324 @@ int read_fstring(const FString* s, char* out, size_t out_sz)
     if (n <= 0) return 0;
     out[n] = 0;
     return 1;
+}
+
+static int g_is_ew = 1;
+int  game_is_ew(void)    { return g_is_ew; }
+void game_set_ew(int ew) { g_is_ew = ew != 0; }
+
+#define LOC_MAX 96
+static struct {
+    char      cls[48], field[48];
+    int       index;
+    char      text[256];
+    int       have;
+    ULONGLONG tried;
+    FieldSlot slot;
+} g_loc[LOC_MAX];
+static int g_nloc;
+static SRWLOCK g_loc_lock = SRWLOCK_INIT;
+
+// The default objects found, one walk per class rather than per string: the
+// eight rank names would otherwise be eight walks of ~50 ms on the game
+// thread. A miss is asked again at most every 10 s. A pointer is checked
+// against the object table before each use, since a strategy class's
+// package can be unloaded for a mission. Under g_loc_lock.
+#define CDO_MAX 32
+static struct {
+    char      cls[48];
+    void*     cdo;
+    ULONGLONG tried;
+} g_cdo[CDO_MAX];
+static int g_ncdo;
+
+static void* class_default(const char* cls)
+{
+    int i = 0;
+    for (; i < g_ncdo; i++)
+        if (!strcmp(g_cdo[i].cls, cls)) break;
+    if (i == g_ncdo) {
+        if (g_ncdo == CDO_MAX) return NULL;
+        memset(&g_cdo[i], 0, sizeof g_cdo[i]);
+        strcpy_s(g_cdo[i].cls, sizeof g_cdo[i].cls, cls);
+        g_ncdo++;
+    }
+    if (g_cdo[i].cdo && !unit_is_live(g_cdo[i].cdo)) g_cdo[i].cdo = NULL;
+    ULONGLONG now = GetTickCount64();
+    if (!g_cdo[i].cdo && (!g_cdo[i].tried || now - g_cdo[i].tried >= 10000)) {
+        g_cdo[i].tried = now;
+        char name[64];
+        _snprintf_s(name, sizeof name, _TRUNCATE, "Default__%s", cls);
+        g_cdo[i].cdo = (void*)objects_named(name);
+    }
+    return g_cdo[i].cdo;
+}
+
+int game_loc(const char* cls, const char* field, int index, char* out, size_t out_sz)
+{
+    if (!out || !out_sz) return 0;
+    out[0] = 0;
+    if (!cls || !field || index < 0) return 0;
+    AcquireSRWLockExclusive(&g_loc_lock);
+    int i = 0;
+    for (; i < g_nloc; i++)
+        if (g_loc[i].index == index && !strcmp(g_loc[i].cls, cls) &&
+            !strcmp(g_loc[i].field, field)) break;
+    if (i == g_nloc) {
+        if (g_nloc == LOC_MAX) { ReleaseSRWLockExclusive(&g_loc_lock); return 0; }
+        memset(&g_loc[i], 0, sizeof g_loc[i]);
+        strcpy_s(g_loc[i].cls, sizeof g_loc[i].cls, cls);
+        strcpy_s(g_loc[i].field, sizeof g_loc[i].field, field);
+        g_loc[i].index = index;
+        g_nloc++;
+    }
+    ULONGLONG now = GetTickCount64();
+    if (!g_loc[i].have && (!g_loc[i].tried || now - g_loc[i].tried >= 10000)) {
+        g_loc[i].tried = now;
+        void* cdo = class_default(cls);
+        const void* v;
+        if (cdo && field_ptr(cdo, field, &g_loc[i].slot, (size_t)(index + 1) * sizeof(FString), &v) &&
+            read_fstring((const FString*)v + index, g_loc[i].text, sizeof g_loc[i].text))
+            g_loc[i].have = 1;
+        logf_("loc: Default__%s.%s[%d] = \"%s\"%s\n", cls, field, index, g_loc[i].text,
+              g_loc[i].have ? "" : cdo ? " -- not read" : " -- no default object yet");
+    }
+    int have = g_loc[i].have;
+    if (have) strncpy_s(out, out_sz, g_loc[i].text, _TRUNCATE);
+    ReleaseSRWLockExclusive(&g_loc_lock);
+    return have;
+}
+
+// Every [section] key=value line of a localization file, in order, to `fn`;
+// the value unquoted, in place. `fn` returns 0 to stop. 0 when the file
+// cannot be read.
+typedef int (*LocLineFn)(const wchar_t* section, const wchar_t* key, const wchar_t* value,
+                         void* ctx);
+
+static int loc_each(const char* root, const char* lang, const char* package, LocLineFn fn,
+                    void* ctx)
+{
+    char ext[8];
+    size_t i = 0;
+    for (; lang[i] && i + 1 < sizeof ext; i++)
+        ext[i] = (char)(lang[i] >= 'A' && lang[i] <= 'Z' ? lang[i] + 32 : lang[i]);
+    ext[i] = 0;
+    char path[MAX_PATH];
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%sXComGame\\Localization\\%s\\%s.%s",
+                root, lang, package, ext);
+    FILE* f = NULL;
+    if (fopen_s(&f, path, "rb") || !f) return 0;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size < 2 || size > 16 * 1024 * 1024) { fclose(f); return 0; }
+    wchar_t* buf = (wchar_t*)malloc((size_t)size + 2);
+    if (!buf) { fclose(f); return 0; }
+    size_t got = fread(buf, 1, (size_t)size, f);
+    fclose(f);
+    buf[got / 2] = 0;
+
+    wchar_t section[128] = L"";
+    wchar_t* p = buf;
+    if (*p == 0xFEFF) p++;
+    int go = 1;
+    while (*p && go) {
+        wchar_t* line = p;
+        while (*p && *p != '\n') p++;
+        wchar_t* end = p;
+        if (*p) p++;
+        if (end > line && end[-1] == '\r') end--;
+        while (line < end && (*line == ' ' || *line == '\t')) line++;
+        if (line >= end || *line == ';') continue;
+        if (*line == '[') {
+            wchar_t* close = line + 1;
+            while (close < end && *close != ']') close++;
+            size_t n = (size_t)(close - line - 1);
+            if (n >= 128) n = 127;
+            wmemcpy(section, line + 1, n);
+            section[n] = 0;
+            continue;
+        }
+        wchar_t* eq = line;
+        while (eq < end && *eq != '=') eq++;
+        if (eq >= end) continue;
+        wchar_t* kend = eq;
+        while (kend > line && (kend[-1] == ' ' || kend[-1] == '\t')) kend--;
+        wchar_t* v = eq + 1;
+        while (v < end && (*v == ' ' || *v == '\t')) v++;
+        // A quoted value is the text between its quotes.
+        if (v < end && *v == '"') {
+            v++;
+            wchar_t* q = end;
+            while (q > v && q[-1] != '"') q--;
+            if (q > v) end = q - 1;
+        }
+        *end = 0;
+        wchar_t keep = *kend;
+        *kend = 0;
+        go = fn(section, line, v, ctx);
+        *kend = keep;
+    }
+    free(buf);
+    return 1;
+}
+
+typedef struct {
+    const wchar_t* section;
+    const wchar_t* key;
+    char*          out;
+    size_t         out_sz;
+    int            found;
+} LocFind;
+
+static int loc_find(const wchar_t* section, const wchar_t* key, const wchar_t* value, void* ctx)
+{
+    LocFind* f = (LocFind*)ctx;
+    if (_wcsicmp(section, f->section) != 0 || _wcsicmp(key, f->key) != 0) return 1;
+    f->found = WideCharToMultiByte(CP_UTF8, 0, value, -1, f->out, (int)f->out_sz, NULL, NULL) > 0;
+    return 0;
+}
+
+int game_localize_from(const char* root, const char* lang, const char* package,
+                       const char* section, const char* key, char* out, size_t out_sz)
+{
+    if (!out || !out_sz) return 0;
+    out[0] = 0;
+    wchar_t wsec[128], wkey[128];
+    MultiByteToWideChar(CP_UTF8, 0, section, -1, wsec, 128);
+    MultiByteToWideChar(CP_UTF8, 0, key, -1, wkey, 128);
+    LocFind f = { wsec, wkey, out, out_sz, 0 };
+    loc_each(root, lang, package, loc_find, &f);
+    if (!f.found) out[0] = 0;
+    return f.found;
+}
+
+typedef struct {
+    const wchar_t* key_part;
+    const wchar_t* value_part;
+    char         (*sec)[128];
+    char         (*key)[128];
+    int            n, max;
+} LocLike;
+
+// Case-insensitive wcsstr.
+static int wcontains_ci(const wchar_t* hay, const wchar_t* needle)
+{
+    size_t n = wcslen(needle);
+    for (; *hay; hay++)
+        if (_wcsnicmp(hay, needle, n) == 0) return 1;
+    return 0;
+}
+
+static int loc_like(const wchar_t* section, const wchar_t* key, const wchar_t* value, void* ctx)
+{
+    LocLike* l = (LocLike*)ctx;
+    if (!wcontains_ci(key, l->key_part) || !wcontains_ci(value, l->value_part)) return 1;
+    WideCharToMultiByte(CP_UTF8, 0, section, -1, l->sec[l->n], 128, NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, key, -1, l->key[l->n], 128, NULL, NULL);
+    return ++l->n < l->max;
+}
+
+// The second pass: the lines the English file named, read from the player's.
+typedef struct {
+    char (*sec)[128];
+    char (*key)[128];
+    int    n;
+    char (*out)[256];
+    int    got;
+} LocPick;
+
+static int loc_pick(const wchar_t* section, const wchar_t* key, const wchar_t* value, void* ctx)
+{
+    LocPick* k = (LocPick*)ctx;
+    char s[128], kk[128];
+    WideCharToMultiByte(CP_UTF8, 0, section, -1, s, sizeof s, NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, key, -1, kk, sizeof kk, NULL, NULL);
+    for (int i = 0; i < k->n; i++)
+        if (!_stricmp(k->sec[i], s) && !_stricmp(k->key[i], kk)) {
+            if (WideCharToMultiByte(CP_UTF8, 0, value, -1, k->out[k->got], 256, NULL, NULL) > 0 &&
+                k->out[k->got][0])
+                k->got++;
+            break;
+        }
+    return k->got < k->n;
+}
+
+int game_localize_like_from(const char* root, const char* lang, const char* package,
+                            const char* key_part, const char* english_part,
+                            char (*out)[256], int max)
+{
+    static char sec[64][128], key[64][128];
+    if (max > 64) max = 64;
+    wchar_t wkey[64], wval[64];
+    MultiByteToWideChar(CP_UTF8, 0, key_part, -1, wkey, 64);
+    MultiByteToWideChar(CP_UTF8, 0, english_part, -1, wval, 64);
+    LocLike l = { wkey, wval, sec, key, 0, max };
+    if (!loc_each(root, "INT", package, loc_like, &l) || !l.n) return 0;
+    LocPick k = { sec, key, l.n, out, 0 };
+    loc_each(root, lang, package, loc_pick, &k);
+    return k.got;
+}
+
+// The game's folder: two above its exe (Binaries\Win32).
+static void game_root(char* root, size_t root_sz)
+{
+    GetModuleFileNameA(NULL, root, (DWORD)root_sz);
+    for (int up = 0; up < 3; up++) {
+        char* s = strrchr(root, '\\');
+        if (s) *s = 0;
+    }
+    strcat_s(root, root_sz, "\\");
+}
+
+int game_localize_like(const char* package, const char* key_part, const char* english_part,
+                       char (*out)[256], int max)
+{
+    char root[MAX_PATH];
+    game_root(root, sizeof root);
+    AcquireSRWLockExclusive(&g_loc_lock);
+    int n = game_localize_like_from(root, strings_lang(), package, key_part, english_part, out, max);
+    ReleaseSRWLockExclusive(&g_loc_lock);
+    return n;
+}
+
+#define LOCALIZE_MAX 32
+static struct {
+    char lang[8], package[48], section[64], key[64];
+    char text[256];
+    int  have;
+} g_localize[LOCALIZE_MAX];
+static int g_nlocalize;
+
+int game_localize(const char* package, const char* section, const char* key,
+                  char* out, size_t out_sz)
+{
+    if (!out || !out_sz) return 0;
+    out[0] = 0;
+    const char* lang = strings_lang();
+    AcquireSRWLockExclusive(&g_loc_lock);
+    int i = 0;
+    for (; i < g_nlocalize; i++)
+        if (!strcmp(g_localize[i].lang, lang) && !strcmp(g_localize[i].package, package) &&
+            !strcmp(g_localize[i].section, section) && !strcmp(g_localize[i].key, key)) break;
+    if (i == g_nlocalize) {
+        if (g_nlocalize == LOCALIZE_MAX) { ReleaseSRWLockExclusive(&g_loc_lock); return 0; }
+        g_nlocalize++;
+        strcpy_s(g_localize[i].lang, sizeof g_localize[i].lang, lang);
+        strcpy_s(g_localize[i].package, sizeof g_localize[i].package, package);
+        strcpy_s(g_localize[i].section, sizeof g_localize[i].section, section);
+        strcpy_s(g_localize[i].key, sizeof g_localize[i].key, key);
+        char root[MAX_PATH];
+        game_root(root, sizeof root);
+        g_localize[i].have = game_localize_from(root, lang, package, section, key,
+                                                g_localize[i].text, sizeof g_localize[i].text);
+        logf_("localize: %s %s.%s.%s = \"%s\"%s\n", lang, package, section, key,
+              g_localize[i].text, g_localize[i].have ? "" : " -- not found");
+    }
+    int have = g_localize[i].have;
+    if (have) strncpy_s(out, out_sz, g_localize[i].text, _TRUNCATE);
+    ReleaseSRWLockExclusive(&g_loc_lock);
+    return have;
 }
 
 int fault_note(EXCEPTION_POINTERS* ep, Fault* f)

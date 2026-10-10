@@ -18,6 +18,7 @@
 #include "help.h"
 #include "shot.h"
 #include "combat.h"
+#include "game.h"
 #include "history.h"
 #include "soldier.h"
 #include "info.h"
@@ -717,23 +718,76 @@ int main(void)
         check(!help_menu_is_open(), "so nothing is opened");
     }
 
+    // The game's localization files, read as Localize reads them -- where the
+    // install is the one these checks are written on, which has every
+    // language's files beside the English.
+    {
+        const char* root = "D:\\SteamLibrary\\steamapps\\common\\XCom-Enemy-Unknown\\XEW\\";
+        char t[256];
+        if (GetFileAttributesA("D:\\SteamLibrary\\steamapps\\common\\XCom-Enemy-Unknown\\XEW\\XComGame") !=
+            INVALID_FILE_ATTRIBUTES) {
+            printf("\nlocalization files\n");
+            check(game_localize_from(root, "INT", "XComStrategyGame", "UITellMeMore", "ExpandText",
+                                     t, sizeof t) && strcmp(t, "Expand Menu") == 0,
+                  "Localize: the English ExpandText");
+            check(game_localize_from(root, "DEU", "XComStrategyGame", "UITellMeMore", "ExpandText",
+                                     t, sizeof t) && t[0] && strcmp(t, "Expand Menu") != 0,
+                  "Localize: the German one, from the .deu");
+            printf("  DEU ExpandText = \"%s\"\n", t);
+            check(!game_localize_from(root, "INT", "XComStrategyGame", "UITellMeMore", "NoSuchKey",
+                                      t, sizeof t), "Localize: a missing key");
+
+            // The evac objectives, found by their English text and read in
+            // the player's language (where.c, evac_objective_open).
+            static char evac[64][256];
+            static const char* const langs[] = { "INT", "DEU", "RUS", "FRA" };
+            for (int k = 0; k < 4; k++) {
+                ULONGLONG t0 = GetTickCount64();
+                int n = game_localize_like_from(root, langs[k], "XComGame", "Obj", "EVAC", evac, 64);
+                n += game_localize_like_from(root, langs[k], "XComStrategyGame", "Obj", "EVAC",
+                                             evac + n, 64 - n);
+                printf("  %s: %d evac objectives in %llu ms, e.g. \"%s\"\n", langs[k], n,
+                       GetTickCount64() - t0, n ? evac[n - 1] : "");
+                check(n >= 8, "the game's evac objectives, in each language");
+            }
+            // A German objective as drawn is recognised as one of them.
+            int n = game_localize_like_from(root, "DEU", "XComStrategyGame", "Obj", "EVAC", evac, 64);
+            mission_reset();
+            mission_add("obj01", "", evac[n - 1], 1);
+            int hit = 0;
+            for (int i = 0; i < n; i++) hit |= mission_open_has(evac[i]);
+            check(hit, "a German evac objective is matched");
+            mission_reset();
+            mission_add("obj01", "", "Eliminate all EXALT forces.", 1);
+            hit = 0;
+            for (int i = 0; i < n; i++) hit |= mission_open_has(evac[i]);
+            check(!hit, "and another objective is not");
+            mission_reset();
+        }
+    }
+
     // Floating combat text, as it arrives with the markup stripped.
     printf("\ncombat narration\n");
     {
         char say[COMBAT_MAX_TEXT];
-        check(combat_describe("Chryssalid", "6", 1, say, sizeof say) &&
+        check(combat_describe("Chryssalid", "6", 1, "CRITICAL!", say, sizeof say) &&
               strcmp(say, "Chryssalid, 6 damage.") == 0, "a damage number");
-        check(combat_describe("Chryssalid", "6 CRITICAL!", 1, say, sizeof say) &&
+        check(combat_describe("Chryssalid", "6 CRITICAL!", 1, "CRITICAL!", say, sizeof say) &&
               strcmp(say, "Chryssalid, 6 damage, critical.") == 0, "a critical hit");
-        check(combat_describe("", "4", 1, say, sizeof say) &&
+        check(combat_describe("Chryssalid", "6 KRITISCH!", 1, "KRITISCH!", say, sizeof say) &&
+              strcmp(say, "Chryssalid, 6 damage, critical.") == 0,
+              "a critical hit, in the game's own word for it");
+        check(combat_describe("Chryssalid", "6 KRITISCH!", 1, "CRITICAL!", say, sizeof say) &&
+              strcmp(say, "Chryssalid, 6 damage.") == 0, "not by the English word");
+        check(combat_describe("", "4", 1, "CRITICAL!", say, sizeof say) &&
               strcmp(say, "4 damage.") == 0, "damage over nobody known");
-        check(combat_describe("Kwan", "Panicked!", 0, say, sizeof say) &&
+        check(combat_describe("Kwan", "Panicked!", 0, "CRITICAL!", say, sizeof say) &&
               strcmp(say, "Kwan, Panicked!") == 0, "a status keeps its own ending");
-        check(combat_describe("Wright, Disco", "Shredded", 0, say, sizeof say) &&
+        check(combat_describe("Wright, Disco", "Shredded", 0, "CRITICAL!", say, sizeof say) &&
               strcmp(say, "Wright, Disco, Shredded.") == 0, "and gets one if it has none");
-        check(combat_describe("Kwan", "Immune!", 1, say, sizeof say) &&
+        check(combat_describe("Kwan", "Immune!", 1, "CRITICAL!", say, sizeof say) &&
               strcmp(say, "Kwan, Immune!") == 0, "a damage call with no figure is said as text");
-        check(!combat_describe("Kwan", "   ", 0, say, sizeof say), "nothing to say");
+        check(!combat_describe("Kwan", "   ", 0, "CRITICAL!", say, sizeof say), "nothing to say");
         check(combat_hp(2, 8, say, sizeof say) && strcmp(say, "2 of 8 HP left.") == 0,
               "hit points after");
         check(combat_hp(0, 8, say, sizeof say) && strcmp(say, "No HP left.") == 0,
@@ -789,7 +843,7 @@ int main(void)
               "a switch, briefly");
         s.leader = 1; s.aim = 69; s.promotion = 1; s.buff = 1; s.debuff = 0;
         soldier_full(&s, say, sizeof say);
-        check(strcmp(say, "Ursula Wright, 'Disco'. Sergeant, heavy. Squad leader. 11 of 11 HP. "
+        check(strcmp(say, "Ursula Wright, 'Disco'. Sergeant, Heavy. Squad leader. 11 of 11 HP. "
                           "2 actions. Aim 69. Promotion available. Has bonuses.") == 0,
               "everything the HUD shows");
 
@@ -806,7 +860,7 @@ int main(void)
         soldier_from_stats(&s, mec, 3);
         s.actions = 1;
         soldier_full(&s, say, sizeof say);
-        check(strcmp(say, "Shawna O'Reilly. Squaddie, MEC trooper, gene modded. 1 action.") == 0,
+        check(strcmp(say, "Shawna O'Reilly. Squaddie, MEC Trooper, gene modded. 1 action.") == 0,
               "O' names and class suffixes");
         soldier_clear(&s);
         soldier_brief(&s, say, sizeof say);
@@ -1048,7 +1102,7 @@ int main(void)
         info_list_title(1, "BONUSES");
         info_list_title(2, "PENALTIES");
         info_summary(say, sizeof say);
-        check(strcmp(say, "Target information. Ursula Wright, 'Disco'. Sergeant, heavy. "
+        check(strcmp(say, "Target information. Ursula Wright, 'Disco'. Sergeant, Heavy. "
                           "Promotion available. Health: 11. Will: 50. Offense: 69. "
                           "Defense: 0. Abilities, 2.") == 0,
               "the soldier, with no shot and empty lists left out");
@@ -1207,7 +1261,7 @@ int main(void)
         info_stats(stats, 4);
         info_weapons("LMG, 1 shot left. Rocket Launcher, full.");
         info_summary(say, sizeof say);
-        check(strcmp(say, "Target information. Kelly Hudson. Corporal, heavy. Health: 10. "
+        check(strcmp(say, "Target information. Kelly Hudson. Corporal, Heavy. Health: 10. "
                           "Will: 53. Offense: 68. Defense: 20. LMG, 1 shot left. "
                           "Rocket Launcher, full.") == 0,
               "F1 says the weapons after the stats");

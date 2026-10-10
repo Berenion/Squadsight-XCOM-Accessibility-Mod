@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "countries.h"
+#include "strings.h"
 #include "game.h"
 #include "log.h"
 #include "cursor.h"
@@ -182,10 +183,15 @@ int countries_lines(char* lines, size_t width, int max)
             int blocks = panic == -1 ? 5 : panic + 1;
             if (blocks < 1) blocks = 1;
             if (blocks > 5) blocks = 5;
-            _snprintf_s(piece, sizeof piece, _TRUNCATE, "%s%s, panic %d of 5%s%s",
-                        any ? ". " : "", name[0] ? name : "Unknown country", blocks,
-                        country_bool(c, "m_bSatellite") ? ", satellite" : "",
-                        country_bool(c, "m_bSecretPact") ? ", left XCOM" : "");
+            size_t pw = 0;
+            piece[0] = 0;
+            if (any) { strcpy_s(piece, sizeof piece, ". "); pw = 2; }
+            tfmt_cat(piece, sizeof piece, &pw, COUNTRY_PANIC,
+                     name[0] ? name : T(COUNTRY_UNKNOWN), blocks);
+            if (country_bool(c, "m_bSatellite"))
+                tfmt_cat(piece, sizeof piece, &pw, COUNTRY_SATELLITE);
+            if (country_bool(c, "m_bSecretPact"))
+                tfmt_cat(piece, sizeof piece, &pw, COUNTRY_LEFT);
             put(out, width, &w, piece);
             any = 1;
             said++;

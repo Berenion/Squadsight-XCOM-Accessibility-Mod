@@ -28,6 +28,7 @@
 #include <ctype.h>
 #include "counters.h"
 #include "game.h"
+#include "strings.h"
 #include "log.h"
 #include "cursor.h"
 #include "props.h"
@@ -78,14 +79,11 @@ static void panel_text(void* panel, const char* name, FieldSlot* slot, char* out
         !read_fstring((const FString*)v, raw, sizeof raw))
         return;
     strip_markup(raw);
-    strncpy_s(out, out_sz, raw, _TRUNCATE);
-    size_t n = strlen(out);
-    while (n && (out[n - 1] == ' ' || out[n - 1] == ':')) out[--n] = 0;
-    int lower = 0;
-    for (size_t i = 0; i < n; i++)
-        if (islower((unsigned char)out[i])) lower = 1;
-    if (!lower)
-        for (size_t i = 1; i < n; i++) out[i] = (char)tolower((unsigned char)out[i]);
+    size_t n = strlen(raw);
+    while (n && (raw[n - 1] == ' ' || raw[n - 1] == ':')) raw[--n] = 0;
+    // In the game's language: not ASCII, so through text_*.
+    if (text_has_lower(raw)) strncpy_s(out, out_sz, raw, _TRUNCATE);
+    else text_sentence_case(raw, out, out_sz);
 }
 
 static int read_one(void* panel, Counter* c)
@@ -98,13 +96,17 @@ static int read_one(void* panel, Counter* c)
     panel_text(panel, "m_sSubLabel", &g_f_sub, sub, sizeof sub);
     panel_text(panel, "m_sCounter", &g_f_counter, count, sizeof count);
     if (!c->label[0] && !count[0]) return 0;
-    // MeldStats' m_strMeldLabel, with the canister's icon after it.
-    c->meld = _strnicmp(c->label, "Meld", 4) == 0;
+    // MeldStats' m_strMeldLabel, with the canister's icon after it -- read
+    // in the game's language ("MELD" in English), not matched as English.
+    char meld[64];
+    if (!game_loc("UISpecialMissionHUD_MeldStats", "m_strMeldLabel", 0, meld, sizeof meld))
+        strcpy_s(meld, sizeof meld, "Meld");
+    c->meld = text_find_ci(c->label, meld) == c->label;
     // An expired counter keeps its last number under the sub-label that says
     // why ("Lost", "Collected"); the Meld tutorial's shows the infinity sign.
     const char* value = count;
-    if (panel_bool(panel, "m_bExpired")) value = sub[0] ? "" : "Expired";
-    else if (panel_bool(panel, "m_bInfinity")) value = "No limit";
+    if (panel_bool(panel, "m_bExpired")) value = sub[0] ? "" : T(COUNTER_EXPIRED);
+    else if (panel_bool(panel, "m_bInfinity")) value = T(COUNTER_NO_LIMIT);
     _snprintf_s(c->detail, sizeof c->detail, _TRUNCATE, "%s%s%s", sub,
                 sub[0] && value[0] ? ", " : "", value);
     return 1;

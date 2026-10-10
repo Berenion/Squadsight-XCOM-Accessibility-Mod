@@ -1,6 +1,9 @@
 // The headquarters' facility menu, kept from its update stream. See hq.h.
 
 #include "hq.h"
+#include "soldier.h"
+#include "strings.h"
+#include "game.h"
 #include <windows.h>
 #include <string.h>
 #include <stdio.h>
@@ -103,8 +106,8 @@ int hq_facility_label(int id, char* out, size_t out_sz)
     if (id < 0 || id >= HQ_FACILITIES || !g_fac[id].known) return 0;
     const Facility* f = &g_fac[id];
     _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s", f->name,
-                f->unavailable ? ", unavailable" : "",
-                f->alert ? ", needs attention" : "");
+                f->unavailable ? T(HQ_UNAVAILABLE) : "",
+                f->alert ? T(HQ_NEEDS_ATTENTION) : "");
     return 1;
 }
 
@@ -112,25 +115,24 @@ const char* hq_pc_icon_label(const char* label)
 {
     if (!label || !label[0] || label[1]) return NULL;
     switch (label[0]) {
-        case '0': return "Previous soldier";
-        case '1': return "Next soldier";
-        case '2': return "Hologlobe";
-        case '3': return "Accept";
-        case '4': return "Back";
-        case '5': return "Pause";
+        case '0': return T(HQ_PC_PREV_SOLDIER);
+        case '1': return T(HQ_PC_NEXT_SOLDIER);
+        case '2': return T(HQ_PC_HOLOGLOBE);
+        case '3': return T(HQ_PC_ACCEPT);
+        case '4': return T(HQ_PC_BACK);
+        case '5': return T(HQ_PC_PAUSE);
         default:  return NULL;
     }
 }
 
+// The game's word for the rank its icon names, in the player's language
+// (soldier_rank_word).
 static const char* rank_word(const char* label)
 {
-    static const char* const ranks[] = { "Rookie", "Squaddie", "Corporal", "Sergeant",
-                                         "Lieutenant", "Captain", "Major", "Colonel" };
     if (!label) return "";
-    if (strncmp(label, "rank", 4) == 0 && label[4] >= '0' && label[4] <= '7' && !label[5])
-        return ranks[label[4] - '0'];
-    if (strncmp(label, "shiv", 4) == 0) return "SHIV";
-    return "";
+    if (strncmp(label, "rank", 4) == 0 && !(label[4] >= '0' && label[4] <= '7' && !label[5]))
+        return "";
+    return soldier_rank_word(label);
 }
 
 void hq_nick_quoted(const char* nick, char* out, size_t out_sz)
@@ -168,8 +170,8 @@ void hq_soldier_row(const char* name, const char* nick, const char* cls,
     _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s%s%s%s%s", who,
                 cls && *cls ? ", " : "", cls ? cls : "",
                 status && *status ? ", " : "", status ? status : "",
-                promotable ? ", promotion" : "",
-                disabled ? ", unavailable" : "");
+                promotable ? T(HQ_PROMOTION) : "",
+                disabled ? T(HQ_UNAVAILABLE) : "");
 }
 
 int hq_soldier_count(const char* label, char* out, size_t out_sz)
@@ -177,7 +179,7 @@ int hq_soldier_count(const char* label, char* out, size_t out_sz)
     int have = 0, of = 0;
     char tail;
     if (!label || sscanf_s(label, "%d/%d%c", &have, &of, &tail, 1) != 2) return 0;
-    _snprintf_s(out, out_sz, _TRUNCATE, "%d of %d soldiers available", have, of);
+    tfmt(out, out_sz, HQ_SOLDIERS_AVAILABLE, have, of);
     return 1;
 }
 
@@ -251,10 +253,10 @@ void hq_promo_select(int col, int row)
 static const char* promo_state_word(int state)
 {
     switch (state) {
-        case 0:  return "earned";
-        case 1:  return "choose now";
-        case 2:  return "to choose after";
-        case 3:  return "not reached";
+        case 0:  return T(HQ_PROMO_EARNED);
+        case 1:  return T(HQ_PROMO_CHOOSE_NOW);
+        case 2:  return T(HQ_PROMO_CHOOSE_AFTER);
+        case 3:  return T(HQ_PROMO_NOT_REACHED);
         default: return "";
     }
 }
@@ -279,9 +281,9 @@ void hq_promo_describe(const char* name, const char* desc, char* out, size_t out
     if (c && c->rows == 1) row = 0;
     int r_ok = c && row >= 0 && row < 2 && row < c->rows;
     _snprintf_s(what, sizeof what, _TRUNCATE, "%s%s%s",
-                name && *name ? name : "Unknown",
-                r_ok && c->chosen[row] ? ", chosen" : "",
-                c && c->rows > 1 ? (row == 0 ? ", right" : ", left") : "");
+                name && *name ? name : T(TXT_UNKNOWN),
+                r_ok && c->chosen[row] ? T(HQ_PROMO_CHOSEN) : "",
+                c && c->rows > 1 ? T(row == 0 ? HQ_PROMO_RIGHT : HQ_PROMO_LEFT) : "");
 
     _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s%s%s%s",
                 g_promo_title, g_promo_title[0] ? ". " : "",
@@ -297,10 +299,10 @@ void hq_abduction_line(const char* panic_label, int panic,
     if (!out || !out_sz) return;
     char r[128];
     copy_without_section(r, sizeof r, reward);     // "\xC2\xA7" "200" -> "200"
-    _snprintf_s(out, out_sz, _TRUNCATE, "%s %d of 5. %s %s. %s %s",
-                panic_label && *panic_label ? panic_label : "PANIC:", panic,
-                diff_label && *diff_label ? diff_label : "DIFFICULTY:", diff ? diff : "",
-                reward_label && *reward_label ? reward_label : "REWARD:", r);
+    tfmt(out, out_sz, HQ_ABDUCTION_LINE,
+                panic_label && *panic_label ? panic_label : T(HQ_PANIC_LABEL), panic,
+                diff_label && *diff_label ? diff_label : T(HQ_DIFFICULTY_LABEL), diff ? diff : "",
+                reward_label && *reward_label ? reward_label : T(HQ_REWARD_LABEL), r);
 }
 
 int hq_summary_factors(const char* raw, char* out, size_t out_sz)
@@ -491,19 +493,25 @@ int hq_status_line(char* out, size_t out_sz)
 
 // ---- the squad for a mission --------------------------------------------------
 
+// "SGT. Cesar Vargas" -> "Sergeant", rest "Cesar Vargas". The abbreviations
+// are the game's own in the player's language (m_aRankAbbr, by
+// ESoldierRanks), in any case; the English ones when they cannot be read.
 static const char* rank_from_abbrev(const char* name, const char** rest)
 {
-    static const struct { const char* ab; const char* word; } ranks[] = {
-        { "RK.", "Rookie" }, { "SQ.", "Squaddie" }, { "CPL.", "Corporal" },
-        { "SGT.", "Sergeant" }, { "LT.", "Lieutenant" }, { "CPT.", "Captain" },
-        { "MAJ.", "Major" }, { "COL.", "Colonel" },
+    static const char* const english[] = {
+        "Rk.", "Sq.", "Cpl.", "Sgt.", "Lt.", "Cpt.", "Maj.", "Col.",
     };
     *rest = name;
-    for (int i = 0; i < (int)(sizeof ranks / sizeof *ranks); i++) {
-        size_t n = strlen(ranks[i].ab);
-        if (_strnicmp(name, ranks[i].ab, n) == 0 && name[n] == ' ') {
+    for (int i = 0; i < (int)(sizeof english / sizeof *english); i++) {
+        char ab[32];
+        if (!game_loc("XGTacticalGameCore", "m_aRankAbbr", i, ab, sizeof ab))
+            strcpy_s(ab, sizeof ab, english[i]);
+        size_t n = strlen(ab);
+        if (n && text_find_ci(name, ab) == name && name[n] == ' ') {
             *rest = name + n + 1;
-            return ranks[i].word;
+            char r[16];
+            _snprintf_s(r, sizeof r, _TRUNCATE, "rank%d", i);
+            return soldier_rank_word(r);
         }
     }
     return NULL;
@@ -614,13 +622,18 @@ int hq_sit_lines(char lines[][HQ_SIT_TEXT], int max)
     int n = 0;
     st_lock();
     if (g_sit_doom >= 0 && n < max)
-        _snprintf_s(lines[n++], HQ_SIT_TEXT, _TRUNCATE, "Countries lost: %d", g_sit_doom);
+        tfmt(lines[n++], HQ_SIT_TEXT, HQ_COUNTRIES_LOST, g_sit_doom);
     for (int i = 0; i < HQ_SIT_COUNTRIES && n < max; i++) {
         const SitCountry* c = &g_sit[i];
         if (!c->known) continue;
-        _snprintf_s(lines[n++], HQ_SIT_TEXT, _TRUNCATE, "%s, panic %d of 5%s%s%s", c->name,
-                    c->panic, c->cash[0] ? ", funding " : "", c->cash,
-                    c->active ? "" : ", left XCOM");
+        {
+            size_t lw = 0;
+            char* line = lines[n++];
+            line[0] = 0;
+            tfmt_cat(line, HQ_SIT_TEXT, &lw, COUNTRY_PANIC, c->name, c->panic);
+            if (c->cash[0]) tfmt_cat(line, HQ_SIT_TEXT, &lw, HQ_FUNDING, c->cash);
+            if (!c->active) tfmt_cat(line, HQ_SIT_TEXT, &lw, COUNTRY_LEFT);
+        }
     }
     for (int i = 0; i < g_sit_nnews && n < max; i++)
         _snprintf_s(lines[n++], HQ_SIT_TEXT, _TRUNCATE, "%s%s%s",
@@ -630,10 +643,11 @@ int hq_sit_lines(char lines[][HQ_SIT_TEXT], int max)
     // its in-depth description, or "NONE" when there are none -- the brief is
     // empty then.
     if (g_sit_brief[0] && n < max)
-        _snprintf_s(lines[n++], HQ_SIT_TEXT, _TRUNCATE, "OBJECTIVES: %s", g_sit_brief);
-    if (g_sit_large[0] && n < max)
-        _snprintf_s(lines[n++], HQ_SIT_TEXT, _TRUNCATE, "%s%s",
-                    g_sit_brief[0] ? "" : "OBJECTIVES: ", g_sit_large);
+        tfmt(lines[n++], HQ_SIT_TEXT, HQ_OBJECTIVES_LINE, g_sit_brief);
+    if (g_sit_large[0] && n < max) {
+        if (g_sit_brief[0]) strncpy_s(lines[n++], HQ_SIT_TEXT, g_sit_large, _TRUNCATE);
+        else tfmt(lines[n++], HQ_SIT_TEXT, HQ_OBJECTIVES_LINE, g_sit_large);
+    }
     st_unlock();
     return n;
 }
@@ -668,17 +682,23 @@ static void base_tile_words(int x, int y, char* out, size_t out_sz)
     if (x < 0 || x >= HQ_BASE_W || y < 0 || y >= HQ_BASE_H) return;
     const char* name = g_base[x][y].name;
     const char* icon = g_base[x][y].icon;
-    // "STEAM." is the whole label on a vent; said once, as a vent.
-    int steam = _strnicmp(name, "STEAM", 5) == 0 && (!name[5] || name[5] == '.');
-    const char* ground = strcmp(icon, "Rock") == 0      ? "Rock"
-                       : strcmp(icon, "RockSteam") == 0 ? "Rock"
-                       : strcmp(icon, "Excavated") == 0 ? "Excavated, empty"
-                       : strcmp(icon, "BeingExcavated") == 0 ? "Being excavated"
-                       : strcmp(icon, "Construction") == 0   ? "Under construction"
-                       : NULL;
+    // "STEAM." is the whole label on a vent; said once, as a vent. The label
+    // is the game's XGBuildUI.m_strLabelSteam, in the player's language.
+    char steam_label[64];
+    if (!game_loc("XGBuildUI", "m_strLabelSteam", 0, steam_label, sizeof steam_label))
+        strcpy_s(steam_label, sizeof steam_label, "STEAM");
+    size_t sl = strlen(steam_label);
+    int steam = sl && text_find_ci(name, steam_label) == name &&
+                (!name[sl] || name[sl] == '.');
+    StrId ground = strcmp(icon, "Rock") == 0           ? HQ_GROUND_ROCK
+                 : strcmp(icon, "RockSteam") == 0      ? HQ_GROUND_ROCK
+                 : strcmp(icon, "Excavated") == 0      ? HQ_GROUND_EXCAVATED
+                 : strcmp(icon, "BeingExcavated") == 0 ? HQ_GROUND_EXCAVATING
+                 : strcmp(icon, "Construction") == 0   ? HQ_GROUND_BUILDING
+                 : TXT_EMPTY;
     if (strcmp(icon, "RockSteam") == 0) steam = 1;
-    if (ground) {
-        _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s%s", ground, steam ? ", steam vent" : "",
+    if (ground != TXT_EMPTY) {
+        _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s%s", T(ground), steam ? T(HQ_STEAM_VENT) : "",
                     name[0] && !steam ? ": " : "", name[0] && !steam ? name : "");
     } else {
         strncpy_s(out, out_sz, name[0] ? name : icon, _TRUNCATE);
@@ -694,8 +714,8 @@ void hq_base_cursor(int x, int y, const char* text, char* out, size_t out_sz)
     out[0] = 0;
     sat_put(out, out_sz, &w, tile);
     sat_put(out, out_sz, &w, t);
-    char pos[48];
-    _snprintf_s(pos, sizeof pos, _TRUNCATE, "Level %d, column %d.", y, x + 1);
+    char pos[96];
+    tfmt(pos, sizeof pos, HQ_BASE_POSITION, y, x + 1);
     sat_put(out, out_sz, &w, pos);
 }
 
@@ -804,13 +824,12 @@ int hq_sat_say(char* out, size_t out_sz)
     size_t w = 0;
     char part[HQ_SIT_TEXT + 96];
     if (!g_sat.said_count && g_sat.available >= 0) {
-        _snprintf_s(part, sizeof part, _TRUNCATE, "Satellites: %d available, %d of %d in orbit",
-                    g_sat.available, g_sat.in_orbit, g_sat.max);
+        tfmt(part, sizeof part, HQ_SATELLITES, g_sat.available, g_sat.in_orbit, g_sat.max);
         sat_put(out, out_sz, &w, part);
         g_sat.said_count = 1;
     }
     if (g_sat.panic > 0)
-        _snprintf_s(part, sizeof part, _TRUNCATE, "%s, panic %d of 5", g_sat.country, g_sat.panic);
+        tfmt(part, sizeof part, COUNTRY_PANIC, g_sat.country, g_sat.panic);
     else
         strncpy_s(part, sizeof part, g_sat.country, _TRUNCATE);
     sat_put(out, out_sz, &w, part);
@@ -821,9 +840,9 @@ int hq_sat_say(char* out, size_t out_sz)
     // (20:33) log, after "The EXALT base is not in North America": the United
     // States and South Africa read "Unknown cell presence" and no more.
     if (g_sat_index >= 0 && g_sat_index < SAT_COUNTRIES && g_sat_cleared[g_sat_index])
-        sat_put(out, out_sz, &w, "Cleared by intel");
+        sat_put(out, out_sz, &w, T(HQ_CLEARED_BY_INTEL));
     if (g_sat.button_on[0]) {
-        _snprintf_s(part, sizeof part, _TRUNCATE, "Enter: %s", g_sat.button[0]);
+        _snprintf_s(part, sizeof part, _TRUNCATE, "%s: %s", T(KEY_ENTER), g_sat.button[0]);
         sat_put(out, out_sz, &w, part);
     } else {
         // Covert ops draw the button greyed with the reason in place of its
@@ -971,7 +990,7 @@ void hq_cost_text(const char* raw, char* out, size_t out_sz)
                 while (e > run && out[e - 1] == ' ') e--;
                 if (red && e > run && !strchr(".!?", out[e - 1])) {
                     w = e;
-                    cost_puts(out, out_sz, &w, " (not enough)");
+                    cost_puts(out, out_sz, &w, T(HQ_NOT_ENOUGH));
                 }
                 red = 0;
             }
@@ -989,7 +1008,7 @@ void hq_cost_text(const char* raw, char* out, size_t out_sz)
                 r++;
                 digits++;
             }
-            if (digits) cost_puts(out, out_sz, &w, " credits");
+            if (digits) cost_puts(out, out_sz, &w, T(HQ_CREDITS));
             r--;
             continue;
         }
@@ -1024,7 +1043,7 @@ void hq_build_row(const char* raw_label, int quantity, const char* qty_label,
     strip_tags(raw_label ? raw_label : "", name, sizeof name);
     int red = raw_label && strstr(raw_label, "EE1C25") != NULL;
     int grey = raw_label && strstr(raw_label, "808080") != NULL;
-    char qty[64] = "";
+    char qty[128] = "";
     if (quantity > 0) {
         if (qty_label && *qty_label)
             _snprintf_s(qty, sizeof qty, _TRUNCATE, ", %s%s %d", qty_label,
@@ -1033,19 +1052,21 @@ void hq_build_row(const char* raw_label, int quantity, const char* qty_label,
             _snprintf_s(qty, sizeof qty, _TRUNCATE, ", %d", quantity);
     }
     _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s", name,
-                red ? ", unavailable" : grey ? ", completed" : "", qty);
+                red ? T(HQ_UNAVAILABLE) : grey ? T(HQ_COMPLETED) : "", qty);
 }
 
 void hq_queue_row(const char* desc, const char* qty, const char* eta,
                   char* out, size_t out_sz)
 {
     if (!out || !out_sz) return;
-    char done[64] = "";
+    char done[128] = "";
     const char* slash = qty ? strchr(qty, '/') : NULL;
-    if (slash && slash > qty && slash[1])
-        _snprintf_s(done, sizeof done, _TRUNCATE, ", %.*s of %s done",
-                    (int)(slash - qty), qty, slash + 1);
-    const char* when = !eta || !*eta ? "" : strcmp(eta, "--") == 0 ? "no engineers" : eta;
+    if (slash && slash > qty && slash[1]) {
+        char got[32];
+        _snprintf_s(got, sizeof got, _TRUNCATE, "%.*s", (int)(slash - qty), qty);
+        tfmt(done, sizeof done, HQ_N_OF_DONE, got, slash + 1);
+    }
+    const char* when = !eta || !*eta ? "" : strcmp(eta, "--") == 0 ? T(HQ_NO_ENGINEERS) : eta;
     _snprintf_s(out, out_sz, _TRUNCATE, "%s%s%s%s", desc ? desc : "", done,
                 *when ? ", " : "", when);
 }
@@ -1198,8 +1219,8 @@ int hq_report_pieces(char pieces[][HQ_REPORT_TEXT], int max)
         if (!*start) break;
     }
     for (int i = 0; i < g_rep_nresults && k < max; i++) {
-        _snprintf_s(pieces[k], HQ_REPORT_TEXT, _TRUNCATE, "%s%s", i ? "" : "Results: ",
-                    g_rep_results[i]);
+        _snprintf_s(pieces[k], HQ_REPORT_TEXT, _TRUNCATE, "%s%s%s", i ? "" : T(HQ_RESULTS),
+                    i ? "" : " ", g_rep_results[i]);
         rep_stop(pieces[k], HQ_REPORT_TEXT);
         k++;
     }
@@ -1225,7 +1246,10 @@ void hq_report_text(char* out, size_t out_sz)
     for (int i = 0; i < g_rep_nresults; i++) {
         strncpy_s(piece, sizeof piece, g_rep_results[i], _TRUNCATE);
         rep_stop(piece, sizeof piece);
-        put_piece(out, out_sz, &used, used ? (i ? " " : " Results: ") : "Results: ", piece);
+        char head[64];
+        _snprintf_s(head, sizeof head, _TRUNCATE, "%s%s%s", used ? " " : "", i ? "" : T(HQ_RESULTS),
+                    i ? "" : " ");
+        put_piece(out, out_sz, &used, head, piece);
     }
     if (g_rep_title[0] || g_rep_sub[0]) {
         rep_heading(piece, sizeof piece);

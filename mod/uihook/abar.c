@@ -1,6 +1,7 @@
 // The ability bar, kept from its update stream. See abar.h.
 
 #include "abar.h"
+#include "strings.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,14 +83,13 @@ int abar_feed(const AbarValue* v, int n)
 
 // "HUNKER DOWN" -> "Hunker Down". The bar sends names in capitals
 // (Caps(kAbility.strName)), and a screen reader may spell a short
-// all-capitals word out as letters.
-static void title_case(char* s)
+// all-capitals word out as letters. In the game's language, so not ASCII:
+// "\xC3\x9C" in a German name is as much a capital as "U" (text_title_case).
+static void title_case(char* s, size_t s_sz)
 {
-    int start = 1;
-    for (; *s; s++) {
-        if (*s >= 'A' && *s <= 'Z' && !start) *s = (char)(*s | 0x20);
-        start = *s == ' ' || *s == '-';
-    }
+    char t[128];
+    text_title_case(s, t, sizeof t);
+    strncpy_s(s, s_sz, t, _TRUNCATE);
 }
 
 // "T-2" -> 2; "x1" -> 1. The prefix is the game's (m_strCooldownPrefix,
@@ -108,10 +108,10 @@ static int slot_phrase(int i, char* piece, size_t piece_sz)
     piece[0] = 0;
     if (i < 0 || i >= g_count) return 0;
     const Slot* s = &g_slots[i];
-    char name[64];
+    char name[128];
     set(name, sizeof name, s->name[0] ? s->name : s->icon);
     if (!name[0]) return 0;
-    title_case(name);
+    title_case(name, sizeof name);
 
     int w = s->hotkey[0]
         ? _snprintf_s(piece, piece_sz, _TRUNCATE, "%s %s", s->hotkey, name)
@@ -120,17 +120,15 @@ static int slot_phrase(int i, char* piece, size_t piece_sz)
 
     // A cooldown is why an ability is unavailable, and says more than
     // "unavailable" does; so it stands in for it.
+    size_t used = (size_t)w;
     int cd = s->cooldown[0] ? trailing_number(s->cooldown) : -1;
     if (cd > 0)
-        _snprintf_s(piece + w, piece_sz - w, _TRUNCATE, ", cooldown %d turn%s",
-                    cd, cd == 1 ? "" : "s");
+        tpfmt_cat(piece, piece_sz, &used, ABAR_COOLDOWN, cd, cd);
     else if (!s->available)
-        _snprintf_s(piece + w, piece_sz - w, _TRUNCATE, ", unavailable");
-    w = (int)strlen(piece);
+        tfmt_cat(piece, piece_sz, &used, ABAR_UNAVAILABLE);
     int ch = s->charge[0] ? trailing_number(s->charge) : -1;
     if (ch > 0)
-        _snprintf_s(piece + w, piece_sz - w, _TRUNCATE, ", %d charge%s",
-                    ch, ch == 1 ? "" : "s");
+        tpfmt_cat(piece, piece_sz, &used, ABAR_CHARGES, ch, ch);
     return 1;
 }
 

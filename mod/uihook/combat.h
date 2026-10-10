@@ -22,8 +22,10 @@
 // "Chryssalid, 6 damage." / "Chryssalid, 6 damage, critical." /
 // "Kwan, Panicked!" -- `who` is the unit the message floats over, "" when it
 // is not known, and is then left out. `damage` when the message came through
-// DamageDisplay. Returns 0 when there is nothing to say.
-int combat_describe(const char* who, const char* text, int damage,
+// DamageDisplay. `crit_word` is the game's own mark of a critical hit in the
+// player's language (XGUnit.m_sCriticalHitDamageDisplay), NULL when unknown.
+// Returns 0 when there is nothing to say.
+int combat_describe(const char* who, const char* text, int damage, const char* crit_word,
                     char* out, size_t out_sz);
 
 // Whose turn it is, from the turn banner (UITurnOverlay).

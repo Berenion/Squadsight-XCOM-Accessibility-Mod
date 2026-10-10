@@ -1,6 +1,7 @@
 // The mission's objectives. See mission.h.
 
 #include "mission.h"
+#include "strings.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -35,14 +36,37 @@ static Objective* find(Objective* list, int n, const char* id)
     return NULL;
 }
 
-int mission_open_mentions(const char* word)
+int mission_open_mentions(const char* words)
 {
-    size_t wn = strlen(word);
-    for (int i = 0; i < g_nnow; i++) {
-        if (g_now[i].state != OPEN) continue;
-        for (const char* p = g_now[i].text; *p; p++)
-            if (_strnicmp(p, word, wn) == 0) return 1;
+    // The objectives are the game's text, in the player's language, so the
+    // words are a line of the mod's (WHERE_EVAC_WORDS), any of them, split
+    // by |, found in any case.
+    char list[256];
+    strncpy_s(list, sizeof list, words ? words : "", _TRUNCATE);
+    char* ctx = NULL;
+    for (char* w = strtok_s(list, "|", &ctx); w; w = strtok_s(NULL, "|", &ctx)) {
+        while (*w == ' ') w++;
+        if (!*w) continue;
+        for (int i = 0; i < g_nnow; i++)
+            if (g_now[i].state == OPEN && text_find_ci(g_now[i].text, w)) return 1;
     }
+    return 0;
+}
+
+int mission_open_has(const char* text)
+{
+    // The game's line may carry a <XGParam:.../> the drawn objective has
+    // filled in: the part before it is matched, if it is long enough to mean
+    // anything.
+    char piece[256];
+    strncpy_s(piece, sizeof piece, text ? text : "", _TRUNCATE);
+    char* tag = strchr(piece, '<');
+    if (tag) *tag = 0;
+    size_t n = strlen(piece);
+    while (n && (piece[n - 1] == ' ' || piece[n - 1] == '.')) piece[--n] = 0;
+    if (n < 6) return 0;
+    for (int i = 0; i < g_nnow; i++)
+        if (g_now[i].state == OPEN && text_find_ci(g_now[i].text, piece)) return 1;
     return 0;
 }
 
@@ -111,23 +135,30 @@ static void append(char* out, size_t out_sz, const char* s)
     if (used + 1 < out_sz) _snprintf_s(out + used, out_sz - used, _TRUNCATE, "%s", s);
 }
 
-// The text ends with a full stop, once.
+// The text ends with a full stop, once. The game's text, in its language:
+// a CJK full stop ends it as well (text_ends_sentence).
 static void sentence(char* out, size_t out_sz, const char* text)
 {
     append(out, out_sz, text);
-    size_t n = strlen(text);
-    if (n && text[n - 1] != '.' && text[n - 1] != '!' && text[n - 1] != '?')
-        append(out, out_sz, ".");
+    if (*text && !text_ends_sentence(text)) append(out, out_sz, T(TXT_STOP));
+}
+
+// The heading for `n` objectives: "Objective:" / "Objectives:".
+static void heading(char* out, size_t out_sz, StrId head, int n)
+{
+    char h[128];
+    tpfmt(h, sizeof h, head, n, n);
+    append(out, out_sz, h);
 }
 
 // One kind of change, or one state of the list: "Head: A. B." with the head
-// made plural by `heads` when there are several.
+// in the plural when there are several.
 static void group(char* out, size_t out_sz, const Objective* const* items, int n,
-                  const char* head, const char* heads)
+                  StrId head)
 {
     if (!n) return;
     if (out[0]) append(out, out_sz, " ");
-    append(out, out_sz, n == 1 ? head : heads);
+    heading(out, out_sz, head, n);
     append(out, out_sz, " ");
     for (int i = 0; i < n; i++) {
         if (i) append(out, out_sz, " ");
@@ -154,12 +185,12 @@ static void sorted(Objective* const* in, int n, const Objective** out)
 void mission_list(char* out, size_t out_sz)
 {
     out[0] = 0;
-    if (!g_nnow) { append(out, out_sz, "No objectives."); return; }
+    if (!g_nnow) { append(out, out_sz, T(MISSION_NONE)); return; }
     Objective* all[MISSION_MAX];
     const Objective* s[MISSION_MAX];
     for (int i = 0; i < g_nnow; i++) all[i] = &g_now[i];
     sorted(all, g_nnow, s);
-    append(out, out_sz, g_nnow == 1 ? "Objective:" : "Objectives:");
+    heading(out, out_sz, MISSION_OBJECTIVES, g_nnow);
     for (int i = 0; i < g_nnow; i++) {
         char text[sizeof s[i]->text];
         strncpy_s(text, sizeof text, s[i]->text, _TRUNCATE);
@@ -168,10 +199,10 @@ void mission_list(char* out, size_t out_sz)
         append(out, out_sz, " ");
         if (s[i]->state == DONE) {
             append(out, out_sz, text);
-            append(out, out_sz, ", complete.");
+            append(out, out_sz, T(MISSION_COMPLETE));
         } else if (s[i]->state == FAILED) {
             append(out, out_sz, text);
-            append(out, out_sz, ", failed.");
+            append(out, out_sz, T(MISSION_FAILED));
         } else {
             sentence(out, out_sz, text);
         }
@@ -209,10 +240,10 @@ void mission_changes(char* out, size_t out_sz)
             else if (!w) added[na++] = o;
             else if (strcmp(w->text, o->text) != 0) changed[nc++] = o;
         }
-        group(out, out_sz, added, na, "New objective:", "New objectives:");
-        group(out, out_sz, changed, nc, "Objective:", "Objectives:");
-        group(out, out_sz, failed, nf, "Objective failed:", "Objectives failed:");
-        group(out, out_sz, done, nd, "Objective complete:", "Objectives complete:");
+        group(out, out_sz, added, na, MISSION_NEW);
+        group(out, out_sz, changed, nc, MISSION_OBJECTIVES);
+        group(out, out_sz, failed, nf, MISSION_HEAD_FAILED);
+        group(out, out_sz, done, nd, MISSION_HEAD_COMPLETE);
     }
     memcpy(g_was, g_now, sizeof g_now);
     g_nwas = g_nnow;

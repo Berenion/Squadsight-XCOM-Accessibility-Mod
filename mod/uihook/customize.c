@@ -48,6 +48,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "customize.h"
+#include "strings.h"
 #include "colors.h"
 #include "game.h"
 #include "log.h"
@@ -78,7 +79,7 @@ static const char* const k_pal_names[PAL_COUNT] = {
     "EyeColor", "ArmorTint",
 };
 
-static const char* const k_races[4] = { "Caucasian", "African", "Asian", "Hispanic" };
+static const StrId k_races[4] = { CUST_CAUCASIAN, CUST_AFRICAN, CUST_ASIAN, CUST_HISPANIC };
 
 // XComLinearColorPaletteEntry: Primary then Secondary, each a LinearColor of
 // four floats.
@@ -256,21 +257,20 @@ int customize_describe(void* helper, int widget, const char* value,
     switch (widget) {
     case W_RACE:
         if (app[A_RACE] < 0 || app[A_RACE] > 3) return 0;
-        _snprintf_s(out, out_sz, _TRUNCATE, "%s", k_races[app[A_RACE]]);
+        strncpy_s(out, out_sz, T(k_races[app[A_RACE]]), _TRUNCATE);
         return 1;
 
     case W_HEAD: {
         int n = array_len(pawn, "PossibleHeads", &g_heads);
         if (n <= 0) return 0;
-        _snprintf_s(out, out_sz, _TRUNCATE, "%s of %d", value, n);
+        tfmt(out, out_sz, CUST_N_OF, value, n);
         return 1;
     }
 
     case W_HAIR: {
         int n = array_len(pawn, "PossibleHairs", &g_hairs);
         if (n < 0) return 0;
-        _snprintf_s(out, out_sz, _TRUNCATE, "%s%s of %d",
-                    app[A_HAIRCUT] == -1 ? "bald, " : "", value, n + 1);
+        tfmt(out, out_sz, app[A_HAIRCUT] == -1 ? CUST_BALD_N_OF : CUST_N_OF, value, n + 1);
         return 1;
     }
 
@@ -290,8 +290,7 @@ int customize_describe(void* helper, int widget, const char* value,
         for (int i = 0; i < n; i++)
             if (color_lightness(all[i].primary.r, all[i].primary.g, all[i].primary.b) > my_l)
                 rank++;
-        _snprintf_s(out, out_sz, _TRUNCATE, "%s, %s of %d",
-                    color_tone_word(rank, n), value, n);
+        tfmt(out, out_sz, CUST_WHAT_N_OF, color_tone_word(rank, n), value, n);
         return 1;
     }
 
@@ -303,10 +302,9 @@ int customize_describe(void* helper, int widget, const char* value,
         // The spinner counts what the hair allows (NumPossibleHairColors),
         // which is the palette's length unless the hair is a helmet.
         int shown = int_field(pawn, "NumPossibleHairColors", &g_nhaircol);
-        char nm[48];
+        char nm[96];
         color_name(e->primary.r, e->primary.g, e->primary.b, 1, nm, sizeof nm);
-        _snprintf_s(out, out_sz, _TRUNCATE, "%s, %s of %d", nm, value,
-                    shown > 0 ? shown : n);
+        tfmt(out, out_sz, CUST_WHAT_N_OF, nm, value, shown > 0 ? shown : n);
         return 1;
     }
 
@@ -314,19 +312,19 @@ int customize_describe(void* helper, int widget, const char* value,
         palettes_find();
         int n = g_content ? array_len(g_content, "FacialHairPresets", &g_presets) : -1;
         if (n > 0)
-            _snprintf_s(out, out_sz, _TRUNCATE, "%s%s of %d",
-                        app[A_FACIAL] == 0 ? "none, " : "", value, n);
+            tfmt(out, out_sz, app[A_FACIAL] == 0 ? CUST_NONE_N_OF : CUST_N_OF, value, n);
+        else if (app[A_FACIAL] == 0)
+            tfmt(out, out_sz, CUST_NONE_VALUE, value);
         else
-            _snprintf_s(out, out_sz, _TRUNCATE, "%s%s",
-                        app[A_FACIAL] == 0 ? "none, " : "", value);
+            strncpy_s(out, out_sz, value, _TRUNCATE);
         return 1;
     }
 
     case W_DECO: {
         int n = array_len(pawn, "PossibleArmorKits", &g_kits);
         if (n <= 0) return 0;
-        _snprintf_s(out, out_sz, _TRUNCATE, "%s, %s of %d",
-                    app[A_DECO] == -1 ? "standard" : "decorated", value, n);
+        tfmt(out, out_sz, CUST_WHAT_N_OF, T(app[A_DECO] == -1 ? CUST_STANDARD : CUST_DECORATED),
+             value, n);
         return 1;
     }
 
@@ -336,15 +334,13 @@ int customize_describe(void* helper, int widget, const char* value,
         const PaletteEntry* e = palette_entry(PAL_TINT, app[A_TINT], &n);
         if (!e) return 0;
         int shown = int_field(pawn, "NumPossibleArmorTints", &g_ntint);
-        char a[48], b[48];
+        char a[96], b[96];
         color_name(e->primary.r, e->primary.g, e->primary.b, 0, a, sizeof a);
         color_name(e->secondary.r, e->secondary.g, e->secondary.b, 0, b, sizeof b);
         if (strcmp(a, b) == 0)
-            _snprintf_s(out, out_sz, _TRUNCATE, "%s, %s of %d", a, value,
-                        shown > 0 ? shown : n);
+            tfmt(out, out_sz, CUST_WHAT_N_OF, a, value, shown > 0 ? shown : n);
         else
-            _snprintf_s(out, out_sz, _TRUNCATE, "%s with %s, %s of %d", a, b, value,
-                        shown > 0 ? shown : n);
+            tfmt(out, out_sz, CUST_TINT_N_OF, a, b, value, shown > 0 ? shown : n);
         return 1;
     }
     }

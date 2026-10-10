@@ -6,6 +6,7 @@
 #include <string.h>
 #include <math.h>
 #include "report.h"
+#include "strings.h"
 #include "where.h"
 #include "world.h"
 #include "units.h"
@@ -322,8 +323,26 @@ static FieldSlot g_pawn_ring, g_ring_mesh, g_ring_scale;
 static FieldSlot g_ring_kind[4];
 static const char* const RING_FIELD[4] = { "MedikitRing", "ArcThrowerRing",
                                            "CloseAndPersonalRing", "CivilianRescueRing" };
-static const char* const RING_SAY[4] = { "Medikit reaches %s.", "Arc Thrower reaches %s.",
-                                         "Close and Personal on %s.", "Rescues %s." };
+static const StrId RING_SAY[4] = { REPORT_RING_REACHES, REPORT_RING_REACHES,
+                                   REPORT_RING_ON, REPORT_RING_RESCUES };
+
+// What a ring is named for, as the game names it in the player's language:
+// the item (XLocalizedData.m_aItemNames[EItemType]) or the perk
+// (XComPerkManager.m_strPassiveTitle[EPerkType]). EItemType is numbered apart
+// in the two games (XGGameData: the Medikit 69 in EW, 76 in EU); the perk is
+// 34 in both. The English when it cannot be read.
+static void ring_owner(int kind, char* out, size_t out_sz)
+{
+    static const char* const english[3] = { "Medikit", "Arc Thrower", "Close and Personal" };
+    int ok = 0;
+    if (kind == 0)
+        ok = game_loc("XLocalizedData", "m_aItemNames", game_is_ew() ? 69 : 76, out, out_sz);
+    else if (kind == 1)
+        ok = game_loc("XLocalizedData", "m_aItemNames", game_is_ew() ? 73 : 80, out, out_sz);
+    else if (kind == 2)
+        ok = game_loc("XComPerkManager", "m_strPassiveTitle", 34, out, out_sz);
+    if (!ok && kind >= 0 && kind < 3) strncpy_s(out, out_sz, english[kind], _TRUNCATE);
+}
 
 // The ring a pawn shows, as a RING_FIELD index, and its radius; -1 when its
 // indicator is hidden or is not one of the four rings. `state` gets what was
@@ -368,8 +387,13 @@ static void ring_say(int kind, float radius, const float* loc, const float* here
 {
     float dx = here[0] - loc[0], dy = here[1] - loc[1];
     if (kind < 0 || !(radius > 0.0f) || dx * dx + dy * dy > radius * radius) return;
-    char one[160];
-    _snprintf_s(one, sizeof one, _TRUNCATE, RING_SAY[kind], name);
+    char one[320], owner[96] = "";
+    if (kind < 3) {
+        ring_owner(kind, owner, sizeof owner);
+        tfmt(one, sizeof one, RING_SAY[kind], owner, name);
+    } else {
+        tfmt(one, sizeof one, RING_SAY[kind], name);
+    }
     int w = _snprintf_s(out + *used, out_sz - *used, _TRUNCATE, "%s%s", *used ? " " : "", one);
     if (w > 0) *used += (size_t)w;
 }
@@ -429,7 +453,7 @@ static void tile_rings(const float* here, char* out, size_t out_sz)
 
 // Up to EXPOSE_NAMES names kept of `total`, as tile_names_counted says them.
 #define EXPOSE_NAMES 6
-static void names_counted(char (*names)[48], int total, char* out, size_t out_sz)
+static void names_counted(char (*names)[96], int total, char* out, size_t out_sz)
 {
     const char* p[TILE_NAMES_MAX];
     int n = total < EXPOSE_NAMES ? total : EXPOSE_NAMES;
@@ -446,13 +470,13 @@ static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
     r->flanks[0] = 0;
     r->height_over[0] = r->height_under[0] = 0;
     int nover = 0, nunder = 0;
-    char over_names[EXPOSE_NAMES][48], under_names[EXPOSE_NAMES][48];
+    char over_names[EXPOSE_NAMES][96], under_names[EXPOSE_NAMES][96];
     // The soldier who would stand here, and where: the cover point when the
     // tile has one, as the game asks it, else the tile itself.
     void* soldier = g_expose_ok ? soldier_unit() : NULL;
     const float* stand = has_cover ? cp->cover_location : here;
     int nflank = 0;
-    char flank_names[EXPOSE_NAMES][48];
+    char flank_names[EXPOSE_NAMES][96];
 
     void* world = cursor_world();
     void* squad = squad_player();
@@ -511,11 +535,11 @@ static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
                 int over = diff >= 192.0f, under = diff <= -192.0f;
                 if (over || under) {
                     int* cnt = over ? &nover : &nunder;
-                    char (*names)[48] = over ? over_names : under_names;
+                    char (*names)[96] = over ? over_names : under_names;
                     if (*cnt < EXPOSE_NAMES) {
                         UnitName* un = unit_by_unit(unit);
                         if (un) unit_label(un, names[*cnt], sizeof names[0]);
-                        else strcpy_s(names[*cnt], sizeof names[0], "an enemy");
+                        else strncpy_s(names[*cnt], sizeof names[0], T(REPORT_AN_ENEMY), _TRUNCATE);
                     }
                     (*cnt)++;
                 }
@@ -531,7 +555,7 @@ static void tile_exposure(int tx, int ty, int tz, const TileCoverPoint* cp,
                 if (nflank < EXPOSE_NAMES) {
                     UnitName* un = unit_by_unit(unit);
                     if (un) unit_label(un, flank_names[nflank], sizeof flank_names[0]);
-                    else strcpy_s(flank_names[nflank], sizeof flank_names[0], "an enemy");
+                    else strncpy_s(flank_names[nflank], sizeof flank_names[0], T(REPORT_AN_ENEMY), _TRUNCATE);
                 }
                 nflank++;
             }
@@ -665,12 +689,13 @@ int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     const char* zone = NULL;
     int waiting = 0;
     GUARDED("tile: capture zone", zone = capture_at(tx, ty, floor, &waiting), zone = NULL);
-    char zone_say[64] = "";
+    char zone_say[160] = "", evac_say[96] = "";
     if (zone)
         _snprintf_s(zone_say, sizeof zone_say, _TRUNCATE, "%s%s. ", zone,
-                    waiting ? ", not yet active" : "");
+                    waiting ? T(REPORT_NOT_YET_ACTIVE) : "");
+    if (evac) _snprintf_s(evac_say, sizeof evac_say, _TRUNCATE, "%s. ", T(SCAN_EVAC_ZONE));
     _snprintf_s(say, say_sz, _TRUNCATE, "%s%s%s%s%s", who, who[0] ? " " : "",
-                evac ? "Evac zone. " : "", zone_say, what);
+                evac_say, zone_say, what);
 
     // The cover point carries its own tile, which is the check on the one
     // asked about -- and on the layer this file worked out for smoke.

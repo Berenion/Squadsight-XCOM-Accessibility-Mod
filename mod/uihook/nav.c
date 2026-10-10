@@ -1,6 +1,8 @@
 // Tile-by-tile navigation: the part that does not touch the game.  See nav.h.
 
 #include "nav.h"
+#include <string.h>
+#include "strings.h"
 #include <stdio.h>
 
 static int g_active;
@@ -196,7 +198,7 @@ int nav_move(const NavGrid* g, int dx, int dy, char* say, size_t say_sz)
     if (ny >= g->num_y) ny = g->num_y - 1;
 
     if (nx == g_tx && ny == g_ty) {
-        if (say) _snprintf_s(say, say_sz, _TRUNCATE, "Edge");
+        if (say) strncpy_s(say, say_sz, T(NAV_EDGE), _TRUNCATE);
         return 0;
     }
     g_tx = nx;

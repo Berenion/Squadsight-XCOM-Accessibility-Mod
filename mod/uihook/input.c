@@ -1,6 +1,7 @@
 // Which keys stand in for which gamepad buttons, and on which screens.
 
 #include "input.h"
+#include "strings.h"
 #include <string.h>
 #include "log.h"
 
@@ -11,7 +12,7 @@ typedef struct {
     const char* screen;   // matched by prefix; the game appends _0, _1, ...
     int         from;     // the key actually pressed
     int         to;       // the command the screen is waiting for
-    const char* what;     // what it does, for the list 0 reads out
+    StrId       what;     // what it does, for the list 0 reads out; TXT_EMPTY for none
 } Remap;
 
 // Only a handful of keys exist in a menu at all, and which ones is decided by
@@ -35,8 +36,8 @@ typedef struct {
 // listens for it.
 static const Remap g_remaps[] = {
     // Ironman and the tutorial toggle live behind X; Second Wave behind Y.
-    { "UIShellDifficulty", FXS_KEY_1,   FXS_BUTTON_X,       "Advanced options" },
-    { "UIShellDifficulty", FXS_KEY_2,   FXS_BUTTON_Y,       "Second Wave" },
+    { "UIShellDifficulty", FXS_KEY_1,   FXS_BUTTON_X,       INPUT_ADVANCED },
+    { "UIShellDifficulty", FXS_KEY_2,   FXS_BUTTON_Y,       INPUT_SECOND_WAVE },
 
     // Starting the game is behind Start, which no keyboard has.  EW moved it
     // there: EU confirms on `case 300: case 511: OnDifficultyConfirm()`, and
@@ -50,12 +51,12 @@ static const Remap g_remaps[] = {
     // Harmless on EU, where 321 matches no case at all and 3 does nothing
     // either way, so the table stays one list rather than growing a build
     // column for a single row.
-    { "UIShellDifficulty", FXS_KEY_3,   FXS_BUTTON_START,   "Start the game" },
+    { "UIShellDifficulty", FXS_KEY_3,   FXS_BUTTON_START,   INPUT_START_GAME },
 
     // Every options tab after the first is behind the bumpers.  Tab cycles
     // forward and wraps, and is already proven to arrive; 1 goes back.
-    { "UIOptionsPCScreen", FXS_KEY_TAB, FXS_BUTTON_RBUMPER, "Next tab" },
-    { "UIOptionsPCScreen", FXS_KEY_1,   FXS_BUTTON_LBUMPER, "Previous tab" },
+    { "UIOptionsPCScreen", FXS_KEY_TAB, FXS_BUTTON_RBUMPER, INPUT_NEXT_TAB },
+    { "UIOptionsPCScreen", FXS_KEY_1,   FXS_BUTTON_LBUMPER, INPUT_PREV_TAB },
 
     // Saving is behind X, and only behind X (UIOptionsPCScreen, case 302 ->
     // SaveAndExit).  Escape is not an alternative: it runs
@@ -63,7 +64,7 @@ static const Remap g_remaps[] = {
     // "BACK TO OPTIONS" and nothing else.  Without this the keyboard can
     // change a setting and be told, correctly, that its only two choices are
     // to throw the change away or go back and look at it again.
-    { "UIOptionsPCScreen", FXS_KEY_2,   FXS_BUTTON_X,       "Save changes and exit" },
+    { "UIOptionsPCScreen", FXS_KEY_2,   FXS_BUTTON_X,       INPUT_SAVE_EXIT },
 
     // The base. UIStrategyHUD_FacilityMenu enters Mission Control on Y (303)
     // or Q, and the Gollop chamber on X (302) or E -- but the headquarters
@@ -76,8 +77,8 @@ static const Remap g_remaps[] = {
     // keystroke: UIStrategyHUD first, then the build queue, then the menu,
     // which is the one that acts. The submenus and the queue have no case
     // for 302 or 303, so the rewrite reaching them changes nothing.
-    { "UIStrategyHUD",     FXS_KEY_6,   FXS_BUTTON_Y,       "Mission Control" },
-    { "UIStrategyHUD",     FXS_KEY_7,   FXS_BUTTON_X,       "Gollop chamber" },
+    { "UIStrategyHUD",     FXS_KEY_6,   FXS_BUTTON_Y,       INPUT_MISSION_CONTROL },
+    { "UIStrategyHUD",     FXS_KEY_7,   FXS_BUTTON_X,       INPUT_GOLLOP },
 
     // The Situation Room's map (UISituationRoom.OnUnrealCommand): in covert
     // ops, X (302) or the letter X (538) accuses the selected country -- the
@@ -87,23 +88,23 @@ static const Remap g_remaps[] = {
     // objectives panels that see the key first have a case for a digit.
     // Accuse is a no-op unless the game drew its button (txtAccuse.iState
     // == 2), and the country readout says "1:" only then (hq_sat_say).
-    { "UISituationRoom",   FXS_KEY_1,   FXS_BUTTON_X,       "Raid on EXALT, when offered" },
-    { "UISituationRoom",   FXS_KEY_2,   FXS_BUTTON_Y,       "Intel scan" },
+    { "UISituationRoom",   FXS_KEY_1,   FXS_BUTTON_X,       INPUT_EXALT_RAID },
+    { "UISituationRoom",   FXS_KEY_2,   FXS_BUTTON_Y,       INPUT_INTEL_SCAN },
 
     // The loadout removes the item in the selected slot on X (302,
     // OnUnequip) or the letter X (538), and neither arrives from a keyboard
     // in the headquarters. The screen has no case for any digit.
-    { "UISoldierLoadout",  FXS_KEY_1,   FXS_BUTTON_X,       "Remove item" },
+    { "UISoldierLoadout",  FXS_KEY_1,   FXS_BUTTON_X,       INPUT_REMOVE_ITEM },
 
     // The hangar's ship list transfers the selected ship on X (302) or the
     // letter X (538), OnTransferInterceptor; no press of X reached it in the
     // log of 2026-09-27. The screen has no case for any digit.
-    { "UIShipList",        FXS_KEY_1,   FXS_BUTTON_X,       "Transfer ship" },
+    { "UIShipList",        FXS_KEY_1,   FXS_BUTTON_X,       INPUT_TRANSFER_SHIP },
 
     // A soldier's gene mods confirm the chosen mods on Y (303) or the letter
     // Y (539), ShowConfirmNotification; neither reaches the headquarters.
     // The screen has no case for any digit.
-    { "UISoldierGeneMods", FXS_KEY_1,   FXS_BUTTON_Y,       "Confirm gene mods" },
+    { "UISoldierGeneMods", FXS_KEY_1,   FXS_BUTTON_Y,       INPUT_CONFIRM_GENEMODS },
 
     // The squad for a mission. Launch is Y (303) on UISquadSelect, clearing a
     // slot X (302) on its squad list, stripping the squad's gear RB (331);
@@ -116,14 +117,14 @@ static const Remap g_remaps[] = {
     // CLEAR UNIT and "MAKE ITEMS AVAILABLE" is not added. So 0 lists them
     // only when the bar names them, and they were offered in the tutorial
     // doing nothing.
-    { "UISquadSelect",     FXS_KEY_1,   FXS_BUTTON_Y,       "Launch mission" },
-    { "UISquadSelect",     FXS_KEY_2,   FXS_BUTTON_X,       NULL },
-    { "UISquadSelect",     FXS_KEY_3,   FXS_BUTTON_RBUMPER, NULL },
+    { "UISquadSelect",     FXS_KEY_1,   FXS_BUTTON_Y,       INPUT_LAUNCH },
+    { "UISquadSelect",     FXS_KEY_2,   FXS_BUTTON_X,       TXT_EMPTY },
+    { "UISquadSelect",     FXS_KEY_3,   FXS_BUTTON_RBUMPER, TXT_EMPTY },
 
     // The debrief promotes the selected soldier on Y (303, OnAlternatePressed)
     // and nothing else; Up and Down pick among the promoted first, since a
     // mouse-mode screen starts with nobody selected. No digit has a case.
-    { "UIDebrief",         FXS_KEY_1,   FXS_BUTTON_Y,       "Promote" },
+    { "UIDebrief",         FXS_KEY_1,   FXS_BUTTON_Y,       INPUT_PROMOTE },
 
     // An order in Engineering (UIManufacturing): deleting one already in the
     // queue is X (302) and rush construction is Y (303), with the letters X
@@ -131,8 +132,8 @@ static const Remap g_remaps[] = {
     // No description: the screen's own bar names both only when they apply
     // (SetHelp 1 only for an order already placed, SetHelp 2 only when a
     // rush is possible), so 0 lists them only then.
-    { "UIManufacturing",   FXS_KEY_1,   FXS_BUTTON_X,       NULL },
-    { "UIManufacturing",   FXS_KEY_2,   FXS_BUTTON_Y,       NULL },
+    { "UIManufacturing",   FXS_KEY_1,   FXS_BUTTON_X,       TXT_EMPTY },
+    { "UIManufacturing",   FXS_KEY_2,   FXS_BUTTON_Y,       TXT_EMPTY },
 
     // The interception (UIInterceptionEngagement). Its switch has only the
     // gamepad's buttons: aim on X (302), dodge on A (300), track on Y (303),
@@ -140,10 +141,10 @@ static const Remap g_remaps[] = {
     // the whole fight was the mouse's. The digits arrive in the
     // headquarters and the screen has no case for them. Escape is left
     // alone: an abort one keystroke from "back" would be too easy to make.
-    { "UIInterceptionEngagement", FXS_KEY_1, FXS_BUTTON_X,  "Aim" },
-    { "UIInterceptionEngagement", FXS_KEY_2, FXS_BUTTON_A,  "Dodge" },
-    { "UIInterceptionEngagement", FXS_KEY_3, FXS_BUTTON_Y,  "Track" },
-    { "UIInterceptionEngagement", FXS_KEY_4, FXS_BUTTON_B,  "Abort" },
+    { "UIInterceptionEngagement", FXS_KEY_1, FXS_BUTTON_X,  INPUT_AIM },
+    { "UIInterceptionEngagement", FXS_KEY_2, FXS_BUTTON_A,  INPUT_DODGE },
+    { "UIInterceptionEngagement", FXS_KEY_3, FXS_BUTTON_Y,  INPUT_TRACK },
+    { "UIInterceptionEngagement", FXS_KEY_4, FXS_BUTTON_B,  INPUT_ABORT },
 };
 
 int input_remap(const char* screen, int cmd)
@@ -167,7 +168,7 @@ int input_added_key(const char* screen, int index, int* key, int* cmd,
         if (index--) continue;
         if (key)  *key  = r->from;
         if (cmd)  *cmd  = r->to;
-        if (what) *what = r->what;
+        if (what) *what = r->what == TXT_EMPTY ? NULL : T(r->what);
         return 1;
     }
     return 0;
@@ -192,8 +193,8 @@ const char* input_cmd_name(int cmd)
         case FXS_BUTTON_START:   return "Start";
         case FXS_BUTTON_LBUMPER: return "LB";
         case FXS_BUTTON_RBUMPER: return "RB";
-        case FXS_KEY_LEFT_SHIFT: return "Left Shift";
-        case FXS_KEY_TAB:        return "Tab";
+        case FXS_KEY_LEFT_SHIFT: return T(KEY_LEFT_SHIFT);
+        case FXS_KEY_TAB:        return T(KEY_TAB);
         case FXS_KEY_1:          return "1";
         case FXS_KEY_2:          return "2";
         case FXS_KEY_3:          return "3";

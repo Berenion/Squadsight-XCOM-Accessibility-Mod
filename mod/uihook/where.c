@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "where.h"
+#include "strings.h"
 #include "game.h"
 #include "units.h"
 #include "log.h"
@@ -599,6 +600,40 @@ void where_is(int tx, int ty, float floor, char* out, size_t out_sz)
 // to the zone.
 #define EVAC_REACH 144.0f
 
+// Whether a mission's objectives send the squad to the evac zone, in any of
+// three ways, the first that needs no words at all:
+//   1. (in evac_live) a Get Extraction Volume action has run: the mission's
+//      scripts asked for the zone, whatever the objectives say;
+//   2. an open objective is one of the game's own that name the zone -- the
+//      lines whose key has "Obj" and whose English text has "EVAC" in
+//      XComGame and XComStrategyGame ("m_strCovExObj2", "m_strDLC1_1Obj1",
+//      "m_strDLC2_1Obj3", ...), read in the player's language from its
+//      localization files, so German or Russian objectives are recognised
+//      with no translation of the mod's;
+//   3. an open objective has a word of WHERE_EVAC_WORDS (the mod's line,
+//      translated or not) or the English "evac", which several languages
+//      keep as it is.
+// Which one opened it is logged when it changes.
+static const char* evac_objective_open(void)
+{
+    static char lang[8];
+    static char texts[64][256];
+    static int  n = -1;
+    if (n < 0 || strcmp(lang, strings_lang()) != 0) {
+        strcpy_s(lang, sizeof lang, strings_lang());
+        ULONGLONG t0 = GetTickCount64();
+        n = game_localize_like("XComGame", "Obj", "EVAC", texts, 64);
+        n += game_localize_like("XComStrategyGame", "Obj", "EVAC", texts + n, 64 - n);
+        logf_("where: %d of the game's evac objectives read in %s (%llu ms)%s%s\n", n, lang,
+              GetTickCount64() - t0, n ? ", the first: " : "", n ? texts[0] : "");
+    }
+    for (int i = 0; i < n; i++)
+        if (mission_open_has(texts[i])) return "one of the game's evac objectives";
+    if (mission_open_mentions(T(WHERE_EVAC_WORDS))) return "the evac words";
+    if (mission_open_mentions("evac")) return "the English word evac";
+    return NULL;
+}
+
 // Whether the evac zone is one to speak of, and which dropship volumes make it:
 // their indices into g_evac, in `use`. The one a Get Extraction Volume action
 // picked when there is one, else every one whose box is on the map. Why none,
@@ -607,20 +642,25 @@ static int evac_live(int* use)
 {
     static int said = -1, said_n = -1;
     static void* said_pick;
+    static const char* said_by;
     int why = 0, n = 0;
     void* pick = NULL;
+    const char* by = NULL;
     CursorGrid g;
-    if (!where_volumes()) why = 1;
-    else if (!g_evac_n) why = 2;
-    else if (!mission_open_mentions("evac")) why = 3;
-    else if (!cursor_grid(&g)) why = 4;
-    else {
+    if (where_volumes() && g_evac_n) {
         for (int i = 0; i < g_evac_seq_n && !pick; i++) {
             const void* v;
             if (!objects_still(g_evac_seq[i], g_evac_seq_idx[i], &g_where_walk[2], 1)) continue;
             if (field_ptr(g_evac_seq[i], "ExtractionVolume", &g_seq_extraction, sizeof(void*), &v))
                 pick = *(void* const*)v;
         }
+        by = pick ? "Get Extraction Volume has run" : evac_objective_open();
+    }
+    if (!where_volumes()) why = 1;
+    else if (!g_evac_n) why = 2;
+    else if (!by) why = 3;
+    else if (!cursor_grid(&g)) why = 4;
+    else {
         for (int i = 0; i < g_evac_n; i++) {
             if (!objects_still(g_evac[i].v, g_evac[i].idx, &g_where_walk[1], 1)) continue;
             if (pick && g_evac[i].v != pick) continue;
@@ -630,9 +670,9 @@ static int evac_live(int* use)
         }
         if (!n) why = pick ? 5 : 6;
     }
-    if (why != said || n != said_n || pick != said_pick) {
+    if (why != said || n != said_n || pick != said_pick || by != said_by) {
         static const char* const text[] = { "", "no floor volumes", "no dropship volume",
-                                             "no open objective mentions evac", "no grid",
+                                             "no open objective sends the squad to it", "no grid",
                                              "the volume Get Extraction Volume picked is not "
                                              "on the map",
                                              "no dropship volume on the map" };
@@ -641,15 +681,16 @@ static int evac_live(int* use)
         } else {
             char name[64] = "?";
             object_name(g_evac[use[0]].v, name, sizeof name);
-            logf_("where: evac zone from %s%s, %d volume%s\n", name,
+            logf_("where: evac zone from %s%s, %d volume%s -- said because %s\n", name,
                   pick ? " (Get Extraction Volume picked it)"
                        : " and the rest on the map (no Get Extraction Volume has run)",
-                  n, n == 1 ? "" : "s");
+                  n, n == 1 ? "" : "s", by);
         }
     }
     said = why;
     said_n = n;
     said_pick = pick;
+    said_by = by;
     return why ? 0 : n;
 }
 
@@ -758,7 +799,7 @@ const char* capture_at(int tx, int ty, float floor, int* waiting)
         }
         if (st == 2) continue;
         *waiting = st == 0;
-        return seq == 0 ? "Encoder capture zone" : "Transmitter capture zone";
+        return T(seq == 0 ? WORLD_ENCODER_ZONE : WORLD_TRANSMITTER_ZONE);
     }
     return NULL;
 }
@@ -885,10 +926,9 @@ void floor_missed(int tx, int ty, float from, int found, float to, int dir,
         logf_("where: storey %d (floor number %d) has no tile with a floor\n", next, num);
         return;
     }
-    char where[64];
+    char where[128];
     tile_offset_text(nx - tx, ny - ty, where, sizeof where);
-    _snprintf_s(out, out_sz, _TRUNCATE, "Floor %d of %d does not reach this tile; nearest %s.",
-                next, g_where_bv_n, where);
+    tfmt(out, out_sz, WHERE_FLOOR_NOT_HERE, next, g_where_bv_n, where);
     logf_("where: F / C at %d, %d %s storey %d (floor number %d); nearest on %d, %d\n",
           tx, ty, found ? "passed" : "found nothing, missing", next, num, nx, ny);
 }

@@ -2,6 +2,7 @@
 // worth reading.
 
 #include "help.h"
+#include "strings.h"
 #include "input.h"
 #include <string.h>
 #include <stdio.h>
@@ -129,13 +130,13 @@ void help_set(void* obj, int slot, const char* label, const char* icon,
 static const char* key_for(const char* screen, int cmd)
 {
     switch (cmd) {
-        case FXS_BUTTON_A:     return "Enter";
-        case FXS_KEY_ENTER:    return "Enter";
-        case FXS_KEY_SPACEBAR: return "Space";
-        case FXS_BUTTON_B:     return "Escape";
-        case FXS_KEY_ESCAPE:   return "Escape";
-        case FXS_KEY_TAB:        return "Tab";
-        case FXS_KEY_LEFT_SHIFT: return "Left Shift";
+        case FXS_BUTTON_A:     return T(KEY_ENTER);
+        case FXS_KEY_ENTER:    return T(KEY_ENTER);
+        case FXS_KEY_SPACEBAR: return T(KEY_SPACE);
+        case FXS_BUTTON_B:     return T(KEY_ESCAPE);
+        case FXS_KEY_ESCAPE:   return T(KEY_ESCAPE);
+        case FXS_KEY_TAB:        return T(KEY_TAB);
+        case FXS_KEY_LEFT_SHIFT: return T(KEY_LEFT_SHIFT);
         case FXS_KEY_F1:         return "F1";
         default: break;
     }
@@ -205,8 +206,8 @@ static int collect(const char* screen)
             const char* key = key_for(screen, e->cmd);
             Choice* c = &g_choices[g_nchoices++];
             _snprintf_s(c->text, sizeof c->text, _TRUNCATE, "%s: %s%s",
-                        e->label, key ? key : "no key",
-                        e->disabled ? ", unavailable" : "");
+                        e->label, key ? key : T(HELP_NO_KEY),
+                        e->disabled ? T(HELP_UNAVAILABLE) : "");
             c->cmd = e->cmd;
             c->disabled = e->disabled;
         }
@@ -253,7 +254,7 @@ int help_announce(const char* screen, char* out, size_t out_sz)
         append(out, out_sz, g_choices[i].text);
 
     if (!found)
-        strncpy_s(out, out_sz, "This screen lists no commands.", _TRUNCATE);
+        strncpy_s(out, out_sz, T(HELP_NO_COMMANDS), _TRUNCATE);
     return found;
 }
 
@@ -292,8 +293,7 @@ int help_menu_open(const char* screen, char* out, size_t out_sz)
 // list this is.
 static void say_cursor(char* out, size_t out_sz)
 {
-    _snprintf_s(out, out_sz, _TRUNCATE, "%s. %d of %d",
-                g_choices[g_cursor].text, g_cursor + 1, g_nchoices);
+    tfmt(out, out_sz, LEARN_ITEM_POS, g_choices[g_cursor].text, g_cursor + 1, g_nchoices);
 }
 
 int help_menu_key(const char* screen, int cmd, int* fire,
@@ -329,15 +329,14 @@ int help_menu_key(const char* screen, int cmd, int* fire,
         case FXS_BUTTON_A: case FXS_KEY_ENTER: case FXS_KEY_SPACEBAR: {
             const Choice* c = &g_choices[g_cursor];
             if (c->disabled) {
-                _snprintf_s(out, out_sz, _TRUNCATE, "%s is unavailable", c->text);
+                tfmt(out, out_sz, HELP_IS_UNAVAILABLE, c->text);
                 return HELP_MENU_SPEAK;
             }
             if (!c->cmd) {
                 // A glyph with no command behind it -- movement, or one this
                 // table does not know. Saying so beats a keypress that
                 // silently does nothing.
-                _snprintf_s(out, out_sz, _TRUNCATE,
-                            "%s cannot be pressed from here", c->text);
+                tfmt(out, out_sz, HELP_CANNOT_PRESS, c->text);
                 return HELP_MENU_SPEAK;
             }
             if (fire) *fire = c->cmd;
@@ -347,12 +346,12 @@ int help_menu_key(const char* screen, int cmd, int* fire,
 
         case FXS_BUTTON_B: case FXS_KEY_ESCAPE:
             help_menu_close();
-            strncpy_s(out, out_sz, "Menu closed", _TRUNCATE);
+            strncpy_s(out, out_sz, T(HELP_MENU_CLOSED), _TRUNCATE);
             return HELP_MENU_SPEAK;
 
         case FXS_KEY_0:
             help_menu_close();
-            strncpy_s(out, out_sz, "Menu closed", _TRUNCATE);
+            strncpy_s(out, out_sz, T(HELP_MENU_CLOSED), _TRUNCATE);
             return HELP_MENU_SPEAK;
 
         default:

@@ -1,6 +1,7 @@
 // The shot readout.  See shot.h for the burst this composes.
 
 #include "shot.h"
+#include "strings.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -95,14 +96,17 @@ void shot_set_self(const char* text)
 
 // The flag's shield, in words. The flag draws one of four; an EU cover point
 // that is neither high nor low sends an empty string, which is left unsaid.
-static const char* cover_words(const char* shield)
+// `inside` for the words within a phrase ("54%, high cover") rather than at
+// the start of a sentence: their own lines, since whether the case changes
+// is the language's business (German keeps a noun's capital).
+static const char* cover_words(const char* shield, int inside)
 {
     if (!shield) return NULL;
-    if (strcmp(shield, "_highCover") == 0) return "High cover";
-    if (strcmp(shield, "_lowCover") == 0)  return "Low cover";
+    if (strcmp(shield, "_highCover") == 0) return T(inside ? SHOT_IN_HIGH_COVER : SHOT_HIGH_COVER);
+    if (strcmp(shield, "_lowCover") == 0)  return T(inside ? SHOT_IN_LOW_COVER : SHOT_LOW_COVER);
     // Hunker Down (TakeCover), or a unit whose cover is always the best.
-    if (strcmp(shield, "_megaCover") == 0) return "Hunkered down";
-    if (strcmp(shield, "_none") == 0)      return "No cover";
+    if (strcmp(shield, "_megaCover") == 0) return T(inside ? SHOT_IN_HUNKERED : SHOT_HUNKERED);
+    if (strcmp(shield, "_none") == 0)      return T(inside ? SHOT_IN_NO_COVER : SHOT_NO_COVER);
     return NULL;
 }
 
@@ -117,18 +121,17 @@ void shot_describe_target(const ShotTarget* t, char* out, size_t out_sz)
     // The place in the cycle only when there is a cycle: "1 of 1" says
     // nothing a lone name does not.
     if (t->count > 1 && t->index >= 0 && t->index < t->count)
-        _snprintf_s(piece, sizeof piece, _TRUNCATE, "%s, %d of %d",
-                    t->name, t->index + 1, t->count);
+        tfmt(piece, sizeof piece, TXT_NAME_N_OF, t->name, t->index + 1, t->count);
     else
         set(piece, sizeof piece, t->name);
     join(out, out_sz, piece);
 
     // The game sets the flanked state only on a unit that is in cover, so
     // it qualifies the cover rather than standing alone.
-    const char* cover = cover_words(t->cover);
+    const char* cover = cover_words(t->cover, 0);
     if (cover) {
         if (t->flanked == 1 && strcmp(t->cover, "_none") != 0)
-            _snprintf_s(piece, sizeof piece, _TRUNCATE, "%s, flanked", cover);
+            tfmt(piece, sizeof piece, SHOT_COVER_FLANKED, cover);
         else
             set(piece, sizeof piece, cover);
         join(out, out_sz, piece);
@@ -137,7 +140,7 @@ void shot_describe_target(const ShotTarget* t, char* out, size_t out_sz)
     // -1 is the flag hiding an enemy's health (the "show enemy health"
     // option off); nothing is drawn, so nothing is said.
     if (t->hp >= 0 && t->hp_max > 0) {
-        _snprintf_s(piece, sizeof piece, _TRUNCATE, "%d of %d HP", t->hp, t->hp_max);
+        tfmt(piece, sizeof piece, TXT_HP_OF, t->hp, t->hp_max);
         join(out, out_sz, piece);
     }
 }
@@ -156,27 +159,23 @@ void shot_list_detail(const ShotTarget* t, int chance, int squadsight,
     if (!out || out_sz == 0) return;
     out[0] = 0;
     if (!t) return;
-    char piece[64];
+    char piece[128];
 
     if (chance >= 0) {
         _snprintf_s(piece, sizeof piece, _TRUNCATE, "%d%%", chance);
         join_comma(out, out_sz, piece);
     }
-    const char* cover = cover_words(t->cover);
+    const char* cover = cover_words(t->cover, 1);
     if (cover) {
-        // Lower case inside a phrase; the words table is written for the
-        // start of a sentence.
-        set(piece, sizeof piece, cover);
-        piece[0] = (char)(piece[0] | 0x20);
-        join_comma(out, out_sz, piece);
+        join_comma(out, out_sz, cover);
         if (t->flanked == 1 && strcmp(t->cover, "_none") != 0)
-            join_comma(out, out_sz, "flanked");
+            join_comma(out, out_sz, T(SHOT_FLANKED));
     }
     if (t->hp >= 0 && t->hp_max > 0) {
-        _snprintf_s(piece, sizeof piece, _TRUNCATE, "%d of %d HP", t->hp, t->hp_max);
+        tfmt(piece, sizeof piece, TXT_HP_OF, t->hp, t->hp_max);
         join_comma(out, out_sz, piece);
     }
-    if (squadsight) join_comma(out, out_sz, "squadsight");
+    if (squadsight) join_comma(out, out_sz, T(SHOT_SQUADSIGHT));
 }
 
 int shot_note(const char* fn, const char* a, const char* b, int flag,
@@ -227,7 +226,7 @@ int shot_note(const char* fn, const char* a, const char* b, int flag,
         // Worth saying plainly. The panel says it by greying out, and a shot
         // that cannot be taken is the one thing a player must not learn by
         // pressing fire.
-        join(core, sizeof core, "Unavailable");
+        join(core, sizeof core, T(SHOT_UNAVAILABLE));
     } else {
         // Brief: the ability was named when it was picked, and a step of the
         // aim changes only the odds.

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "menus.h"
+#include "strings.h"
 #include "abar.h"
 #include "history.h"
 #include "game.h"
@@ -123,10 +124,7 @@ static void ability_cost_words(void* ability, char* out, size_t out_sz)
         cost = -1;
     }
     if (cost <= 0) return;
-    if (type == ABILITY_OVERWATCH)
-        _snprintf_s(out, out_sz, _TRUNCATE, " The reaction shot uses %d%% ammo.", cost);
-    else
-        _snprintf_s(out, out_sz, _TRUNCATE, " Uses %d%% ammo.", cost);
+    tfmt(out, out_sz, type == ABILITY_OVERWATCH ? MENU_REACTION_AMMO : MENU_USES_AMMO, cost);
 }
 
 static void abar_help(int index, char* out, size_t out_sz)
@@ -146,7 +144,7 @@ static void abar_help(int index, char* out, size_t out_sz)
     if (field_ptr(ability, "strHelp", &g_ability_help, sizeof(FString), &v) &&
         read_fstring((const FString*)v, out, out_sz))
         strip_markup(out);
-    char cost[64];
+    char cost[160];
     ability_cost_words(ability, cost, sizeof cost);
     if (cost[0]) {
         size_t used = strlen(out);
@@ -161,7 +159,7 @@ static void abar_say_entry(void)
     int i = abar_menu_index();
     abar_help(i, help, sizeof help);
     if (!abar_entry(i, help, say, sizeof say))
-        strncpy_s(say, sizeof say, "No abilities.", _TRUNCATE);
+        strncpy_s(say, sizeof say, T(MENU_NO_ABILITIES), _TRUNCATE);
     logf_("abar: %d of %d \"%s\"\n", i + 1, abar_count(), say);
     speech_cancel_pending();
     speech_say_now(say);
@@ -239,7 +237,7 @@ static void abar_menu_end(const char* why)
     g_menu_grace_until = GetTickCount64() + MENU_GRACE_MS;
     logf_("abar: menu closed (%s)\n", why);
     speech_cancel_pending();
-    speech_say_now("Closed.");
+    speech_say_now(T(TXT_CLOSED));
 }
 
 // When the menu last had its keys read. The poll runs from the battle
@@ -277,7 +275,7 @@ int abar_menu_poll(void)
         if (abar_count() <= 0) {
             abar_menu_close();
             speech_cancel_pending();
-            speech_say_now("No abilities.");
+            speech_say_now(T(MENU_NO_ABILITIES));
             return 0;
         }
         abar_say_entry();
@@ -292,7 +290,7 @@ int abar_menu_poll(void)
         if (i < 0 || i >= ABILITY_KEYS) {
             logf_("abar: %d has no number key -- cannot be picked\n", i + 1);
             speech_cancel_pending();
-            speech_say_now("No key for this ability.");
+            speech_say_now(T(MENU_NO_KEY));
             return 1;
         }
         // Handed to the hook, which rewrites this same keystroke. Silent: the
@@ -396,7 +394,7 @@ void review_end(const char* why)
     g_menu_grace_until = GetTickCount64() + MENU_GRACE_MS;
     logf_("review: closed (%s)\n", why);
     speech_cancel_pending();
-    speech_say_now("Closed.");
+    speech_say_now(T(TXT_CLOSED));
 }
 
 // Returns 1 while the list is open, having handled its keys.
