@@ -6,6 +6,12 @@
 // without the player installing anything.  Tolk is a 32-bit build of
 // dkager/tolk made by tools\build_tolk.bat; the game is 32-bit.
 //
+// Every line also goes to the screen reader's braille display where it has
+// one: Tolk_Output is speech plus braille (the NVDA, JAWS, System Access and
+// Window-Eyes drivers' Output call both; SuperNova's, ZoomText's and SAPI's
+// Braille are `return false` in Tolk), and the direct NVDA path sends
+// nvdaController_brailleMessage beside speakText.  SAPI has no display.
+//
 // Speaking never happens on the caller's thread.  The hook runs on the game's
 // UI thread, and both Tolk and SAPI can block; a stall there would show up as
 // a frame hitch.  Instead callers push onto a small ring buffer and a worker
@@ -33,6 +39,7 @@ typedef void(__cdecl* TolkUnloadFn)(void);
 typedef const wchar_t*(__cdecl* TolkDetectFn)(void);
 typedef int(__cdecl* TolkOutputFn)(const wchar_t*, int);
 typedef int(__cdecl* TolkSilenceFn)(void);
+typedef unsigned char(__cdecl* TolkHasBrailleFn)(void);
 
 static HMODULE       g_tolk;
 static TolkLoadFn    g_tolk_load;
@@ -58,11 +65,13 @@ static HMODULE g_tolk_driver[TOLK_DRIVER_COUNT];
 typedef unsigned long(__stdcall* NvdaTestFn)(void);
 typedef unsigned long(__stdcall* NvdaSpeakFn)(const wchar_t*);
 typedef unsigned long(__stdcall* NvdaCancelFn)(void);
+typedef unsigned long(__stdcall* NvdaBrailleFn)(const wchar_t*);
 
-static HMODULE      g_nvda;
-static NvdaTestFn   g_nvda_test;
-static NvdaSpeakFn  g_nvda_speak;
-static NvdaCancelFn g_nvda_cancel;
+static HMODULE       g_nvda;
+static NvdaTestFn    g_nvda_test;
+static NvdaSpeakFn   g_nvda_speak;
+static NvdaCancelFn  g_nvda_cancel;
+static NvdaBrailleFn g_nvda_braille;
 
 static ISpVoice*     g_voice;
 
@@ -101,6 +110,10 @@ static void speak_now(const wchar_t* text, int interrupt)
         if (g_nvda_test && g_nvda_test() != 0) return;
         if (interrupt && g_nvda_cancel) g_nvda_cancel();
         g_nvda_speak(text);
+        // speakText is speech only.  Tolk's NVDA driver sends both, so this
+        // does too, or a braille reader would lose the display whenever Tolk
+        // is missing or does not recognise NVDA.
+        if (g_nvda_braille) g_nvda_braille(text);
         return;
     }
     if (g_voice) {
@@ -137,7 +150,14 @@ static void choose_backend(void)
         const wchar_t* reader = g_tolk_detect();
         if (reader && reader[0]) {
             g_tolk_output = (TolkOutputFn)GetProcAddress(g_tolk, "Tolk_Output");
-            _snprintf_s(g_why, sizeof g_why, _TRUNCATE, "Tolk, speaking through %ls", reader);
+            // Whether the reader's driver can braille at all, not whether a
+            // display is connected -- that is the screen reader's business.
+            TolkHasBrailleFn has_braille =
+                (TolkHasBrailleFn)GetProcAddress(g_tolk, "Tolk_HasBraille");
+            _snprintf_s(g_why, sizeof g_why, _TRUNCATE, "Tolk, speaking through %ls, %s",
+                        reader, !has_braille ? "braille unknown"
+                                : has_braille() ? "braille on"
+                                : "no braille through this reader");
             return;
         }
         // Loaded but found no reader: Tolk would accept every line and say
@@ -151,7 +171,8 @@ static void choose_backend(void)
         unsigned long st = g_nvda_test();
         if (st == 0) {
             _snprintf_s(g_why + used, sizeof g_why - used, _TRUNCATE,
-                        "NVDA (controller client)");
+                        g_nvda_braille ? "NVDA (controller client), braille on"
+                                       : "NVDA (controller client), no braille export");
             return;
         }
         // The client loads fine whether or not NVDA is up; say which it
@@ -324,6 +345,7 @@ int speech_init(const char* dll_dir, char* why, size_t why_sz)
         g_nvda_test = (NvdaTestFn)GetProcAddress(g_nvda, "nvdaController_testIfRunning");
         g_nvda_speak = (NvdaSpeakFn)GetProcAddress(g_nvda, "nvdaController_speakText");
         g_nvda_cancel = (NvdaCancelFn)GetProcAddress(g_nvda, "nvdaController_cancelSpeech");
+        g_nvda_braille = (NvdaBrailleFn)GetProcAddress(g_nvda, "nvdaController_brailleMessage");
         if (!g_nvda_speak || !g_nvda_test) {
             g_nvda_speak = NULL;
             strcpy_s(nvda_note, sizeof nvda_note,
