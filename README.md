@@ -71,7 +71,7 @@ the shot screen.
 | Numpad `7` `9` `1` `3` | Step diagonally. |
 | Hold a direction | Glide across the map; the tile it stops on is described. The glide speed is in the options menu. |
 | Numpad `5`, or `Space` | Where the cursor is, and what is there. |
-| Numpad `0`, or the key right of `P` | Confirm: move the soldier to the cursor, or fire an aimed ability at it. |
+| Numpad `0`, or the key right of `P` | Confirm: move the soldier to the cursor. An aimed ability is fired with `Enter`, not with this key: while aiming, it cancels the aim. |
 | `F` / `C` | Move the cursor up / down a storey (the game's own keys). For a flying soldier, raise / lower the flight height instead; at the limit it says "Highest flight level." or "Lowest flight level." |
 
 **Flying.** Once a soldier in Archangel armour has used Toggle Flight, the

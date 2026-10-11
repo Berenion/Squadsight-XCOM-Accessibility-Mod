@@ -823,7 +823,9 @@ static ULONGLONG g_nav_confirm_at;      // opens nav_watch_input's window
 static void nav_confirm(void)
 {
     // Before the click: the path is read while it is still the one the click
-    // will perform (move.c). An aim fires rather than moves.
+    // will perform (move.c). During an aim there is no path: the click does
+    // not fire, ActiveUnit_Firing.RMouse's release cancels the aim
+    // (CancelTargetingAction); Enter is what fires.
     if (!g_nav_aim) {
         int mx = -1, my = -1, go = 1;
         if (!nav_target(&mx, &my)) mx = my = -1;
