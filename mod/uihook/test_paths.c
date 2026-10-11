@@ -161,6 +161,62 @@ static void test_library_walk(const char* sandbox)
     check(!gamepaths_root_holds_xcom(empty), "paths: an empty folder is not an install");
 }
 
+// ---------------------------------------------------------------- language --
+
+// The game is started in Steam's language for it, read from the manifest
+// (launcher.c, game_language).
+static void test_language(const char* sandbox)
+{
+    printf("\nthe game's language from Steam\n");
+
+    check(strcmp(gamepaths_language_code("german"), "DEU") == 0 &&
+          strcmp(gamepaths_language_code("English"), "INT") == 0 &&
+          strcmp(gamepaths_language_code("koreana"), "KOR") == 0 &&
+          strcmp(gamepaths_language_code("latam"), "ESN") == 0,
+          "language: Steam's names map to the engine's folders");
+    check(gamepaths_language_code("brazilian") == NULL,
+          "language: one the game does not ship maps to nothing");
+
+    char manifest[MAX_PATH], lang[64];
+    sprintf_s(manifest, sizeof manifest, "%s\\lang\\appmanifest_200510.acf", sandbox);
+    check(!gamepaths_steam_language(manifest, lang, sizeof lang),
+          "language: no manifest, no language");
+
+    // Shaped like Steam's: depots before the config blocks, the picked
+    // language already changed and the mounted one not yet.
+    make_file(manifest,
+              "\"AppState\"\n{\n\t\"appid\"\t\t\"200510\"\n"
+              "\t\"InstalledDepots\"\n\t{\n\t\t\"200511\"\n\t\t{\n"
+              "\t\t\t\"manifest\"\t\t\"1\"\n\t\t}\n\t}\n"
+              "\t\"UserConfig\"\n\t{\n\t\t\"language\"\t\t\"french\"\n\t}\n"
+              "\t\"MountedConfig\"\n\t{\n\t\t\"language\"\t\t\"german\"\n\t}\n}\n");
+    check(gamepaths_steam_language(manifest, lang, sizeof lang) && strcmp(lang, "german") == 0,
+          "language: the mounted language wins over the picked one");
+
+    make_file(manifest,
+              "\"AppState\"\n{\n\t\"UserConfig\"\n\t{\n\t\t\"language\"\t\t\"polish\"\n\t}\n}\n");
+    check(gamepaths_steam_language(manifest, lang, sizeof lang) && strcmp(lang, "polish") == 0,
+          "language: the picked one when nothing is mounted");
+
+    // The manifest is found from the root, two folders up.
+    char root[MAX_PATH], found[MAX_PATH];
+    sprintf_s(root, sizeof root, "%s\\lang\\common\\XCom-Enemy-Unknown", sandbox);
+    make_tree(root);
+    gamepaths_manifest_for(root, found, sizeof found);
+    check(gamepaths_steam_language(found, lang, sizeof lang) && strcmp(lang, "polish") == 0,
+          "language: the manifest is found from the install root");
+
+    // Each build has its own Localization folder.
+    char exe[MAX_PATH], loc[MAX_PATH];
+    sprintf_s(exe, sizeof exe, "%s\\XEW\\Binaries\\Win32\\XComEW.exe", root);
+    sprintf_s(loc, sizeof loc, "%s\\XEW\\XComGame\\Localization\\POL", root);
+    make_tree(loc);
+    check(gamepaths_has_language(exe, "POL"), "language: EW's files are found");
+    check(!gamepaths_has_language(exe, "DEU"), "language: a language with no files is not");
+    sprintf_s(exe, sizeof exe, "%s\\Binaries\\Win32\\XComGame.exe", root);
+    check(!gamepaths_has_language(exe, "POL"), "language: EU does not borrow EW's");
+}
+
 // ------------------------------------------------------------ this machine --
 
 // The file the launcher cares most about is the one the mod is still writing.
@@ -206,6 +262,17 @@ static void report_this_machine(void)
            game.eu_exe[0] ? game.eu_exe : "(not installed)",
            game.ew_exe[0] ? game.ew_exe : "(not installed)");
 
+    char manifest[MAX_PATH], lang[64];
+    gamepaths_manifest_for(game.root, manifest, sizeof manifest);
+    if (gamepaths_steam_language(manifest, lang, sizeof lang)) {
+        const char* code = gamepaths_language_code(lang);
+        printf("  Steam language: %s -> %s (EW files %s)\n", lang, code ? code : "(not shipped)",
+               code && game.ew_exe[0] && gamepaths_has_language(game.ew_exe, code)
+                   ? "present" : "absent");
+    } else {
+        printf("  Steam language: not found in %s\n", manifest);
+    }
+
     check(gamepaths_root_holds_xcom(game.root),
           "machine: the discovered root really holds a build");
     check(!game.eu_exe[0] || PathFileExistsA(game.eu_exe),
@@ -224,6 +291,7 @@ int main(void)
     test_vdf_pair();
     test_library_walk(sandbox);
     test_slurp_while_held(sandbox);
+    test_language(sandbox);
     report_this_machine();
 
     remove_tree(sandbox);

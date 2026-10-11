@@ -41,4 +41,21 @@ BOOL gamepaths_vdf_pair(const char* line, char* key, size_t key_sz,
 // Reads a whole small text file.  Caller frees.  NULL if it cannot be read.
 char* gamepaths_slurp(const char* path);
 
+// The game has no language setting of its own: it plays in whatever
+// -LANGUAGE= it is started with, and the publisher's launcher passes the
+// language Steam has for the game.  These let ours do the same.
+
+// The engine's folder name ("DEU") for one of Steam's language names
+// ("german"), or NULL for a language the game does not ship.
+const char* gamepaths_language_code(const char* steam_name);
+
+// Steam's language for the game, from its manifest.  FALSE if unreadable.
+BOOL gamepaths_steam_language(const char* manifest, char* lang, size_t lang_sz);
+
+// Where the manifest of the install at root would be.
+void gamepaths_manifest_for(const char* root, char* out, size_t out_sz);
+
+// TRUE when the build at exe_path has that language's files.
+BOOL gamepaths_has_language(const char* exe_path, const char* code);
+
 #endif

@@ -50,8 +50,10 @@
 // without -FROMLAUNCHER the game boots all the way to the main menu and then
 // closes itself about sixteen seconds later, which the engine log records only
 // as "Closing by request".  Every working session in this install's log
-// history was started with it.
-#define DEFAULT_ARGS "-FROMLAUNCHER -LANGUAGE=INT"
+// history was started with it.  The publisher's launcher also passes
+// -LANGUAGE=, which is added at launch from Steam's setting (game_language)
+// unless launcher.ini's Args already names one.
+#define DEFAULT_ARGS "-FROMLAUNCHER"
 
 // How long to wait for the process to appear, then for it to put a window up.
 // Both are generous: a cold start off a mechanical disk is slow, and waiting
@@ -658,6 +660,35 @@ static void adopt_steam_environment(void)
     SetEnvironmentVariableA("SteamGameId", XCOM_APPID);
 }
 
+// The language the game is started in.  The game has no setting for it: the
+// engine takes -LANGUAGE= from the command line, and falls back to the ini's
+// Language=INT -- so the old fixed -LANGUAGE=INT played every install in
+// English, whatever Steam said, and the mod's lang\<CODE>.txt never loaded.
+// Steam's choice is the manifest's; English when it cannot be read, is not a
+// language the game ships, or this build has no files for it.
+static void game_language(const Config* cfg, const char* exe_path, char* code, size_t code_sz)
+{
+    strcpy_s(code, code_sz, "INT");
+    char manifest[MAX_PATH], steam[64];
+    gamepaths_manifest_for(cfg->game.root, manifest, sizeof manifest);
+    if (!gamepaths_steam_language(manifest, steam, sizeof steam)) {
+        launcher_log("language: no Steam language in %s -- INT\n", manifest);
+        return;
+    }
+    const char* mapped = gamepaths_language_code(steam);
+    if (!mapped) {
+        launcher_log("language: Steam says %s, which the game does not ship -- INT\n", steam);
+        return;
+    }
+    if (!gamepaths_has_language(exe_path, mapped)) {
+        launcher_log("language: Steam says %s, but this build has no %s files -- INT\n",
+                     steam, mapped);
+        return;
+    }
+    strcpy_s(code, code_sz, mapped);
+    launcher_log("language: Steam says %s -- %s\n", steam, code);
+}
+
 static BOOL launch_and_inject(const Config* cfg, const char* exe_path, const char* exe_name)
 {
     char work_dir[MAX_PATH];
@@ -683,8 +714,17 @@ static BOOL launch_and_inject(const Config* cfg, const char* exe_path, const cha
 
         STARTUPINFOA si = { sizeof si };
         PROCESS_INFORMATION pi = { 0 };
-        char command[MAX_PATH + sizeof cfg->args + 8];
-        sprintf_s(command, sizeof command, "\"%s\" %s", exe_path, cfg->args);
+        char command[MAX_PATH + sizeof cfg->args + 32];
+        if (StrStrIA(cfg->args, "-LANGUAGE=")) {
+            launcher_log("language: launcher.ini's Args names it\n");
+            sprintf_s(command, sizeof command, "\"%s\" %s", exe_path, cfg->args);
+        } else {
+            char language[8];
+            game_language(cfg, exe_path, language, sizeof language);
+            sprintf_s(command, sizeof command, "\"%s\" %s -LANGUAGE=%s", exe_path,
+                      cfg->args, language);
+        }
+        launcher_log("launch: %s\n", command);
         if (!CreateProcessA(exe_path, command, NULL, NULL, FALSE, 0, NULL,
                             work_dir, &si, &pi)) {
             say_error("Could not start the game.\n\n%s\n\nWindows reported error %lu.",

@@ -59,6 +59,11 @@ without the mod.
 
 ## Language
 
+The game has no language option of its own: it plays in the language Steam has
+for it (right-click the game in the Steam library, Properties, Language). The
+launcher reads that setting and starts the game in it; a language Steam has not
+downloaded yet falls back to English.
+
 The mod follows the language the game is set to. Words it reads from the game
 (ranks, classes, button labels and the like) are always in that language. The
 mod's own lines are in English unless a translation for the game's language is

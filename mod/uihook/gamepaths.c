@@ -172,3 +172,87 @@ BOOL gamepaths_find(const char* override_root, GamePaths* out)
 
     return out->eu_exe[0] != 0 || out->ew_exe[0] != 0;
 }
+
+// ---------------------------------------------------------------- language --
+
+// Steam's names (the Steamworks API language codes, as the manifest stores
+// them) for the languages the game ships, against the engine's folder names
+// under XComGame\Localization. Latin American Spanish has no folder of its
+// own in either build, so it gets Spain's.
+static const struct { const char* steam; const char* code; } g_languages[] = {
+    { "english",  "INT" }, { "french",   "FRA" }, { "german",   "DEU" },
+    { "italian",  "ITA" }, { "spanish",  "ESN" }, { "latam",    "ESN" },
+    { "polish",   "POL" }, { "russian",  "RUS" }, { "japanese", "JPN" },
+    { "koreana",  "KOR" }, { "tchinese", "CHT" },
+};
+
+const char* gamepaths_language_code(const char* steam_name)
+{
+    for (size_t i = 0; i < sizeof g_languages / sizeof g_languages[0]; ++i)
+        if (_stricmp(steam_name, g_languages[i].steam) == 0) return g_languages[i].code;
+    return NULL;
+}
+
+// The manifest has "language" twice: under UserConfig, what the player picked
+// in the game's Properties, and under MountedConfig, what Steam has actually
+// installed. They differ while a change is still downloading, and then only
+// the mounted one has its files on disk, so that one is preferred. Neither is
+// nested deeper than one block, so the block a pair sits in is simply the
+// last key that stood alone on its line.
+BOOL gamepaths_steam_language(const char* manifest, char* lang, size_t lang_sz)
+{
+    char* text = gamepaths_slurp(manifest);
+    if (!text) return FALSE;
+
+    char block[64] = "", user[64] = "", mounted[64] = "";
+    char* next = NULL;
+    for (char* line = strtok_s(text, "\r\n", &next); line;
+         line = strtok_s(NULL, "\r\n", &next)) {
+        char key[64], value[64];
+        if (gamepaths_vdf_pair(line, key, sizeof key, value, sizeof value)) {
+            if (_stricmp(key, "language") != 0) continue;
+            if (_stricmp(block, "MountedConfig") == 0) strcpy_s(mounted, sizeof mounted, value);
+            else if (_stricmp(block, "UserConfig") == 0) strcpy_s(user, sizeof user, value);
+            continue;
+        }
+        const char* q = strchr(line, '"');
+        const char* end = q ? strchr(q + 1, '"') : NULL;
+        if (end && (size_t)(end - q - 1) < sizeof block) {
+            memcpy(block, q + 1, (size_t)(end - q - 1));
+            block[end - q - 1] = 0;
+        }
+    }
+    free(text);
+
+    const char* found = mounted[0] ? mounted : user;
+    if (!found[0]) return FALSE;
+    strcpy_s(lang, lang_sz, found);
+    return TRUE;
+}
+
+// The manifest sits two folders above the install: the root is
+// <library>\steamapps\common\<installdir>, the manifest
+// <library>\steamapps\appmanifest_*.acf. A GameRoot override outside a Steam
+// library has none.
+void gamepaths_manifest_for(const char* root, char* out, size_t out_sz)
+{
+    sprintf_s(out, out_sz, "%s\\..\\..\\appmanifest_%s.acf", root, XCOM_APPID);
+}
+
+// Each build has its own XComGame folder beside its Binaries: the root's for
+// Enemy Unknown, XEW's for Enemy Within, and they do not ship the same
+// languages (this install's EU has INT alone, its EW all ten).
+BOOL gamepaths_has_language(const char* exe_path, const char* code)
+{
+    char dir[MAX_PATH];
+    strcpy_s(dir, sizeof dir, exe_path);
+    for (int up = 0; up < 3; ++up) {                 // the exe, Win32, Binaries
+        char* slash = strrchr(dir, '\\');
+        if (!slash) return FALSE;
+        *slash = 0;
+    }
+    char probe[MAX_PATH];
+    sprintf_s(probe, sizeof probe, "%s\\XComGame\\Localization\\%s", dir, code);
+    DWORD attr = GetFileAttributesA(probe);
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
+}
