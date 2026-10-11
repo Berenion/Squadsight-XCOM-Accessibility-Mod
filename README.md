@@ -28,6 +28,35 @@ known.
 To uninstall, use the launcher's **Uninstall** button or Windows' list of
 installed apps.
 
+### Manual install
+
+The setup is optional. The launcher runs from any folder and uses the mod files
+beside it:
+
+1. From the
+   [latest release](https://github.com/Berenion/Squadsight-XCOM-Accessibility-Mod/releases/latest),
+   download these files into one folder of your choice: `launcher.exe`,
+   `xcom_uihook.dll`, `inject.exe`, `ekgbeep.wav`, `alienbeat.wav`,
+   `doorsound.wav`, `windowsound.wav`, `CREDITS.md`,
+   `nvdaControllerClient32.dll`, `Tolk.dll`, `SAAPI32.dll` and `dolapi32.dll`.
+2. With Steam running, start `launcher.exe` and choose the game. To skip that
+   choice, start it with `/ew` (Enemy Within) or `/eu` (Enemy Unknown).
+
+Nothing is copied into the game's folder: the mod is loaded into the game each
+time the launcher starts it, so starting the game straight from Steam runs it
+without the mod.
+
+- The launcher still checks for updates. To turn that off, start it with
+  `/noupdate`, or put a `launcher.ini` beside it containing
+  `[launcher]` and, on the next line, `CheckUpdates=0`.
+- If the launcher cannot find the game, put the game's folder in that
+  `launcher.ini` as `GameRoot=D:\path\to\XCom-Enemy-Unknown`, under
+  `[launcher]`.
+- The launcher's **Install** button turns a manual copy into a normal install,
+  with the desktop shortcut and the entry in Windows' list of installed apps.
+- A translation from a release, `lang_<CODE>.txt`, goes in a `lang` folder
+  beside the mod as `<CODE>.txt`.
+
 ## Language
 
 The mod follows the language the game is set to. Words it reads from the game
