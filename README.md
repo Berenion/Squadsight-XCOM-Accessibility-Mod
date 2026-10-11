@@ -2,10 +2,16 @@
 
 An accessibility mod for XCOM: Enemy Unknown and XCOM: Enemy Within. It reads the
 game's screens through your screen reader (NVDA, JAWS and others through Tolk, or
-SAPI), plays audio cues for walls, doors, windows and units, and lets you play the
-tactical map from the keyboard. Enemy Within is the main target.
+SAPI), and shows every line on your braille display as well. It plays audio cues
+for walls, doors, windows and units, and lets you play the tactical map from the
+keyboard.
 
 ## Installing
+
+The mod works only with the **Steam** versions of the game. It has been tested
+mostly with **Enemy Within**. Enemy Unknown is supported too, but it may still
+have bugs; please report any you find, as they are usually easy to fix once
+known.
 
 1. Download
    [Squadsight-Setup.exe](https://github.com/Berenion/Squadsight-XCOM-Accessibility-Mod/releases/latest/download/Squadsight-Setup.exe)
@@ -22,10 +28,31 @@ tactical map from the keyboard. Enemy Within is the main target.
 To uninstall, use the launcher's **Uninstall** button or Windows' list of
 installed apps.
 
+## Language
+
+The mod follows the language the game is set to. Words it reads from the game
+(ranks, classes, button labels and the like) are always in that language. The
+mod's own lines are in English unless a translation for the game's language is
+installed; a translation is a `lang\<CODE>.txt` file beside the mod. None are
+included yet.
+
 ## Keys
 
 **Num Lock must be on.** With it off, Windows reports the numpad as the arrows,
 Home, End, Page Up and Page Down, and the mod reads it wrong.
+
+**Without a numpad**, a mission's numpad keys have stand-ins, given next to each
+key below: the arrows, `Space`, and four keys beside `P` and `L`. Those four are
+found by their position, not by what they type, so they work on any keyboard
+layout:
+
+- the key right of `P` (`[` on a US layout) for numpad `0`;
+- the key two right of `P` (`]` on US) for numpad `.`;
+- the key right of `L` (`'` on US) for numpad `+`;
+- the key two right of `L` (`\` on US) for numpad `-`.
+
+The arrows only move straight; diagonal steps need the numpad. Enter still opens
+the shot screen.
 
 ### In menus and at the base
 
@@ -40,12 +67,19 @@ Home, End, Page Up and Page Down, and the mod reads it wrong.
 
 | Key | What it does |
 |---|---|
-| Numpad `8` `2` `4` `6` | Step the cursor one tile north, south, west, east, and say what is there: cover, how far a move is, who sees it, flanks. |
+| Numpad `8` `2` `4` `6`, or the arrows | Step the cursor one tile north, south, west, east, and say what is there: cover, how far a move is, who sees it, flanks. |
 | Numpad `7` `9` `1` `3` | Step diagonally. |
 | Hold a direction | Glide across the map; the tile it stops on is described. The glide speed is in the options menu. |
-| Numpad `5` | Where the cursor is, and what is there. |
-| Numpad `0` | Confirm: move the soldier to the cursor, or fire an aimed ability at it. |
-| `F` / `C` | Move the cursor up / down a storey (the game's own keys). |
+| Numpad `5`, or `Space` | Where the cursor is, and what is there. |
+| Numpad `0`, or the key right of `P` | Confirm: move the soldier to the cursor, or fire an aimed ability at it. |
+| `F` / `C` | Move the cursor up / down a storey (the game's own keys). For a flying soldier, raise / lower the flight height instead; at the limit it says "Highest flight level." or "Lowest flight level." |
+
+**Flying.** Once a soldier in Archangel armour has used Toggle Flight, the
+cursor moves through the air at the flight height: a tile says "In the air, 2
+storeys up." A move in flight has no dash, so a tile further than one move says
+"2 turns". A move that ends in the air says how high the soldier is hovering,
+and a confirm without enough fuel to hover there is refused with "Not enough fuel
+to hover there."
 
 ### In a mission: the scanner
 
@@ -68,10 +102,10 @@ soldier, so it is always the keys still to press.
 | Key | What it does |
 |---|---|
 | `Delete` | Everything about the selected soldier: HP, actions, weapon, ammo, status. |
-| Numpad `-` | The squad at a glance: each soldier's actions, HP, panic, bleeding out. |
-| Numpad `+` | The enemies in sight. |
+| Numpad `-`, or the key two right of `L` | The squad at a glance: each soldier's actions, HP, panic, bleeding out. |
+| Numpad `+`, or the key right of `L` | The enemies in sight. |
 | `M` | The mission's objectives, and the turn counters ("Turns until Air Strike, 8."). |
-| Numpad `.` | The ability bar as a menu: numpad `8` / `2` or Up / Down to walk it, numpad `5` to say the entry again, Enter to use the ability, numpad `.` or Escape to close. |
+| Numpad `.`, or the key two right of `P` | The ability bar as a menu: numpad `8` / `2` or Up / Down to walk it, numpad `5` to say the entry again, Enter or `Space` to use the ability, the same key again or Escape to close. |
 | `F1` | The target's hit-chance breakdown (the game's screen), read out. Numpad `8` / `2` or Up / Down walk it, numpad `5` says the line again. |
 | `Insert` | The list of recent announcements: opens on the newest, numpad `8` / `2` or Up / Down to walk it, numpad `5` to say one again, `Insert` or Escape to close. |
 
@@ -92,15 +126,16 @@ change.
 | `K` | Hunker down: chooses it, then Enter confirms. |
 | `X` | Switch weapon; the new weapon and its ammo are named. |
 | `V` | Open a door or window, or use a panel or the comm array, next to the soldier. |
-| `F` / `C` | Move the cursor up / down a storey. |
+| `F` / `C` | Move the cursor up / down a storey, or change the flight height. |
 | `Backspace` | End the turn. |
 | `F1` | Target information (see above). |
 | `W` `A` `S` `D`, `Q` / `E`, `T` / `G` / `Z` | Pan, rotate and zoom the camera. Nothing the mod says depends on the camera, so these can be left alone. |
 
-Three of the game's keys are taken over in a mission: `Home` is the scanner's (it
+Some of the game's keys are taken over in a mission: `Home` is the scanner's (it
 only centred the camera), `End` is the scanner's (it was a second End Turn key;
 `Backspace` still ends the turn), and `Delete` and `Insert` are the mod's (they
-moved the camera).
+moved the camera). While you are navigating with the cursor, the arrows and
+`Space` are the cursor's, not the game's.
 
 ### Sounds and options
 
@@ -108,6 +143,8 @@ moved the camera).
 |---|---|
 | Numpad `*` | Wall sound off / on. |
 | Numpad `/` | The mod's options menu: numpad `8` / `2` to choose a setting, `4` / `6` to change it, `5` to switch it or start an entry, `/` to close. Settings are saved in `xcom_uihook_settings.ini` beside the game. |
+
+These two need the numpad.
 
 The options menu has two places to learn the sounds:
 
@@ -117,17 +154,3 @@ The options menu has two places to learn the sounds:
   `/` to go back.
 - **Hear the heartbeats** lists the ways allies, aliens, doors, windows and storey
   changes sound. Numpad `8` / `2` choose one, `5` plays it, `/` goes back.
-
-### Without a numpad
-
-| Key | Stands in for |
-|---|---|
-| Arrows | Numpad `8` `2` `4` `6` (no diagonals) |
-| `Space` | Numpad `5` |
-| The key right of `P` (`[` on a US layout) | Numpad `0` |
-| The key two right of `P` (`]` on US) | Numpad `.` |
-| The key right of `L` (`'` on US) | Numpad `+` |
-| The key two right of `L` (`\` on US) | Numpad `-` |
-
-These are read by their position, so they work on any keyboard layout. Enter
-still opens the shot screen.
