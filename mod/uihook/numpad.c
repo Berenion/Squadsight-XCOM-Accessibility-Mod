@@ -3600,8 +3600,21 @@ int hud_has_keys(void)
 
 static int nav_keys_swallow(void* stack, int cmd, int mask)
 {
-    void* input = readable(stack, 0x20) ? *(void**)((uint8_t*)stack + FFRAME_OBJECT) : NULL;
-    if (input) g_ui_input = input;
+    // Only InputEvent's object is the input object (cmd is -1 for any other
+    // caller). IsAnyMoviePlaying is called from elsewhere too: in the
+    // tutorial XComDirectedTacticalExperience asks it on every tick, and the
+    // 2026-10-11 log had that actor -- whose Outer is the Level ("field: no
+    // m_Pres on Level") -- taken for the input object between key presses, so
+    // hud_has_keys flickered to "nothing readable" and every mission key was
+    // refused as if a screen were over the HUD.
+    void* input = cmd >= 0 && readable(stack, 0x20)
+                ? *(void**)((uint8_t*)stack + FFRAME_OBJECT) : NULL;
+    if (input && input != g_ui_input) {
+        char cls[64];
+        if (object_class_name(input, cls, sizeof cls))
+            logf_("nav: input object is now a %s\n", cls);
+        g_ui_input = input;
+    }
 
     if (cmd >= INPUT_CMD_ARROW_FIRST && cmd <= INPUT_CMD_ARROW_LAST) {
         if (mask & 32) return 0;
