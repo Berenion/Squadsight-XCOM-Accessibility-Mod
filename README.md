@@ -35,10 +35,12 @@ beside it:
 
 1. From the
    [latest release](https://github.com/Berenion/Squadsight-XCOM-Accessibility-Mod/releases/latest),
-   download these files into one folder of your choice: `launcher.exe`,
-   `xcom_uihook.dll`, `inject.exe`, `ekgbeep.wav`, `alienbeat.wav`,
-   `doorsound.wav`, `windowsound.wav`, `CREDITS.md`,
-   `nvdaControllerClient32.dll`, `Tolk.dll`, `SAAPI32.dll` and `dolapi32.dll`.
+   download `Squadsight-<version>.zip` and unpack it into one folder of your
+   choice. The same files are also attached one by one, if you would rather
+   download them separately: `launcher.exe`, `xcom_uihook.dll`, `inject.exe`,
+   `ekgbeep.wav`, `alienbeat.wav`, `doorsound.wav`, `windowsound.wav`,
+   `CREDITS.md`, `nvdaControllerClient32.dll`, `Tolk.dll`, `SAAPI32.dll` and
+   `dolapi32.dll`.
 2. With Steam running, start `launcher.exe` and choose the game. To skip that
    choice, start it with `/ew` (Enemy Within) or `/eu` (Enemy Unknown).
 
