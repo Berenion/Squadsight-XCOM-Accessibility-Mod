@@ -117,10 +117,22 @@ int tile_dash(int* cost_out, int* std_out, int* max_out, int* moves_out,
         // whatever it cost: the dash is only for a first move (SetDashing).
         // The 2026-09-29 (17:25) log: White, 1 action left, reached 62, 37
         // at a cost of 17 of 16 and it was said as "Dash".
-        return *moves_out <= 0 && !soldier_flying() && *cost_out > *std_out;
+        //
+        // One move reaches only what costs less than it: a cost equal to the
+        // allowance is out of range (the 10:47 log cut 20, 29 at 24 of 24; the
+        // 17:47 log had Robinson out of range at max 12 for a cost of 12, and
+        // the game dashed). It was "> std", which a tile costing exactly one
+        // move passed as a regular move whenever the allowance was already the
+        // dash's -- arriving from another dash tile, where nothing makes the
+        // game rebuild (ChangeDashState only runs when DestinationReachability
+        // changes) -- while the same tile reached from a nearer one was said as
+        // a dash (reported 2026-10-12).
+        return *moves_out <= 0 && !soldier_flying() && *cost_out >= *std_out;
     }
     if (*cost_out > limit) return 2;
-    return *cost_out > *std_out;
+    // The same edge (see above); only where this turn allows a dash at all, or
+    // a cost of exactly one move on the last action would be called one.
+    return can_dash(*moves_out) ? *cost_out >= *std_out : *cost_out > *std_out;
 }
 
 int path_out_of_range(void* ppawn)
