@@ -5718,6 +5718,20 @@ static void capture_body(const char* tag, LONG n, void* stack)
     // Central's line, so one of the two was never heard. Queued as events
     // instead, and kept for the Insert list. The comm link re-sends a line it
     // is still showing, so the same line is said once.
+    //
+    // The portrait goes on a call of its own (UINarrativeCommLink.UpdateDisplay
+    // and UINarrativePopup.UpdateDisplay: AS_SetPortrait(strImage)), and its
+    // name is the speaker's role -- "ChiefScientist", "ChiefEngineer",
+    // "HQ_headCommClerk". Left to the general path as a lone line, a screen
+    // reader said "Chief Scientist" even with the comm-link lines turned off
+    // (reported 2026-10-12). It is a picture: never said.
+    if ((strncmp(obj_name, "UINarrativeCommLink", 19) == 0 ||
+         strncmp(obj_name, "UINarrativePopup", 16) == 0) &&
+        strcmp(fn_name, "AS_SetPortrait") == 0) {
+        logf_("[%ld] %s %s.%s  PORTRAIT \"%s\" not said\n", n, tag, obj_name, fn_name,
+              p->nstrings ? p->strings[0] : "");
+        return;
+    }
     if ((strncmp(obj_name, "UINarrativeCommLink", 19) == 0 ||
          strncmp(obj_name, "UIStrategyTutorialBox", 21) == 0) &&
         (strcmp(fn_name, "AS_SetText") == 0 || strcmp(fn_name, "AS_SetTitle") == 0)) {
