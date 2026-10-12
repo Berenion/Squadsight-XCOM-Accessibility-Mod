@@ -236,6 +236,8 @@ MAIN_NO_SOLDIER_SELECTED = "Kein Soldat ausgewählt."
 MAIN_PAGE_COUNTRIES = "Länder"
 MAIN_PAGE_SITROOM = "Lagezentrum"
 MAIN_PAGE_ENGINEERING = "Technikabteilung"
+MAIN_PAGE_RESEARCH = "Forschung"
+STORES_ITEM = "%s: %d"
 MAIN_NOTHING_KNOWN = "Über den Stützpunkt ist noch nichts bekannt."
 
 # ---- schwebende Kampfanzeigen und der Zug (combat.c) ----

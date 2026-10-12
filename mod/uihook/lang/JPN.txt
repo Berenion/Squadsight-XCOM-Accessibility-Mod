@@ -235,6 +235,8 @@ MAIN_NO_SOLDIER_SELECTED = "兵士が選択されていない。"
 MAIN_PAGE_COUNTRIES = "国"
 MAIN_PAGE_SITROOM = "戦況報告室"
 MAIN_PAGE_ENGINEERING = "エンジニアリング施設"
+MAIN_PAGE_RESEARCH = "研究"
+STORES_ITEM = "%s：%d"
 MAIN_NOTHING_KNOWN = "基地についてはまだ何もわかっていない。"
 
 # ---- 戦闘の表示とターン (combat.c) ----

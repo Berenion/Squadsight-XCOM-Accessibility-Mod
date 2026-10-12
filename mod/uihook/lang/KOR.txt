@@ -236,6 +236,8 @@ MAIN_NO_SOLDIER_SELECTED = "선택된 병사 없음."
 MAIN_PAGE_COUNTRIES = "국가"
 MAIN_PAGE_SITROOM = "상황실"
 MAIN_PAGE_ENGINEERING = "기술실"
+MAIN_PAGE_RESEARCH = "연구"
+STORES_ITEM = "%s: %d"
 MAIN_NOTHING_KNOWN = "기지에 대해 아직 알려진 것이 없음."
 
 # ---- 전투 표시와 턴 (combat.c) ----

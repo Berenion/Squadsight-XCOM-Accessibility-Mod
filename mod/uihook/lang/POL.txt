@@ -237,6 +237,8 @@ MAIN_NO_SOLDIER_SELECTED = "Nie wybrano żołnierza."
 MAIN_PAGE_COUNTRIES = "Kraje"
 MAIN_PAGE_SITROOM = "Pokój sytuacyjny"
 MAIN_PAGE_ENGINEERING = "Dział techniczny"
+MAIN_PAGE_RESEARCH = "Badania"
+STORES_ITEM = "%s: %d"
 MAIN_NOTHING_KNOWN = "O bazie nic jeszcze nie wiadomo."
 
 # ---- unoszące się teksty walki i tura (combat.c) ----

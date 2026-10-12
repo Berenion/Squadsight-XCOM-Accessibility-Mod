@@ -65,6 +65,7 @@
 #include "abar.h"
 #include "hq.h"
 #include "countries.h"
+#include "stores.h"
 #include "customize.h"
 #include "cursor.h"
 #include "nav.h"
@@ -604,6 +605,11 @@ static volatile ULONGLONG g_sitroom_left_at;
 // queue Delete reads there.
 static volatile ULONGLONG g_eng_at;
 static volatile ULONGLONG g_eng_left_at;
+// The same for Research (lab_up): its submenu, the labs and the research
+// choice, where Delete reads the stores.
+static volatile ULONGLONG g_lab_at;
+static volatile ULONGLONG g_lab_left_at;
+static int lab_screen(const char* screen);
 // The same for the abduction choice (site_up), where Delete adds every
 // country's panic to the base's status.
 static volatile ULONGLONG g_site_at;
@@ -2095,6 +2101,7 @@ static int base_call(const Call* c)
         strncmp(obj_name, "UIManufacturing", 15) == 0 ||
         strncmp(obj_name, "UIFoundry", 9) == 0)
         g_eng_at = GetTickCount64();
+    if (lab_screen(obj_name)) g_lab_at = GetTickCount64();
 
     // The interception (UIInterceptionEngagement): a fight played back in
     // real time from a script the game has already rolled. Nothing in it was
@@ -3947,7 +3954,7 @@ static int base_call(const Call* c)
     // Back at the facility row: out of the room, whatever drew last.
     if (strncmp(obj_name, "UIStrategyHUD_FacilityMenu", 26) == 0 &&
         strcmp(fn_name, "OnReceiveFocus") == 0)
-        g_sitroom_left_at = g_eng_left_at = GetTickCount64();
+        g_sitroom_left_at = g_eng_left_at = g_lab_left_at = GetTickCount64();
     return 0;
 }
 
@@ -6492,6 +6499,13 @@ static void sitroom_key_reached(const char* screen)
     g_sitroom_left_at = GetTickCount64();
 }
 
+static int lab_screen(const char* screen)
+{
+    return strncmp(screen, "UIStrategyHUD_FSM_Science", 25) == 0 ||
+           strncmp(screen, "UIScienceLabs", 13) == 0 ||
+           strncmp(screen, "UIChooseTech", 12) == 0;
+}
+
 // Whether a key reaching `screen` says the player is in Engineering -- its
 // submenu, Build Items, an order, the Foundry -- or somewhere else. The
 // strategy HUD, the facility menu and the build queue see every key at the
@@ -6510,6 +6524,21 @@ static void eng_key_reached(const char* screen)
         strncmp(screen, "UIStrategyHUD_BuildQueue", 24) == 0)
         return;
     g_eng_left_at = GetTickCount64();
+}
+
+// As eng_key_reached, for Research: its submenu (UIStrategyHUD_FSM_Science),
+// the labs (UIScienceLabs) and the research choice and archives (UIChooseTech).
+static void lab_key_reached(const char* screen)
+{
+    if (lab_screen(screen)) {
+        g_lab_at = GetTickCount64();
+        return;
+    }
+    if ((strncmp(screen, "UIStrategyHUD_", 14) == 0 && screen[14] >= '0' && screen[14] <= '9') ||
+        strncmp(screen, "UIStrategyHUD_FacilityMenu", 26) == 0 ||
+        strncmp(screen, "UIStrategyHUD_BuildQueue", 24) == 0)
+        return;
+    g_lab_left_at = GetTickCount64();
 }
 
 // The abduction choice: open from its draw (g_site_at, at every site the
@@ -6546,6 +6575,13 @@ static int site_up(void)
 static int eng_up(void)
 {
     return g_eng_at && g_eng_at > g_eng_left_at &&
+           g_seen_strategy_at && g_seen_tactical_at <= g_seen_strategy_at;
+}
+
+// Whether Delete should read Research's stores: as sitroom_up.
+static int lab_up(void)
+{
+    return g_lab_at && g_lab_at > g_lab_left_at &&
            g_seen_strategy_at && g_seen_tactical_at <= g_seen_strategy_at;
 }
 
@@ -6589,6 +6625,7 @@ static int rewrite_cmd(LONG n, void* stack)
     object_name(object, screen, sizeof screen);
     sitroom_key_reached(screen);
     eng_key_reached(screen);
+    lab_key_reached(screen);
     site_key_reached(screen);
     alert_flush(n, "Input       ", object);
 
@@ -8329,7 +8366,9 @@ static volatile LONG g_review_stop;
 // In the Situation Room it opens the room as a list instead (hq_sit_lines),
 // on Insert's machinery, so the same keys walk and close it; Delete closes it
 // too. In Engineering it opens the build queue the same way (hq_eng_lines),
-// with the status line as its last entry.
+// with the status line as its last entry, and in both Engineering and
+// Research the stores come first (stores_line): the scientists, engineers,
+// elerium, alloys and weapon fragments, most of which no header shows.
 static int g_status_was;
 static void status_poll(void)
 {
@@ -8374,11 +8413,25 @@ static void status_poll(void)
         if (g_speak) speech_say_now(say);
         return;
     }
-    if (eng_up()) {
+    if (eng_up() || lab_up()) {
         static char lines[HISTORY_PAGE_MAX][HISTORY_PAGE_TEXT];
         static char say[HISTORY_PAGE_TEXT + 64];
-        int n = hq_eng_lines(lines, HISTORY_PAGE_MAX);
+        int eng = eng_up() && (!lab_up() || g_eng_at >= g_lab_at);
+        int n = 0;
+        GUARDED("stores: read", n = stores_line(lines[0], sizeof lines[0]), n = 0);
+        if (eng)
+            n += hq_eng_lines(lines + n, HISTORY_PAGE_MAX - n);
+        else if (hq_status_line(lines[n], sizeof lines[0]))
+            n++;
         menu_polled();
+        if (!eng) {
+            int opened = history_page_open(T(MAIN_PAGE_RESEARCH), (const char (*)[HISTORY_PAGE_TEXT])lines,
+                                           n, say, sizeof say);
+            logf_("research: %s, %d entries \"%s\"\n", opened ? "opened" : "nothing to open", n, say);
+            speech_cancel_pending();
+            if (g_speak) speech_say_now(say);
+            return;
+        }
         int opened = history_page_open(T(MAIN_PAGE_ENGINEERING), (const char (*)[HISTORY_PAGE_TEXT])lines,
                                        n, say, sizeof say);
         logf_("engineering: %s, %d entries \"%s\"\n", opened ? "opened" : "nothing to open", n, say);

@@ -235,6 +235,8 @@ MAIN_NO_SOLDIER_SELECTED = "沒有選擇士兵。"
 MAIN_PAGE_COUNTRIES = "國家"
 MAIN_PAGE_SITROOM = "戰情室"
 MAIN_PAGE_ENGINEERING = "工程部"
+MAIN_PAGE_RESEARCH = "研究"
+STORES_ITEM = "%s：%d"
 MAIN_NOTHING_KNOWN = "目前對該基地一無所知。"
 
 # ---- 戰鬥浮動文字與回合 (combat.c) ----

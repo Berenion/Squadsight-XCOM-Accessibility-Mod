@@ -236,6 +236,8 @@ MAIN_NO_SOLDIER_SELECTED = "Nessun soldato selezionato."
 MAIN_PAGE_COUNTRIES = "Paesi"
 MAIN_PAGE_SITROOM = "Sala strategica"
 MAIN_PAGE_ENGINEERING = "Officina"
+MAIN_PAGE_RESEARCH = "Ricerca"
+STORES_ITEM = "%s: %d"
 MAIN_NOTHING_KNOWN = "Ancora non si sa nulla della base."
 
 # ---- testi di combattimento e il turno (combat.c) ----

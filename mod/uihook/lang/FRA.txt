@@ -236,6 +236,8 @@ MAIN_NO_SOLDIER_SELECTED = "Aucun soldat sélectionné."
 MAIN_PAGE_COUNTRIES = "Pays"
 MAIN_PAGE_SITROOM = "Salle de surveillance"
 MAIN_PAGE_ENGINEERING = "Département d'ingénierie"
+MAIN_PAGE_RESEARCH = "Recherche"
+STORES_ITEM = "%s : %d"
 MAIN_NOTHING_KNOWN = "Rien n'est encore connu sur la base."
 
 # ---- textes de combat flottants et le tour (combat.c) ----

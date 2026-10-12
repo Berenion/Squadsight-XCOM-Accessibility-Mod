@@ -101,7 +101,7 @@ the shot screen.
 |---|---|
 | `0` | Read the screen's buttons, with the key for each. It also opens them as a menu: arrows to move, Enter to run one, Escape or `0` to close. Use it on any screen to find out what you can do there. |
 | `1`-`9` | Commands the game only gave a gamepad button, on the screens that have them; `0` names them. At the base, `1`-`5` pick a facility, `6` opens Mission Control and `7` the Gollop Chamber. |
-| `Delete` | At the base: the date, resources and what is coming up. In the Situation Room it opens the room as a list, in Engineering the build queue, and while choosing an abduction site every country's panic. |
+| `Delete` | At the base: the date, resources and what is coming up. In the Situation Room it opens the room as a list, and while choosing an abduction site every country's panic. In Engineering and Research it starts with your scientists, engineers, elerium, alloys and weapon fragments, then Engineering's build queue. |
 | `Insert` | The list of recent announcements (see below). |
 
 ### In a mission: moving around the map

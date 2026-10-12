@@ -245,6 +245,8 @@ S(MAIN_NO_SOLDIER_SELECTED, "No soldier selected.")
 S(MAIN_PAGE_COUNTRIES,   "Countries")
 S(MAIN_PAGE_SITROOM,     "Situation Room")
 S(MAIN_PAGE_ENGINEERING, "Engineering")
+S(MAIN_PAGE_RESEARCH,    "Research")
+F(STORES_ITEM,           "%s: %d")
 S(MAIN_NOTHING_KNOWN,    "Nothing known about the base yet.")
 
 // ---- floating combat text and the turn (combat.c) ------------------------------

@@ -236,6 +236,8 @@ MAIN_NO_SOLDIER_SELECTED = "Боец не выбран."
 MAIN_PAGE_COUNTRIES = "Страны"
 MAIN_PAGE_SITROOM = "Оперативный штаб"
 MAIN_PAGE_ENGINEERING = "Инженерный отдел"
+MAIN_PAGE_RESEARCH = "Исследования"
+STORES_ITEM = "%s: %d"
 MAIN_NOTHING_KNOWN = "О базе пока ничего не известно."
 
 # ---- всплывающие числа боя и ход (combat.c) ----
