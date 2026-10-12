@@ -624,24 +624,16 @@ static struct {
 } g_hire;
 
 // "Hiring Cost: §10." as said: "Hiring Cost: 10 credits." and "13/70" as
-// "13 of 70".
-static void hire_text(const char* in, char* out, size_t out_sz)
+// "13 of 70". The sum goes through text_money, which reads past the
+// language's thousands separator: this used to stop at the first non-digit,
+// and the finance statement's "NET MONTHLY INCOME: +§1,673." was said
+// "+1 credit,673." (the 2026-10-12 log).
+static void hire_text(const char* in_raw, char* out, size_t out_sz)
 {
+    char in[1024];
+    text_money(in_raw, in, sizeof in);
     size_t w = 0;
     for (const char* r = in; *r && w + 12 < out_sz; r++) {
-        if ((unsigned char)r[0] == 0xC2 && (unsigned char)r[1] == 0xA7) {
-            r += 2;
-            const char* d = r;
-            while (*r >= '0' && *r <= '9' && w + 12 < out_sz) out[w++] = *r++;
-            char num[16], word[64];
-            _snprintf_s(num, sizeof num, _TRUNCATE, "%.*s", (int)(r - d), d);
-            credits_word(num, word, sizeof word);
-            out[w] = 0;
-            strncat_s(out, out_sz, word, _TRUNCATE);
-            w = strlen(out);
-            r--;
-            continue;
-        }
         if (*r == '/' && r > in && r[-1] >= '0' && r[-1] <= '9' && r[1] >= '0' && r[1] <= '9') {
             out[w] = 0;
             strncat_s(out, out_sz, T(TXT_OF_SEP), _TRUNCATE);
