@@ -26,5 +26,12 @@ void speech_say_now(const char* utf8);
 void speech_say_after(const char* utf8, unsigned delay_ms);
 void speech_cancel_pending(void);
 
+// A last rewrite of every line before it is said: the filter writes the line
+// to `out` and returns nonzero when it changed it, 0 to say it as it came.
+// One for the whole DLL (the game's money, see text_money); none in the
+// offline tests, which keep speech free of the string table.
+typedef int (*SpeechFilter)(const char* in, char* out, size_t out_sz);
+void speech_set_filter(SpeechFilter filter);
+
 long speech_dropped(void);
 void speech_shutdown(void);

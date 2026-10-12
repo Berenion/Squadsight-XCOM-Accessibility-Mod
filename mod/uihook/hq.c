@@ -298,7 +298,7 @@ void hq_abduction_line(const char* panic_label, int panic,
 {
     if (!out || !out_sz) return;
     char r[128];
-    copy_without_section(r, sizeof r, reward);     // "\xC2\xA7" "200" -> "200"
+    text_money(reward, r, sizeof r);               // "\xC2\xA7" "200" -> "200 credits"
     tfmt(out, out_sz, HQ_ABDUCTION_LINE,
                 panic_label && *panic_label ? panic_label : T(HQ_PANIC_LABEL), panic,
                 diff_label && *diff_label ? diff_label : T(HQ_DIFFICULTY_LABEL), diff ? diff : "",
@@ -385,7 +385,10 @@ static void st_lock(void)
 static void st_unlock(void) { LeaveCriticalSection(&g_st_lock); }
 
 // The section sign the game puts before a sum of money, U+00A7 (C2 A7): a
-// screen reader says "section". Dropped.
+// screen reader says "section". Dropped where a label already says what the
+// sum is ("CREDITS: §265", hq_status_resource); everywhere else the sum is
+// said with its word (text_money), since a bare number was heard as just a
+// number (reported 2026-10-12).
 static void copy_without_section(char* out, size_t out_sz, const char* in)
 {
     size_t w = 0;
@@ -578,7 +581,7 @@ void hq_sit_country(int index, const char* name, const char* cash, int panic, in
     SitCountry* c = &g_sit[index];
     c->known = 1;
     strncpy_s(c->name, sizeof c->name, name, _TRUNCATE);
-    copy_without_section(c->cash, sizeof c->cash, cash);
+    text_money(cash, c->cash, sizeof c->cash);
     c->panic = panic;
     c->active = active;
     st_unlock();
@@ -665,7 +668,7 @@ void hq_base_card(int x, int y, const char* name, const char* icon)
 {
     if (x < 0 || x >= HQ_BASE_W || y < 0 || y >= HQ_BASE_H) return;
     char n[128];
-    copy_without_section(n, sizeof n, name);
+    text_money(name, n, sizeof n);
     // The steam label is taken off the tile under the cursor; the tile is
     // no less a steam vent for that, so an empty name on the same ground
     // keeps the one before.
@@ -709,7 +712,7 @@ void hq_base_cursor(int x, int y, const char* text, char* out, size_t out_sz)
 {
     char tile[256], t[512];
     base_tile_words(x, y, tile, sizeof tile);
-    copy_without_section(t, sizeof t, text);
+    text_money(text, t, sizeof t);
     size_t w = 0;
     out[0] = 0;
     sat_put(out, out_sz, &w, tile);
@@ -740,7 +743,7 @@ static struct {
 void hq_sat_country(const char* name, const char* body, int panic)
 {
     strncpy_s(g_sat.country, sizeof g_sat.country, name ? name : "", _TRUNCATE);
-    copy_without_section(g_sat.body, sizeof g_sat.body, body);
+    text_money(body, g_sat.body, sizeof g_sat.body);
     g_sat.panic = panic;
 }
 

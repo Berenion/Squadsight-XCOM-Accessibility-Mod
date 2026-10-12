@@ -128,6 +128,23 @@ int main(int argc, char** argv)
     text_end_sentence(t, sizeof t);
     check(!strcmp(t, "Fertig."), t);
 
+    // Money as XGScreenMgr.ConvertCashToString writes it, in the rewards of a
+    // council request (2026-10-12: heard as "4 Scientists, 100").
+    check(text_money("4 Scientists, \xC2\xA7" "100", t, sizeof t) &&
+          !strcmp(t, "4 Scientists, 100 credits"), t);
+    text_money("\xC2\xA7" "1", t, sizeof t);
+    check(!strcmp(t, "1 credit"), t);
+    text_money("REWARD: \xC2\xA7" "1,200.", t, sizeof t);
+    check(!strcmp(t, "REWARD: 1,200 credits."), t);                // the count reads past ","
+    text_money("\xC2\xA7" "1 200 et \xC2\xA7" "1.500", t, sizeof t);  // FRA / DEU, ITA
+    check(!strcmp(t, "1 200 credits et 1.500 credits"), t);
+    text_money("\xC2\xA7" "100 2 Scientists", t, sizeof t);
+    check(!strcmp(t, "100 credits 2 Scientists"), t);              // not a separator: 1 digit
+    text_money("-\xC2\xA7" "50, \xC2\xA7" "x", t, sizeof t);
+    check(!strcmp(t, "-50 credits, x"), t);                          // no number: the sign goes
+    check(!text_money("4 Scientists", t, sizeof t) && !strcmp(t, "4 Scientists"),
+          "no section sign, nothing changed");
+
     // A translation over the English: good lines taken, a bad format and an
     // unknown key left alone, a missing line still English.
     char dir[MAX_PATH], path[MAX_PATH];

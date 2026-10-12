@@ -389,9 +389,23 @@ static int to_wide(const char* utf8, wchar_t* out)
     return MAX_UTTER;
 }
 
+static SpeechFilter g_filter;
+
+void speech_set_filter(SpeechFilter filter) { g_filter = filter; }
+
+// The line as the filter rewrites it, or as it came. Per thread for the same
+// reason as the wide buffers below.
+static const char* filtered(const char* utf8)
+{
+    static __declspec(thread) char out[MAX_UTTER * 3];
+    if (g_filter && g_filter(utf8, out, sizeof out)) return out;
+    return utf8;
+}
+
 static void enqueue(const char* utf8, int interrupt)
 {
     if (!g_thread || !utf8 || !*utf8) return;
+    utf8 = filtered(utf8);
 
     // Per thread, not on the stack: callers are often deep in the game's
     // script VM, and this is 8 KB.
@@ -432,6 +446,7 @@ void speech_say_now(const char* utf8)
 void speech_say_after(const char* utf8, unsigned delay_ms)
 {
     if (!g_thread || !utf8 || !*utf8) return;
+    utf8 = filtered(utf8);
     // Per thread, not on the stack: callers are often deep in the game's
     // script VM, and this is 8 KB.
     static __declspec(thread) wchar_t wide[MAX_UTTER];

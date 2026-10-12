@@ -639,6 +639,58 @@ void text_end_sentence(char* s, size_t s_sz)
     strncat_s(s, s_sz, T(TXT_STOP), _TRUNCATE);
 }
 
+// A thousands separator as XGScreenMgr.ConvertCashToString writes one: "," (or
+// "." in ITA, a space in FRA, DEU and above four digits ESN), always followed
+// by exactly three digits -- so "§100 2" is a sum and then another number.
+static int thousands_sep(const char* r)
+{
+    if (*r != ',' && *r != '.' && *r != ' ') return 0;
+    for (int i = 1; i <= 3; i++) if (r[i] < '0' || r[i] > '9') return 0;
+    return r[4] < '0' || r[4] > '9';
+}
+
+// The game marks money with the section sign (U+00A7, C2 A7), its
+// m_strCreditsPrefix in every language (XGScreenMgr.ConvertCashToString), and
+// NVDA drops the sign at its usual punctuation level, so a council request's
+// rewards were heard as "4 Scientists, 100" (reported 2026-10-12). The digits
+// keep their separators ("1,200") and the count reads past them for the plural.
+int text_money(const char* in, char* out, size_t out_sz)
+{
+    if (!out || !out_sz) return 0;
+    out[0] = 0;
+    if (!in) return 0;
+    int found = 0;
+    size_t w = 0;
+    for (const char* r = in; *r && w + 1 < out_sz; ) {
+        if ((unsigned char)r[0] != 0xC2 || (unsigned char)r[1] != 0xA7) {
+            out[w++] = *r++;
+            continue;
+        }
+        found = 1;
+        r += 2;
+        long n = 0;
+        int digits = 0;
+        while (w + 1 < out_sz) {
+            if (*r >= '0' && *r <= '9') {
+                if (n < 1000000000L) n = n * 10 + (*r - '0');
+                digits++;
+            } else if (!digits || !thousands_sep(r)) {
+                break;
+            }
+            out[w++] = *r++;
+        }
+        if (digits) {
+            char word[64];
+            tpfmt(word, sizeof word, TXT_CREDITS_AFTER, (int)n);
+            out[w] = 0;
+            strncat_s(out, out_sz, word, _TRUNCATE);
+            w = strlen(out);
+        }
+    }
+    out[w] = 0;
+    return found;
+}
+
 // ---- the game's language ---------------------------------------------------
 
 static int code_readable(const void* p, size_t n)

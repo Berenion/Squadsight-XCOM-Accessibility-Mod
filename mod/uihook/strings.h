@@ -116,6 +116,11 @@ int text_ends_sentence(const char* s);
 // Appends the language's full stop (TXT_STOP) unless `s` already ends one.
 void text_end_sentence(char* s, size_t s_sz);
 
+// Every sum the game wrote as "§1,200" said as "1,200 credits" (TXT_CREDITS_AFTER,
+// in the number's plural form); a section sign with no number after it is
+// dropped. Returns whether `in` had one, so a caller can skip the copy.
+int text_money(const char* in, char* out, size_t out_sz);
+
 // ---- the game's language ---------------------------------------------------
 //
 // UObject.GetLanguage (native static final function string GetLanguage()):

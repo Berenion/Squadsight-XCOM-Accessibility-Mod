@@ -2807,7 +2807,7 @@ int main(void)
         check(strcmp(pr, "Rookie WHITE, Assault Rifle Modern") == 0, "a rookie has no class");
         hq_abduction_line("PANIC:", 1, "MISSION DIFFICULTY:", "Easy", "REWARD:",
                           "\xC2\xA7" "200", pr, sizeof pr);
-        check(strstr(pr, "REWARD: 200") != NULL, "a money reward without the section sign");
+        check(strstr(pr, "REWARD: 200 credits") != NULL, "a money reward said as credits");
 
         // As the EW log carried it, markup already stripped.
         check(hq_summary_factors("Aliens Killed,_deadAliens,RESULTS:,4,RATING:,Excellent!;"
@@ -2981,8 +2981,8 @@ int main(void)
             check(strcmp(sit[1], "UNITED STATES, panic 2 of 5") == 0, "a country and its panic");
             check(strcmp(sit[2], "NIGERIA, panic 5 of 5, left XCOM") == 0,
                   "in the screen's order, and one that has left");
-            check(strcmp(sit[3], "GERMANY, panic 1 of 5, funding +100") == 0,
-                  "funding without the section sign");
+            check(strcmp(sit[3], "GERMANY, panic 1 of 5, funding +100 credits") == 0,
+                  "funding said as credits");
             check(strcmp(sit[4], "WORLD NEWS: Activists in China say aliens are real") == 0 &&
                   strcmp(sit[5], "Economist says future markets unpredictable") == 0,
                   "the ticker split into headlines, the title on the first");

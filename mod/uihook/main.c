@@ -302,6 +302,18 @@ static void credits_word(const char* digits, char* out, size_t out_sz)
     tpfmt(out, out_sz, TXT_CREDITS_AFTER, (int)n);
 }
 
+// Every line on its way to speech: a sum still marked with the section sign
+// is said with its word (text_money). The screens that read money themselves
+// (money_text, hire_text, the grey market) never get this far with one; the
+// rest -- a council request's rewards, a covert op's, the debrief's -- went
+// out as "§100" and were heard as a bare "100" (reported 2026-10-12).
+static int say_money(const char* in, char* out, size_t out_sz)
+{
+    if (!strstr(in, "\xC2\xA7") || !text_money(in, out, out_sz)) return 0;
+    logf_("money: said with its word: \"%.200s\"\n", out);
+    return 1;
+}
+
 // A sum as the game draws it, "§50", as said: "50 credits". The section sign
 // (U+00A7) reads "section". "-" and "" are left as they are.
 static void money_text(const char* in, char* out, size_t out_sz)
@@ -8754,6 +8766,7 @@ static DWORD WINAPI init(LPVOID param)
     if (slash) *(slash + 1) = 0;
     speech_init(dll_dir, why, sizeof why);
     logf_("speech: %s\n", why);
+    speech_set_filter(say_money);
 
     // The wall field's mixer. A machine with no output device loses the field
     // and keeps everything else, so this is reported and never fatal.
