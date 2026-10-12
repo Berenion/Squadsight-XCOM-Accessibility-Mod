@@ -57,8 +57,8 @@ runs it without the mod.
   `[launcher]`.
 - The launcher's **Install** button turns a manual copy into a normal install,
   with the desktop shortcut and the entry in Windows' list of installed apps.
-- A translation from a release, `lang_<CODE>.txt`, goes in a `lang` folder
-  beside the mod as `<CODE>.txt`.
+- The translations, `lang_<CODE>.txt`, are read from beside the mod as they
+  are; a `lang\<CODE>.txt` there instead (what the setup installs) is read first.
 
 ## Language
 

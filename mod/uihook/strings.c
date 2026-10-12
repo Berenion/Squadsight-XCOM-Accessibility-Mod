@@ -352,16 +352,27 @@ void strings_load(const char* dll_dir, const char* code, char* why, size_t why_s
         return;
     }
 
-    char path[MAX_PATH];
+    // lang\<CODE>.txt is where an install puts it (install_langs); a release's
+    // own lang_<CODE>.txt, beside the DLL, is the fallback. The manual
+    // install's zip is the staged folder, which is flat, so it holds
+    // lang_RUS.txt and no lang\ at all -- and a player who unpacked it heard
+    // English with a Russian game until they moved and renamed the file.
+    char path[MAX_PATH], flat[MAX_PATH];
     _snprintf_s(path, sizeof path, _TRUNCATE, "%slang\\%s.txt", dll_dir ? dll_dir : "", code);
+    _snprintf_s(flat, sizeof flat, _TRUNCATE, "%slang_%s.txt", dll_dir ? dll_dir : "", code);
     FILE* f = NULL;
     if (fopen_s(&f, path, "rb") || !f) {
-        g_table = NULL;
-        g_phrases = NULL;
-        strcpy_s(g_lang, sizeof g_lang, code);
-        if (why) _snprintf_s(why, why_sz, _TRUNCATE,
-                             "the game is %s, but there is no %s -- English", code, path);
-        return;
+        f = NULL;
+        if (fopen_s(&f, flat, "rb") || !f) {
+            g_table = NULL;
+            g_phrases = NULL;
+            strcpy_s(g_lang, sizeof g_lang, code);
+            if (why) _snprintf_s(why, why_sz, _TRUNCATE,
+                                 "the game is %s, but there is no %s or %s -- English",
+                                 code, path, flat);
+            return;
+        }
+        strcpy_s(path, sizeof path, flat);
     }
     fseek(f, 0, SEEK_END);
     long size = ftell(f);

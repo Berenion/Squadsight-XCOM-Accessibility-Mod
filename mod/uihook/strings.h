@@ -56,7 +56,7 @@ int tfmt(char* out, size_t out_sz, StrId id, ...);
 int tfmt_cat(char* out, size_t out_sz, size_t* len, StrId id, ...);
 
 // Loads lang\<code>.txt from `dll_dir` (ending in a separator) over the
-// English. "INT" or an empty code is English and reads nothing. Safe to call
+// English -- or, when there is none, a release's lang_<code>.txt beside it. "INT" or an empty code is English and reads nothing. Safe to call
 // again with another code: the table is swapped whole. `why` says what came
 // of it, for the log.
 void strings_load(const char* dll_dir, const char* code, char* why, size_t why_sz);

@@ -217,7 +217,22 @@ int main(int argc, char** argv)
     check(!strcmp(out, "21 tur"), out);
     tpfmt(out, sizeof out, TXT_TURNS, 22, 22);
     check(!strcmp(out, "22 tury"), out);
+
+    // A release's flat lang_POL.txt beside the DLL (the manual install's
+    // zip) is read when there is no lang\POL.txt -- and lang\ wins over it.
+    char flat[MAX_PATH];
+    _snprintf_s(flat, sizeof flat, _TRUNCATE, "%slang_POL.txt", dir);
+    fopen_s(&f, flat, "wb");
+    if (f) { fputs("SET_ON = \"Wlaczone\"\n", f); fclose(f); }
+    strings_load(dir, "POL", lwhy, sizeof lwhy);
+    check(!strcmp(T(SET_ON), "On"), "lang\\POL.txt is read before lang_POL.txt");
     DeleteFileA(path);
+    strings_load(dir, "POL", lwhy, sizeof lwhy);
+    printf("load: %s\n", lwhy);
+    check(!strcmp(T(SET_ON), "Wlaczone"), "lang_POL.txt beside the DLL, with no lang\\");
+    DeleteFileA(flat);
+    strings_load(dir, "POL", lwhy, sizeof lwhy);
+    check(strstr(lwhy, "lang_POL.txt") != NULL, "the miss names both places");
     _snprintf_s(path, sizeof path, _TRUNCATE, "%slang\\DEU.txt", dir);
 
     strings_load(dir, "INT", lwhy, sizeof lwhy);
