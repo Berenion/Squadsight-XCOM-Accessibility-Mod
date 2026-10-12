@@ -71,8 +71,11 @@ downloaded yet falls back to English.
 The mod follows the language the game is set to. Words it reads from the game
 (ranks, classes, button labels and the like) are always in that language. The
 mod's own lines are in English unless a translation for the game's language is
-installed; a translation is a `lang\<CODE>.txt` file beside the mod. None are
-included yet.
+installed; a translation is a `lang\<CODE>.txt` file beside the mod. The mod
+comes with translations for every language the game has: German, French,
+Italian, Spanish, Polish, Russian, Japanese, Korean and Traditional Chinese.
+They use the game's own terms for its mechanics, but have not been checked by
+native speakers yet; corrections are welcome.
 
 ## Keys
 
