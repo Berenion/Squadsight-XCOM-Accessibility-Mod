@@ -217,6 +217,48 @@ static void test_language(const char* sandbox)
     check(!gamepaths_has_language(exe, "POL"), "language: EU does not borrow EW's");
 }
 
+// --------------------------------------------------------------------- GOG --
+
+// GOG's install is Steam's layout with a goggame-<id>.info beside it, which
+// names the language as GOG's installer or Galaxy last set it.
+static void test_gog(const char* sandbox)
+{
+    printf("\nGOG's install\n");
+
+    char root[MAX_PATH], info[MAX_PATH], exe[MAX_PATH], lang[64];
+    sprintf_s(root, sizeof root, "%s\\gog\\XCOM Enemy Unknown", sandbox);
+    sprintf_s(exe, sizeof exe, "%s\\XEW\\Binaries\\Win32", root);
+    make_tree(exe);
+    sprintf_s(exe, sizeof exe, "%s\\XEW\\Binaries\\Win32\\XComEW.exe", root);
+    make_file(exe, "");
+
+    GamePaths game;
+    check(gamepaths_find(root, &game) && !game.gog,
+          "gog: a root without a goggame .info is not GOG's");
+    check(!gamepaths_gog_language(root, lang, sizeof lang),
+          "gog: no .info, no language");
+
+    sprintf_s(info, sizeof info, "%s\\goggame-%s.info", root, XCOM_GOG_ID);
+    make_file(info,
+              "{\n    \"buildId\": \"51095085142670289\", \n"
+              "    \"gameId\": \"" XCOM_GOG_ID "\", \n"
+              "    \"language\": \"German\", \n"
+              "    \"languages\": [\n        \"de-DE\"\n    ], \n"
+              "    \"name\": \"XCOM: Enemy Unknown\"\n}\n");
+    check(gamepaths_find(root, &game) && game.gog && game.ew_exe[0] && !game.eu_exe[0],
+          "gog: a root with one is GOG's");
+    check(gamepaths_gog_language(root, lang, sizeof lang) && strcmp(lang, "German") == 0,
+          "gog: the language is read from the .info");
+    check(strcmp(gamepaths_language_code(lang), "DEU") == 0 &&
+          strcmp(gamepaths_language_code("Korean"), "KOR") == 0,
+          "gog: GOG's names map to the engine's folders");
+
+    // "languages" comes first here, and must not be taken for "language".
+    make_file(info, "{ \"languages\": [ \"fr-FR\" ], \"language\": \"French\" }");
+    check(gamepaths_gog_language(root, lang, sizeof lang) && strcmp(lang, "French") == 0,
+          "gog: \"languages\" is not mistaken for \"language\"");
+}
+
 // ------------------------------------------------------------ this machine --
 
 // The file the launcher cares most about is the one the mod is still writing.
@@ -264,7 +306,17 @@ static void report_this_machine(void)
 
     char manifest[MAX_PATH], lang[64];
     gamepaths_manifest_for(game.root, manifest, sizeof manifest);
-    if (gamepaths_steam_language(manifest, lang, sizeof lang)) {
+    if (game.gog) {
+        if (gamepaths_gog_language(game.root, lang, sizeof lang)) {
+            const char* code = gamepaths_language_code(lang);
+            printf("  GOG language: %s -> %s (EW files %s)\n", lang,
+                   code ? code : "(not shipped)",
+                   code && game.ew_exe[0] && gamepaths_has_language(game.ew_exe, code)
+                       ? "present" : "absent");
+        } else {
+            printf("  GOG language: not found in %s\n", game.root);
+        }
+    } else if (gamepaths_steam_language(manifest, lang, sizeof lang)) {
         const char* code = gamepaths_language_code(lang);
         printf("  Steam language: %s -> %s (EW files %s)\n", lang, code ? code : "(not shipped)",
                code && game.ew_exe[0] && gamepaths_has_language(game.ew_exe, code)
@@ -292,6 +344,7 @@ int main(void)
     test_library_walk(sandbox);
     test_slurp_while_held(sandbox);
     test_language(sandbox);
+    test_gog(sandbox);
     report_this_machine();
 
     remove_tree(sandbox);

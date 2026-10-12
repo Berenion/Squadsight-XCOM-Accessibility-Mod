@@ -155,14 +155,41 @@ static BOOL find_root(char* root, size_t root_sz)
     return found;
 }
 
+// GOG's installer and Galaxy both register the game under the product id, with
+// its folder as "path".  The key is in the 32-bit view (WOW6432Node), which is
+// asked for by name so that a 64-bit build of this would find it too.
+BOOL gamepaths_gog_root(char* root, size_t root_sz)
+{
+    DWORD size = (DWORD)root_sz;
+    if (RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\GOG.com\\Games\\" XCOM_GOG_ID, "path",
+                     RRF_RT_REG_SZ | RRF_SUBKEY_WOW6432KEY, NULL, root, &size) != ERROR_SUCCESS)
+        return FALSE;
+    size_t len = strlen(root);                       // stored with or without one
+    if (len > 3 && root[len - 1] == '\\') root[len - 1] = 0;
+    return root[0] != 0 && gamepaths_root_holds_xcom(root);
+}
+
+static void gog_info_path(const char* root, char* out, size_t out_sz)
+{
+    sprintf_s(out, out_sz, "%s\\goggame-%s.info", root, XCOM_GOG_ID);
+}
+
+BOOL gamepaths_root_is_gog(const char* root)
+{
+    char info[MAX_PATH];
+    gog_info_path(root, info, sizeof info);
+    return PathFileExistsA(info);
+}
+
 BOOL gamepaths_find(const char* override_root, GamePaths* out)
 {
     memset(out, 0, sizeof *out);
 
     if (override_root && override_root[0] && gamepaths_root_holds_xcom(override_root))
         strcpy_s(out->root, MAX_PATH, override_root);
-    else if (!find_root(out->root, MAX_PATH))
+    else if (!find_root(out->root, MAX_PATH) && !gamepaths_gog_root(out->root, MAX_PATH))
         return FALSE;
+    out->gog = gamepaths_root_is_gog(out->root);
 
     char probe[MAX_PATH];
     sprintf_s(probe, sizeof probe, "%s\\%s\\%s", out->root, EU_SUBDIR, EU_EXE);
@@ -184,6 +211,7 @@ static const struct { const char* steam; const char* code; } g_languages[] = {
     { "italian",  "ITA" }, { "spanish",  "ESN" }, { "latam",    "ESN" },
     { "polish",   "POL" }, { "russian",  "RUS" }, { "japanese", "JPN" },
     { "koreana",  "KOR" }, { "tchinese", "CHT" },
+    { "korean",   "KOR" },                           // GOG's name for it
 };
 
 const char* gamepaths_language_code(const char* steam_name)
@@ -228,6 +256,32 @@ BOOL gamepaths_steam_language(const char* manifest, char* lang, size_t lang_sz)
     if (!found[0]) return FALSE;
     strcpy_s(lang, lang_sz, found);
     return TRUE;
+}
+
+// The .info is JSON, but the one key wanted is unique in it and flat:
+//     "language": "German",
+// beside "languages": [ "de-DE" ], which the closing quote keeps from matching.
+BOOL gamepaths_gog_language(const char* root, char* lang, size_t lang_sz)
+{
+    char info[MAX_PATH];
+    gog_info_path(root, info, sizeof info);
+    char* text = gamepaths_slurp(info);
+    if (!text) return FALSE;
+
+    BOOL found = FALSE;
+    const char* p = strstr(text, "\"language\"");
+    if (p) p = strchr(p + 10, ':');
+    if (p) p = strchr(p, '"');
+    if (p) {
+        const char* end = strchr(++p, '"');
+        if (end && end > p && (size_t)(end - p) < lang_sz) {
+            memcpy(lang, p, (size_t)(end - p));
+            lang[end - p] = 0;
+            found = TRUE;
+        }
+    }
+    free(text);
+    return found;
 }
 
 // The manifest sits two folders above the install: the root is

@@ -8,7 +8,8 @@ keyboard.
 
 ## Installing
 
-The mod works only with the **Steam** versions of the game. It has been tested
+The mod works with the **Steam** versions of the game and with **GOG**'s
+*XCOM: Enemy Unknown Complete Pack*, which has the same executables. It has been tested
 mostly with **Enemy Within**. Enemy Unknown is supported too, but it may still
 have bugs; please report any you find, as they are usually easy to fix once
 known.
@@ -22,7 +23,7 @@ known.
    and an entry in Windows' list of installed apps. No administrator rights are
    needed.
 3. The launcher opens. Start the game from it (**Enemy Within** or **Enemy
-   Unknown**), with Steam running. Later, start it from the desktop shortcut; it
+   Unknown**), with Steam running if you have the Steam version. Later, start it from the desktop shortcut; it
    checks for updates each time.
 
 To uninstall, use the launcher's **Uninstall** button or Windows' list of
@@ -41,12 +42,12 @@ beside it:
    `ekgbeep.wav`, `alienbeat.wav`, `doorsound.wav`, `windowsound.wav`,
    `CREDITS.md`, `nvdaControllerClient32.dll`, `Tolk.dll`, `SAAPI32.dll` and
    `dolapi32.dll`.
-2. With Steam running, start `launcher.exe` and choose the game. To skip that
+2. With Steam running (not needed for GOG), start `launcher.exe` and choose the game. To skip that
    choice, start it with `/ew` (Enemy Within) or `/eu` (Enemy Unknown).
 
 Nothing is copied into the game's folder: the mod is loaded into the game each
-time the launcher starts it, so starting the game straight from Steam runs it
-without the mod.
+time the launcher starts it, so starting the game straight from Steam or GOG
+runs it without the mod.
 
 - The launcher still checks for updates. To turn that off, start it with
   `/noupdate`, or put a `launcher.ini` beside it containing
@@ -62,8 +63,9 @@ without the mod.
 ## Language
 
 The game has no language option of its own: it plays in the language Steam has
-for it (right-click the game in the Steam library, Properties, Language). The
-launcher reads that setting and starts the game in it; a language Steam has not
+for it (right-click the game in the Steam library, Properties, Language), or
+the one GOG installed it in. The launcher reads that setting and starts the game
+in it; a language Steam has not
 downloaded yet falls back to English.
 
 The mod follows the language the game is set to. Words it reads from the game

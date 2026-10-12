@@ -664,29 +664,38 @@ static void adopt_steam_environment(void)
 // engine takes -LANGUAGE= from the command line, and falls back to the ini's
 // Language=INT -- so the old fixed -LANGUAGE=INT played every install in
 // English, whatever Steam said, and the mod's lang\<CODE>.txt never loaded.
-// Steam's choice is the manifest's; English when it cannot be read, is not a
-// language the game ships, or this build has no files for it.
+// Steam's choice is the manifest's, GOG's the goggame .info's; English when it
+// cannot be read, is not a language the game ships, or this build has no files
+// for it.
 static void game_language(const Config* cfg, const char* exe_path, char* code, size_t code_sz)
 {
     strcpy_s(code, code_sz, "INT");
-    char manifest[MAX_PATH], steam[64];
-    gamepaths_manifest_for(cfg->game.root, manifest, sizeof manifest);
-    if (!gamepaths_steam_language(manifest, steam, sizeof steam)) {
-        launcher_log("language: no Steam language in %s -- INT\n", manifest);
+    const char* store = cfg->game.gog ? "GOG" : "Steam";
+    char source[MAX_PATH], lang[64];
+    BOOL read;
+    if (cfg->game.gog) {
+        sprintf_s(source, sizeof source, "%s\\goggame-%s.info", cfg->game.root, XCOM_GOG_ID);
+        read = gamepaths_gog_language(cfg->game.root, lang, sizeof lang);
+    } else {
+        gamepaths_manifest_for(cfg->game.root, source, sizeof source);
+        read = gamepaths_steam_language(source, lang, sizeof lang);
+    }
+    if (!read) {
+        launcher_log("language: no %s language in %s -- INT\n", store, source);
         return;
     }
-    const char* mapped = gamepaths_language_code(steam);
+    const char* mapped = gamepaths_language_code(lang);
     if (!mapped) {
-        launcher_log("language: Steam says %s, which the game does not ship -- INT\n", steam);
+        launcher_log("language: %s says %s, which the game does not ship -- INT\n", store, lang);
         return;
     }
     if (!gamepaths_has_language(exe_path, mapped)) {
-        launcher_log("language: Steam says %s, but this build has no %s files -- INT\n",
-                     steam, mapped);
+        launcher_log("language: %s says %s, but this build has no %s files -- INT\n",
+                     store, lang, mapped);
         return;
     }
     strcpy_s(code, code_sz, mapped);
-    launcher_log("language: Steam says %s -- %s\n", steam, code);
+    launcher_log("language: %s says %s -- %s\n", store, lang, code);
 }
 
 static BOOL launch_and_inject(const Config* cfg, const char* exe_path, const char* exe_name)
@@ -698,7 +707,8 @@ static BOOL launch_and_inject(const Config* cfg, const char* exe_path, const cha
 
     char log[MAX_PATH];
     sprintf_s(log, sizeof log, "%s\\%s", work_dir, LOG_NAME);
-    launcher_log("launch: %s with %s\n", exe_path, cfg->dll);
+    launcher_log("launch: %s (%s) with %s\n", exe_path, cfg->game.gog ? "GOG" : "Steam",
+                 cfg->dll);
 
     // Attaching to a game that is already up is the same job minus the start,
     // and it keeps the launcher useful after an accidental plain launch.
@@ -710,7 +720,9 @@ static BOOL launch_and_inject(const Config* cfg, const char* exe_path, const cha
         // cannot be mistaken for this run's.
         DeleteFileA(log);
 
-        adopt_steam_environment();
+        // GOG's build has no Steamworks layer to read them, and no Steam to
+        // hand the launch to: it simply starts.
+        if (!cfg->game.gog) adopt_steam_environment();
 
         STARTUPINFOA si = { sizeof si };
         PROCESS_INFORMATION pi = { 0 };
@@ -747,9 +759,9 @@ static BOOL launch_and_inject(const Config* cfg, const char* exe_path, const cha
     }
 
     if (!pid || !ready) {
-        say_error("%s started but exited again before the mod could attach.\n\n"
-                  "If the Steam client is not running, start it and try again.",
-                  exe_name);
+        say_error("%s started but exited again before the mod could attach.%s",
+                  exe_name, cfg->game.gog ? "" : "\n\nIf the Steam client is not running, "
+                                                  "start it and try again.");
         return FALSE;
     }
 
@@ -854,7 +866,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR args, int show)
     int choice = choice_from_command_line(args);
     if (!found && !choice) {
         say_error("No XCOM: Enemy Unknown installation was found.\n\n"
-                  "The launcher asks Steam where the game is. If Steam cannot say, "
+                  "The launcher asks Steam and GOG where the game is. If neither can say, "
                   "put the install folder in launcher.ini beside this program:\n\n"
                   "[launcher]\nGameRoot=D:\\path\\to\\XCom-Enemy-Unknown\n\n"
                   "The launcher opens anyway, to install, update or remove the mod.");
