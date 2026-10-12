@@ -217,11 +217,22 @@ static BOOL fetch_release(HWND owner, Fetch* f)
 
 // The release's text, cut to what a message box can sensibly hold.  It is
 // UTF-8 from GitHub; MessageBoxA would read it in the ANSI code page.
+// Long notes are cut short of the buffer so that the "..." fits: until 0.12.1
+// the cut filled all of it and strcat_s then had no room, which ends the
+// process, so every launcher up to 0.12.0 closed without a word on seeing the
+// 1337 bytes of the v0.12.0 notes (launcher.log, 2026-10-12 22:24).
 static void notes_for_box(const char* notes, wchar_t* out, size_t out_n)
 {
     char cut[1200];
-    strncpy_s(cut, sizeof cut, notes, _TRUNCATE);
-    if (strlen(notes) >= sizeof cut - 1) strcat_s(cut, sizeof cut, "...");
+    size_t len = strlen(notes);
+    if (len < sizeof cut) {
+        strcpy_s(cut, sizeof cut, notes);
+    } else {
+        len = sizeof cut - 4;
+        while (len > 0 && (notes[len] & 0xC0) == 0x80) --len;  // not inside a character
+        memcpy(cut, notes, len);
+        strcpy_s(cut + len, sizeof cut - len, "...");
+    }
     MultiByteToWideChar(CP_UTF8, 0, cut, -1, out, (int)out_n);
 }
 
