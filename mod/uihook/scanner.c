@@ -3,8 +3,10 @@
 
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "scanner.h"
+#include "fog.h"
 #include "strings.h"
 #include "scan.h"
 #include "units.h"
@@ -529,6 +531,250 @@ static void scan_add_climbs(void)
     }
 }
 
+// ---- high cover ------------------------------------------------------------
+//
+// Every tile with high cover on at least one side, on every storey, that the
+// squad has seen: the places worth running to. The same cover query the
+// climbs and the tile report make, so "high" is what tile_describe calls high
+// -- a direction bit without its low bit -- and the sides are said the same
+// way ("to the north and east").
+//
+// Gated on the fog, tile by tile: a black tile shows no wall, so a sighted
+// player does not know there is cover on it. Seen before is grey and still
+// shows it. As with the level actors, a fog that cannot be read hides nothing
+// (fog.h, FOG_UNKNOWN), and the sweep's log line says which it was.
+//
+// The whole grid, not a radius: the fog is what bounds it, and the list is
+// nearest first. The cover point's z is the layer asked about (tile: lines,
+// "floor 0.0 (layer 1) ... at 25, 5, 1"), so a layer of air answers about the
+// floor under it and is passed over.
+//
+// The first build asked the fog tile by tile and swept the whole map on every
+// press: 940 ms each in the 2026-10-12 log (68 x 96 x 12, 9612 tiles asked,
+// 84 kept), a stall a player could feel. Now the fog is read in one go
+// (fog_tiles), and each tile's answer is kept for the mission: a press asks
+// only about tiles that have come out of the fog since the last one. Cover
+// can still be blown away, so what is about to be listed is asked again
+// (cover_still_high) -- at most SCAN_MAX queries, not the map.
+
+#define COVER_MAX       8192
+#define COVER_HIGH_BITS (TILE_COVER_N | TILE_COVER_S | TILE_COVER_E | TILE_COVER_W)
+
+enum { COVER_UNASKED, COVER_NOT_HIGH, COVER_HIGH };
+
+typedef struct {
+    short x, y, z;          // tile and layer
+    short tz;               // the storey (floor_of)
+    int   flags;
+    float feet;             // the floor's height, for Home
+} CoverTile;
+
+static CoverTile      g_cover[COVER_MAX];
+static int            g_ncover;
+static unsigned char* g_cover_state;    // per tile and layer, COVER_*
+static unsigned char* g_cover_fog;      // fog_tiles' answer, per tile and layer
+static int            g_cover_cells;
+static CursorGrid     g_cover_grid;
+static void*          g_cover_world;
+
+static int cover_is_high(int flags)
+{
+    // A side is high when its direction bit is on and its low bit is not.
+    return (flags & COVER_HIGH_BITS & ~(flags >> 4)) != 0;
+}
+
+// The cover point for tile (x, y) on layer z, when the game's answer is about
+// that very tile.
+static int cover_ask(TileCoverFn cover, void* world_data, const CursorGrid* g,
+                     int x, int y, int z, TileCoverPoint* cp)
+{
+    memset(cp, 0, sizeof *cp);
+    if (!cover(world_data, NULL, grid_centre_x(g, x), grid_centre_y(g, y),
+               grid_layer_middle(g, z), cp))
+        return 0;
+    return cp->x == x && cp->y == y && cp->z == z;
+}
+
+// A new map, or the first press: everything is unasked again.
+static int cover_reset(void* world_data, const CursorGrid* g)
+{
+    int cells = g->num_x * g->num_y * g->num_z;
+    g_ncover = 0;
+    g_cover_grid = *g;
+    g_cover_world = world_data;
+    if (cells != g_cover_cells) {
+        free(g_cover_state);
+        free(g_cover_fog);
+        g_cover_state = cells > 0 ? (unsigned char*)malloc((size_t)cells) : NULL;
+        g_cover_fog = cells > 0 ? (unsigned char*)malloc((size_t)cells) : NULL;
+        g_cover_cells = g_cover_state && g_cover_fog ? cells : 0;
+    }
+    if (!g_cover_cells) return 0;
+    memset(g_cover_state, COVER_UNASKED, (size_t)cells);
+    return 1;
+}
+
+static void cover_sweep(void)
+{
+    void* world_data = cursor_world();
+    const CursorGrid* g = &g_scan_grid;
+    if (!world_data) return;
+    if (world_data != g_cover_world || memcmp(g, &g_cover_grid, sizeof *g) != 0 ||
+        !g_cover_cells)
+        if (!cover_reset(world_data, g)) return;
+    TileCoverFn cover = (TileCoverFn)tile_vfn(world_data, g_tile_slot_cover);
+    if (!cover) return;
+
+    LARGE_INTEGER freq, t0, t1, t2;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
+    world_fog_calibrate(g);
+    // No fog to read hides nothing, as for the level actors: every tile is
+    // taken as seen.
+    int fog_ok = fog_tiles(g, g_cover_fog, g_cover_cells);
+    if (!fog_ok) memset(g_cover_fog, FOG_SEEN, (size_t)g_cover_cells);
+    QueryPerformanceCounter(&t1);
+
+    int asked = 0, high = 0, dropped = 0;
+    static int sample_said;
+    for (int z = 0; z < g->num_z; z++) {
+        for (int y = 0; y < g->num_y; y++) {
+            int row = (z * g->num_y + y) * g->num_x;
+            for (int x = 0; x < g->num_x; x++) {
+                if (g_cover_state[row + x] != COVER_UNASKED) continue;
+                if (g_cover_fog[row + x] == FOG_NEVER) continue;
+
+                TileCoverPoint cp;
+                asked++;
+                if (!cover_ask(cover, world_data, g, x, y, z, &cp) || !cover_is_high(cp.flags)) {
+                    g_cover_state[row + x] = COVER_NOT_HIGH;
+                    continue;
+                }
+                if (g_ncover >= COVER_MAX) {
+                    // Left unasked, so a later press can take it if room
+                    // is made.
+                    dropped++;
+                    continue;
+                }
+                g_cover_state[row + x] = COVER_HIGH;
+                high++;
+
+                // The floor: the cover location's height when it is in this
+                // layer, else the layer's bottom. The first run's line was
+                // "tile location z 31.0, cover location z 0.0, layer bottom
+                // -1.0": the tile location is the layer's middle, the cover
+                // location the floor. Home settles the exact height itself.
+                float bottom = grid_layer_bottom(g, z);
+                float feet = cp.cover_location[2];
+                if (feet < bottom - CURSOR_ABOVE_FLOOR || feet >= bottom + CURSOR_LAYER)
+                    feet = bottom;
+                if (!sample_said) {
+                    sample_said = 1;
+                    logf_("cover: first high cover %d, %d layer %d flags 0x%05X -- tile "
+                          "location z %.1f, cover location z %.1f, layer bottom %.1f, "
+                          "floor taken %.1f\n", x, y, z, (unsigned)cp.flags,
+                          cp.tile_location[2], cp.cover_location[2], bottom, feet);
+                }
+                CoverTile* c = &g_cover[g_ncover++];
+                c->x = (short)x;
+                c->y = (short)y;
+                c->z = (short)z;
+                c->flags = cp.flags;
+                c->feet = feet;
+                float at[3] = { grid_centre_x(g, x), grid_centre_y(g, y), feet };
+                c->tz = (short)floor_of(at);
+            }
+        }
+    }
+    QueryPerformanceCounter(&t2);
+
+    // Only a sweep that asked something is worth a line: paging through a
+    // list already swept asks nothing.
+    if (asked) {
+        double ms = 1000.0 / (double)freq.QuadPart;
+        logf_("cover: asked %d newly seen tiles, %d high, %d held, in %.1f ms (fog %.1f, "
+              "cover %.1f; %d x %d x %d grid%s%s)\n", asked, high, g_ncover,
+              (t2.QuadPart - t0.QuadPart) * ms, (t1.QuadPart - t0.QuadPart) * ms,
+              (t2.QuadPart - t1.QuadPart) * ms, g->num_x, g->num_y, g->num_z,
+              fog_ok ? "" : ", fog unreadable -- not hidden",
+              dropped ? ", list full" : "");
+    }
+}
+
+// Whether a held tile still has high cover. A wall blown away since it was
+// asked is dropped -- and its tile forgotten, so it is asked afresh if it
+// comes back as something else.
+static int cover_still_high(CoverTile* c)
+{
+    void* world_data = cursor_world();
+    TileCoverFn cover = world_data ? (TileCoverFn)tile_vfn(world_data, g_tile_slot_cover) : NULL;
+    if (!cover) return 1;
+    TileCoverPoint cp;
+    if (cover_ask(cover, world_data, &g_cover_grid, c->x, c->y, c->z, &cp) &&
+        cover_is_high(cp.flags)) {
+        c->flags = cp.flags;
+        return 1;
+    }
+    logf_("cover: %d, %d layer %d has no high cover now -- dropped\n", c->x, c->y, c->z);
+    g_cover_state[(c->z * g_cover_grid.num_y + c->y) * g_cover_grid.num_x + c->x] =
+        COVER_NOT_HIGH;
+    return 0;
+}
+
+// Nearest first, as scan_end sorts, so that the SCAN_MAX nearest are the
+// ones kept when there are more.
+static int g_cover_from[3];
+
+static int cover_dist2(const CoverTile* c)
+{
+    int dx = c->x - g_cover_from[0], dy = c->y - g_cover_from[1];
+    int dz = c->tz - g_cover_from[2];
+    return dx * dx + dy * dy + 4 * dz * dz;
+}
+
+static int __cdecl cover_nearer(const void* a, const void* b)
+{
+    int da = cover_dist2((const CoverTile*)a), db = cover_dist2((const CoverTile*)b);
+    return da < db ? -1 : da > db;
+}
+
+static void scan_add_cover(void)
+{
+    if (!g_scan_have) return;
+    cover_sweep();
+    g_cover_from[0] = g_scan_from[0];
+    g_cover_from[1] = g_scan_from[1];
+    g_cover_from[2] = g_scan_from[2];
+    qsort(g_cover, (size_t)g_ncover, sizeof g_cover[0], cover_nearer);
+
+    int floor = scan_floor();
+    for (int i = 0; i < g_ncover && scan_count() < SCAN_MAX; i++) {
+        CoverTile* c = &g_cover[i];
+        // The storey filter first, so that only what will be listed is
+        // asked again.
+        if (floor != SCAN_ALL_FLOORS && c->tz != floor) continue;
+        if (!cover_still_high(c)) {
+            g_cover[i--] = g_cover[--g_ncover];     // order is restored next press
+            continue;
+        }
+        ScanItem it;
+        memset(&it, 0, sizeof it);
+        it.kind = SCAN_COVER;
+        strncpy_s(it.name, sizeof it.name, T(SCAN_HIGH_COVER), _TRUNCATE);
+        char sides[128];
+        if (tile_high_cover_sides(c->flags, sides, sizeof sides))
+            tfmt(it.detail, sizeof it.detail, SCAN_COVER_TOWARDS, sides);
+        it.tx = c->x;
+        it.ty = c->y;
+        it.tz = c->tz;
+        it.feet = c->feet;
+        it.world[0] = grid_centre_x(&g_scan_grid, c->x);
+        it.world[1] = grid_centre_y(&g_scan_grid, c->y);
+        it.world[2] = c->feet;
+        scan_add(&it);
+    }
+}
+
 // ---- building and saying ---------------------------------------------------
 
 // Where the scan is measured from: the soldier being moved, falling back to
@@ -622,6 +868,8 @@ static int scan_rebuild(void)
     // category is showing: "Everything" would pay for it on every press, and
     // a hundred ledges would bury the doors and the people in it anyway.
     if (c == SCAN_INTERACT) scan_add_climbs();
+    // The same for high cover, which sweeps every seen tile (cover_sweep).
+    if (c == SCAN_COVER) scan_add_cover();
     int n = scan_end();
     QueryPerformanceCounter(&t[5]);
 
@@ -630,7 +878,7 @@ static int scan_rebuild(void)
     // A cheap rebuild says nothing: only one long enough to be heard.
     if (total >= 5.0)
         logf_("scan: %s rebuilt in %.1f ms -- units %.1f, targets %.1f, level %.1f, "
-              "objectives %.1f, climbs %.1f\n",
+              "objectives %.1f, tiles %.1f\n",
               scan_category_name(c), total,
               (t[1].QuadPart - t[0].QuadPart) * ms, (t[2].QuadPart - t[1].QuadPart) * ms,
               (t[3].QuadPart - t[2].QuadPart) * ms, (t[4].QuadPart - t[3].QuadPart) * ms,

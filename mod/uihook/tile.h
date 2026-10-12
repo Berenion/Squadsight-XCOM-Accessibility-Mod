@@ -55,6 +55,11 @@ typedef struct {
 
 #define TILE_MAX_TEXT 512
 
+// The sides with high cover in a cover flags word, as tile_describe names
+// them: "north and east", "northwest" (diagonal). How many sides; 0, and an
+// empty string, when the tile has no high cover.
+int tile_high_cover_sides(int flags, char* out, size_t out_sz);
+
 // The vtable offset an exec thunk dispatches through, or -1 when the code does
 // not have the shape above. `code` is the thunk's first bytes; the scan stops
 // at its `ret 8`.

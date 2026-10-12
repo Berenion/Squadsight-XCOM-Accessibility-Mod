@@ -776,7 +776,7 @@ static void scan_add_arrows(void)
 // What the scanner would say about each actor it is holding, worked out
 // afresh: the tiles are relative to a grid, and a canister's countdown is
 // relative to the turn.
-static void scan_world_items(void)
+void world_fog_calibrate(const CursorGrid* g)
 {
     // The squad's own tiles tell fog.c what its bytes mean (fog_calibrate).
     // The player is kept across a soldier switch, when squad_player is
@@ -790,12 +790,17 @@ static void scan_world_items(void)
     for (int i = 0; i < g_nunits && squad; i++) {
         UnitSeen s;
         if (!unit_seen(&g_units[i], squad, &s) || !s.friendly) continue;
-        tiles[nsquad][0] = grid_x(&g_world_grid, s.loc[0]);
-        tiles[nsquad][1] = grid_y(&g_world_grid, s.loc[1]);
-        tiles[nsquad][2] = grid_floor_layer(&g_world_grid, s.loc[2] - NAVH_LIFT);
+        tiles[nsquad][0] = grid_x(g, s.loc[0]);
+        tiles[nsquad][1] = grid_y(g, s.loc[1]);
+        tiles[nsquad][2] = grid_floor_layer(g, s.loc[2] - NAVH_LIFT);
         names[nsquad++] = s.who->name;
     }
-    fog_calibrate(&g_world_grid, (const int (*)[3])tiles, names, nsquad);
+    fog_calibrate(g, (const int (*)[3])tiles, names, nsquad);
+}
+
+static void scan_world_items(void)
+{
+    world_fog_calibrate(&g_world_grid);
 
     static int hidden_said = -1;
     g_fog_hidden = 0;

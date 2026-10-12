@@ -131,7 +131,7 @@ soldier, so it is always the keys still to press.
 | Key | What it does |
 |---|---|
 | `Page Down` / `Page Up` | Next / previous item. |
-| `Ctrl` + `Page Down` / `Page Up` | Next / previous category: Everything, Squad, Enemies, Targets, Explosives, Civilians, Doors, Windows, Objectives, Meld, Interactables. |
+| `Ctrl` + `Page Down` / `Page Up` | Next / previous category: Everything, Squad, Enemies, Targets, Explosives, Civilians, Doors, Windows, Objectives, Meld, Interactables, High cover. |
 | `Alt` + `Page Down` / `Page Up` | Next / previous storey, or all storeys. |
 | `Home` | Put the cursor on the selected item. |
 | `Shift` + `Home` | Put the cursor back on the soldier. |

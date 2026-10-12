@@ -14,6 +14,11 @@
 // 0 when there is nothing to ask.
 int world_refresh(const CursorGrid* g);
 
+// Settles what the fog buffer's bytes mean from the squad's own tiles on grid
+// `g` (fog_calibrate), so fog_tile can be asked without a world_refresh.
+// world_refresh does this itself.
+void world_fog_calibrate(const CursorGrid* g);
+
 // The items the last world_refresh placed: the scanner's entries for them,
 // with tile and floor on that grid.
 const ScanItem* world_items(int* n);

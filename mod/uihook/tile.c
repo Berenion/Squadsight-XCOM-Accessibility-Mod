@@ -91,21 +91,52 @@ static void append(char* out, size_t out_sz, size_t* used, const char* s)
     *used = w < 0 ? out_sz - 1 : *used + (size_t)w;
 }
 
-// "High cover north and east. " -- the directions in clockwise order.
-static void cover_sentence(StrId kind, const int* dirs_on, char* out,
-                           size_t out_sz, size_t* used)
+// "north and east" -- the directions in clockwise order. How many there are.
+static int dir_list(const int* dirs_on, char* out, size_t out_sz)
 {
     int n = 0, total = 0;
+    out[0] = 0;
     for (int d = 0; d < D_COUNT; d++) total += dirs_on[d];
-    if (!total) return;
-    char dirs[256] = "";
     size_t dw = 0;
     for (int d = 0; d < D_COUNT; d++) {
         if (!dirs_on[d]) continue;
         n++;
-        if (n > 1) append(dirs, sizeof dirs, &dw, n == total ? T(TXT_AND) : ", ");
-        append(dirs, sizeof dirs, &dw, T(DIR_NAME[d]));
+        if (n > 1) append(out, out_sz, &dw, n == total ? T(TXT_AND) : ", ");
+        append(out, out_sz, &dw, T(DIR_NAME[d]));
     }
+    return total;
+}
+
+// The cover flags as sides: high[d] / low[d] set for each direction with
+// cover of that height. Whether there is any cover at all.
+static int cover_sides(int flags, int* high, int* low)
+{
+    const int* map = (flags & TILE_COVER_DIAGONAL) ? DIAGONAL : STRAIGHT;
+    int any = 0;
+    for (int b = 0; b < 4; b++) {
+        if (!(flags & (1 << b))) continue;
+        any = 1;
+        if (flags & (0x10 << b)) low[map[b]] = 1;
+        else                     high[map[b]] = 1;
+    }
+    return any;
+}
+
+int tile_high_cover_sides(int flags, char* out, size_t out_sz)
+{
+    int high[D_COUNT] = { 0 }, low[D_COUNT] = { 0 };
+    if (!out || !out_sz) return 0;
+    out[0] = 0;
+    cover_sides(flags, high, low);
+    return dir_list(high, out, out_sz);
+}
+
+// "High cover north and east. "
+static void cover_sentence(StrId kind, const int* dirs_on, char* out,
+                           size_t out_sz, size_t* used)
+{
+    char dirs[256];
+    if (!dir_list(dirs_on, dirs, sizeof dirs)) return;
     char t[320];
     tfmt(t, sizeof t, kind, dirs);
     append(out, out_sz, used, t);
@@ -132,14 +163,7 @@ void tile_describe(const TileReport* r, char* out, size_t out_sz)
     }
 
     int high[D_COUNT] = { 0 }, low[D_COUNT] = { 0 };
-    const int* map = (r->cover_flags & TILE_COVER_DIAGONAL) ? DIAGONAL : STRAIGHT;
-    int any = 0;
-    for (int b = 0; b < 4; b++) {
-        if (!(r->cover_flags & (1 << b))) continue;
-        any = 1;
-        if (r->cover_flags & (0x10 << b)) low[map[b]] = 1;
-        else                              high[map[b]] = 1;
-    }
+    int any = cover_sides(r->cover_flags, high, low);
     if (any) {
         cover_sentence(TILE_HIGH_COVER_AT, high, out, out_sz, &used);
         cover_sentence(TILE_LOW_COVER_AT, low, out, out_sz, &used);

@@ -48,6 +48,7 @@ typedef enum {
     SCAN_OBJECTIVES,
     SCAN_MELD,              // EW's Meld canisters, one entry each
     SCAN_INTERACT,
+    SCAN_COVER,             // explored tiles with high cover, every storey
     SCAN_CATEGORIES         // not a category: how many there are
 } ScanCategory;
 

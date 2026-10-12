@@ -1875,6 +1875,14 @@ int main(void)
         check(strcmp(say, "High cover northwest. Low cover northeast.") == 0,
               "diagonal cover is turned 45 degrees");
 
+        // The scanner's high cover category names the high sides alone.
+        char sides[64];
+        check(tile_high_cover_sides(TILE_COVER_N | TILE_COVER_S | TILE_COVER_W |
+                                    TILE_COVER_E | TILE_COVER_ELOW, sides, sizeof sides) == 3 &&
+              strcmp(sides, "north, east and south") == 0, "high cover sides, low left out");
+        check(tile_high_cover_sides(TILE_COVER_E | TILE_COVER_ELOW, sides, sizeof sides) == 0 &&
+              sides[0] == 0, "low cover only: no high sides");
+
         r.cover_flags = 0;
         r.dash = 1;
         r.smoke = 1;

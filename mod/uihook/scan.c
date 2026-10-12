@@ -39,6 +39,7 @@ const char* scan_category_name(ScanCategory c)
     case SCAN_OBJECTIVES: return T(SCAN_CAT_OBJECTIVES);
     case SCAN_MELD:       return T(SCAN_CAT_MELD);
     case SCAN_INTERACT:   return T(SCAN_CAT_INTERACT);
+    case SCAN_COVER:      return T(SCAN_CAT_COVER);
     default:              return T(TXT_UNKNOWN);
     }
 }
@@ -467,7 +468,7 @@ void scan_empty_text(ScanCategory c, char* out, size_t out_sz)
         [SCAN_EXPLOSIVES] = SCAN_NONE_EXPLOSIVES, [SCAN_CIVILIANS] = SCAN_NONE_CIVILIANS,
         [SCAN_DOORS] = SCAN_NONE_DOORS, [SCAN_WINDOWS] = SCAN_NONE_WINDOWS,
         [SCAN_OBJECTIVES] = SCAN_NONE_OBJECTIVES, [SCAN_MELD] = SCAN_NONE_MELD,
-        [SCAN_INTERACT] = SCAN_NONE_INTERACT,
+        [SCAN_INTERACT] = SCAN_NONE_INTERACT, [SCAN_COVER] = SCAN_NONE_COVER,
     };
     if ((unsigned)c < sizeof none / sizeof none[0] && none[c])
         strncpy_s(out, out_sz, T(none[c]), _TRUNCATE);

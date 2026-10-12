@@ -172,3 +172,58 @@ int fog_tile(const CursorGrid* g, int x, int y, int z)
     if (b < 0) return FOG_UNKNOWN;
     return b == g_fog_never ? FOG_NEVER : FOG_SEEN;
 }
+
+// ---- the whole grid at once ------------------------------------------------
+//
+// fog_tile is a field read, two vtable reads, a guarded native call and a
+// readable() per tile -- half a dozen VirtualQuery calls -- and that is
+// nothing for the few tiles round an actor but a second for a whole map: the
+// 2026-10-12 log had the high cover sweep at 940 ms for a 68 x 96 x 12 grid,
+// every press. So this reads the buffer once. The layout is still the
+// game's: its index for a step along each axis, asked once a map, and taken
+// only when it is linear (the far corner lands where the steps say), which it
+// has been on every map logged ("1,0,0 at 1; 0,1,0 at 68; 0,0,1 at 6528").
+int fog_tiles(const CursorGrid* g, unsigned char* out, int n)
+{
+    void* world = cursor_world();
+    int nx = g->num_x, ny = g->num_y, nz = g->num_z;
+    if (!world || world != g_fog_world || g_fog_never < 0) return 0;
+    if (nx <= 0 || ny <= 0 || nz <= 0 || n < nx * ny * nz) return 0;
+    int num;
+    const uint8_t* buf = fog_buffer(world, g, &num);
+    if (!buf || !readable(buf, (size_t)num)) return 0;
+
+    static void* layout_world;
+    static CursorGrid layout_grid;
+    static int base, sx, sy, sz, linear;
+    if (layout_world != world || memcmp(&layout_grid, g, sizeof *g) != 0) {
+        layout_world = world;
+        layout_grid = *g;
+        base = fog_index(world, g, 0, 0, 0);
+        sx = fog_index(world, g, 1, 0, 0) - base;
+        sy = fog_index(world, g, 0, 1, 0) - base;
+        sz = fog_index(world, g, 0, 0, 1) - base;
+        int far_ = fog_index(world, g, nx - 1, ny - 1, nz - 1);
+        int want = base + (nx - 1) * sx + (ny - 1) * sy + (nz - 1) * sz;
+        linear = base >= 0 && sx > 0 && sy > 0 && sz > 0 && far_ == want && want < num;
+        logf_("fog: whole grid read %s (base %d, steps %d, %d, %d; far corner %d, "
+              "expected %d, %d bytes)\n", linear ? "at once" : "tile by tile",
+              base, sx, sy, sz, far_, want, num);
+    }
+
+    for (int z = 0; z < nz; z++)
+        for (int y = 0; y < ny; y++) {
+            unsigned char* row = out + (size_t)(z * ny + y) * nx;
+            if (linear) {
+                const uint8_t* src = buf + base + z * sz + y * sy;
+                for (int x = 0; x < nx; x++)
+                    row[x] = src[x * sx] == g_fog_never ? FOG_NEVER : FOG_SEEN;
+            } else {
+                for (int x = 0; x < nx; x++) {
+                    int b = fog_byte(world, g, x, y, z);
+                    row[x] = (unsigned char)(b < 0 ? 0xFF : b == g_fog_never ? FOG_NEVER : FOG_SEEN);
+                }
+            }
+        }
+    return 1;
+}

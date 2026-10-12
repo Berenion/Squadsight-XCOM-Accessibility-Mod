@@ -18,3 +18,9 @@ void fog_calibrate(const CursorGrid* g, const int (*tiles)[3], const char* const
 
 // The fog on tile (x, y, layer) of grid `g`.
 int fog_tile(const CursorGrid* g, int x, int y, int z);
+
+// The fog on every tile of grid `g` at once: out[x + (y + z * num_y) * num_x]
+// is FOG_NEVER, FOG_SEEN, or 0xFF where the tile could not be read. `n` is
+// out's size. 0, with out untouched, when the fog cannot be read at all
+// (FOG_UNKNOWN everywhere). Far cheaper than fog_tile per tile.
+int fog_tiles(const CursorGrid* g, unsigned char* out, int n);
