@@ -79,6 +79,18 @@ native speakers yet; corrections are welcome.
 
 ## Keys
 
+**`Ctrl` + `/` lists the keys that work where you are**: Squadsight's first, then
+the game's as they are bound now, in the game's own words. `/` is the key left
+of right Shift, whatever it types on your layout. Up / Down walk the list,
+Escape or `Ctrl` + `/` close it.
+
+**The game's Controls screen** (Options, Interface, Key Bindings; the game
+offers it only with the input device set to mouse and keyboard) works from the
+keyboard: Up / Down choose an action, Left / Right its first or second key,
+Enter and then the new key bind it, `1` clears the key, `2` resets every key,
+`3` saves and leaves, Tab switches between general and mission keys, Escape
+leaves without saving.
+
 **Num Lock must be on.** With it off, Windows reports the numpad as the arrows,
 Home, End, Page Up and Page Down, and the mod reads it wrong.
 

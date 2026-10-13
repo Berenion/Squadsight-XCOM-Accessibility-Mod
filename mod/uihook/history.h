@@ -54,7 +54,8 @@ void history_current(char* out, size_t out_sz);
 // "Top." / "End." at either end, and history_close or any key that closes
 // the list closes it. history_is_open is true while it is up. The lines are
 // copied.
-#define HISTORY_PAGE_MAX  48
+// The key list (keys.c) is the longest: some sixty lines in a mission.
+#define HISTORY_PAGE_MAX  80
 #define HISTORY_PAGE_TEXT 1024
 int history_page_open(const char* title, const char (*lines)[HISTORY_PAGE_TEXT], int n,
                       char* out, size_t out_sz);

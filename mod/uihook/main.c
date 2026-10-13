@@ -86,6 +86,8 @@
 #include "sounds.h"
 #include "scanner.h"
 #include "menus.h"
+#include "keys.h"
+#include "controls.h"
 #include "numpad.h"
 #include "strings.h"
 
@@ -1863,7 +1865,8 @@ static CallFamily call_family(const char* o)
         if (name_is(o, "UIFundingCouncil")) return FAM_SCREENS;
         break;
     case 'G':
-        if (name_is(o, "UIGeneLab") || name_is(o, "UIGreyMarket")) return FAM_BASE;
+        if (name_is(o, "UIGeneLab") || name_is(o, "UIGreyMarket") || name_is(o, "UIGollop"))
+            return FAM_BASE;
         break;
     case 'H': if (name_is(o, "UIHiring")) return FAM_BASE; break;
     case 'I':
@@ -2027,6 +2030,13 @@ static void mec_sentence(char* out, size_t out_sz, size_t* w, const char* text)
 // interception, the base grid and its queue, the Officer Training School,
 // the Gray Market, medals, a text box, the Database, finances, the labs,
 // gene mods, Build Items, hiring, an order, and the Situation Room.
+// The Gollop chamber: its name off the strategy HUD's hotlink, what its
+// screen said, and the arrow it last took (see rewrite_cmd).
+static char      g_gollop_name[96];
+static char      g_gollop_said[512];
+static int       g_gollop_key;
+static ULONGLONG g_gollop_key_at;
+
 static int base_call(const Call* c)
 {
     const char* tag = c->tag;
@@ -2058,6 +2068,37 @@ static int base_call(const Call* c)
             hq_status_resource(p->strings[0]);
             return 1;
         }
+        // The hotlinks: Mission Control, then the Gollop chamber, with their
+        // icons between (AS_SetHotlink(label, icon, label, icon)). The second
+        // label is the chamber's name in the player's language, which the
+        // chamber's own screen never draws. Kept; the call goes on as before.
+        if (strcmp(fn_name, "AS_SetHotlink") == 0) {
+            char name[96];
+            frame_string(node, locals, 2, name, sizeof name);
+            if (name[0]) text_sentence_case(name, g_gollop_name, sizeof g_gollop_name);
+        }
+    }
+
+    // The Gollop chamber (UIGollop). OnInit draws one call, AS_SetData(status,
+    // button, disabled): "A soldier is capable of using the device!", "Use
+    // Ethereal Device" -- the help text and the button of XGGollopUI.UpdateMain
+    // -- and nothing else; Enter presses the button (OnPressButton: the bad
+    // sound while it is disabled, else GollopWarning), Escape leaves. On the
+    // general path it said nothing in the 2026-10-13 (19:11) log. Said whole
+    // here, and again on an arrow (rewrite_cmd).
+    if (strncmp(obj_name, "UIGollop", 8) == 0 && strcmp(fn_name, "AS_SetData") == 0) {
+        char status[256], button[96];
+        frame_string(node, locals, 0, status, sizeof status);
+        frame_string(node, locals, 1, button, sizeof button);
+        int disabled = p->nbools > 0 && p->bools[0];
+        _snprintf_s(g_gollop_said, sizeof g_gollop_said, _TRUNCATE, "%s%s%s%s %s: %s%s.",
+                    g_gollop_name, g_gollop_name[0] ? ". " : "", status,
+                    text_ends_sentence(status) ? "" : ".", button, T(KEY_ENTER),
+                    disabled ? T(HELP_UNAVAILABLE) : "");
+        logf_("[%ld] %s %s.%s  GOLLOP \"%s\"\n", n, tag, obj_name, fn_name, g_gollop_said);
+        speech_cancel_pending();
+        if (g_speak && !muted()) speech_say_now(g_gollop_said);
+        return 1;
     }
     if (strncmp(obj_name, "UIStrategyComponent_Clock", 25) == 0 &&
         strcmp(fn_name, "AS_SetDateTime") == 0) {
@@ -5420,6 +5461,10 @@ static void capture_body(const char* tag, LONG n, void* stack)
     // draws. See alert_note.
     alert_flush(n, tag, object);
 
+    // The Controls screen is said by controls.c, from its own state: drawn,
+    // it is 46 slots of label and key strings with nothing to tell them apart.
+    if (controls_capture(n, object, obj_name, fn_name)) return;
+
     // EW's Meld counters and the arrow at a canister are redrawn every frame
     // (UISpecialMissionHUD_MeldStats subscribes UpdatePanel to the UI
     // update): 9,110 of the Gateway run's 10,807 lines. Nothing here reads
@@ -6564,6 +6609,11 @@ static void site_cmd(const char* screen, int cmd)
         g_site_left_at = GetTickCount64() + 1;
 }
 
+int layer_tactical(void)
+{
+    return g_seen_tactical_at && g_seen_tactical_at > g_seen_strategy_at;
+}
+
 // Whether Delete should add every country's panic.
 static int site_up(void)
 {
@@ -6787,6 +6837,35 @@ static int rewrite_cmd(LONG n, void* stack)
         ((cmd >= 500 && cmd <= 503) || cmd == 510 || cmd == 511)) {
         *cmd_slot = CMD_INERT;
         return SUPPRESS;
+    }
+
+    // The Controls screen, which has no keyboard of its own past Enter and
+    // Escape. See controls.h.
+    if (controls_key(n, object, screen, cmd, mask, have_mask)) {
+        *cmd_slot = CMD_INERT;
+        return SUPPRESS;
+    }
+
+    // An arrow in the Gollop chamber says it again. The chamber only
+    // evaluates input (e_InputState Evaluate) and has no case for an arrow, so
+    // the key goes on to the strategy HUD underneath, whose facility menu --
+    // hidden while the chamber is up -- moved its selection to Engineering in
+    // the 2026-10-13 (19:11) log. The HUD's panels see the same keystroke
+    // straight after the chamber, and are kept from it.
+    if (cmd >= FXS_ARROW_UP && cmd <= FXS_ARROW_LEFT) {
+        if (strncmp(screen, "UIGollop", 8) == 0) {
+            g_gollop_key = cmd;
+            g_gollop_key_at = GetTickCount64();
+            if (press && g_gollop_said[0]) {
+                logf_("[%ld] Input        %s  GOLLOP again\n", n, screen);
+                speech_cancel_pending();
+                if (g_speak) speech_say_now(g_gollop_said);
+            }
+        } else if (cmd == g_gollop_key && GetTickCount64() - g_gollop_key_at < 150 &&
+                   strncmp(screen, "UIStrategyHUD", 13) == 0) {
+            *cmd_slot = CMD_INERT;
+            return SUPPRESS;
+        }
     }
 
     // Up or Down on a dialogue box says it again. It is read once, as it
@@ -8487,6 +8566,7 @@ static DWORD WINAPI review_pump(LPVOID unused)
         GUARDED("status: poll", status_poll());
         GUARDED("hooks: late UFunction pass", hooks_sweep_retry());
         GUARDED("alert: settle", alert_settle());
+        GUARDED("keys: poll", keys_poll());
         GUARDED("review: poll", review_poll());
     }
     return 0;

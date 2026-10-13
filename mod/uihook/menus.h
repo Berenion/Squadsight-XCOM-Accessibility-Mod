@@ -31,8 +31,14 @@ void menu_polled(void);
 // Whether the tactical HUD is the first screen to take input, so the mod's
 // mission keys are its own; 0 under a pause menu, a dialog or a popup.
 int  hud_has_keys(void);
+// The input object of the last InputEvent the game took (XComTacticalInput in
+// a mission); NULL before the first. May be gone: ask unit_is_live.
+void* nav_input_object(void);
 
 // ---- provided by main.c --------------------------------------------------------
+// Whether the tactical HUD drew more recently than the strategy HUD: in a
+// mission, as far as the key thread can tell without an input object.
+int      layer_tactical(void);
 void*    abar_container(void);          // UITacticalHUD_AbilityContainer, as captured
 void     strip_markup(char* s);         // Flash markup out of a string, in place
 int      input_event_cmd(void* stack, int* mask_out);   // InputEvent's Cmd, or -1

@@ -259,7 +259,9 @@ static int g_is_ew = 1;
 int  game_is_ew(void)    { return g_is_ew; }
 void game_set_ew(int ew) { g_is_ew = ew != 0; }
 
-#define LOC_MAX 96
+// The key list (keys.c) alone asks for some seventy: every action's label
+// on the Controls screen, the key names and the modifier words.
+#define LOC_MAX 256
 static struct {
     char      cls[48], field[48];
     int       index;

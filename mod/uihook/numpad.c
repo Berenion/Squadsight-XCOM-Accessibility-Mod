@@ -3598,6 +3598,11 @@ int hud_has_keys(void)
     return ours;
 }
 
+void* nav_input_object(void)
+{
+    return g_ui_input;
+}
+
 static int nav_keys_swallow(void* stack, int cmd, int mask)
 {
     // Only InputEvent's object is the input object (cmd is -1 for any other
