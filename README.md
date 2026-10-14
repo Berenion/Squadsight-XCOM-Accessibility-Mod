@@ -89,7 +89,11 @@ offers it only with the input device set to mouse and keyboard) works from the
 keyboard: Up / Down choose an action, Left / Right its first or second key,
 Enter and then the new key bind it, `1` clears the key, `2` resets every key,
 `3` saves and leaves, Tab switches between general and mission keys, Escape
-leaves without saving.
+leaves without saving. A mission action bound to a key the mod takes in a
+mission (below) is warned about, and a key the action already has, which the
+game refuses without a sound, is said: "Not changed: this action already has
+that key." The mod follows your bindings for the floor keys, Switch weapon and
+Interact.
 
 **Num Lock must be on.** With it off, Windows reports the numpad as the arrows,
 Home, End, Page Up and Page Down, and the mod reads it wrong.
@@ -125,7 +129,7 @@ the shot screen.
 | Hold a direction | Glide across the map; the tile it stops on is described. The glide speed is in the options menu. |
 | Numpad `5`, or `Space` | Where the cursor is, and what is there. |
 | Numpad `0`, or the key right of `P` | Confirm: move the soldier to the cursor. An aimed ability is fired with `Enter`, not with this key: while aiming, it cancels the aim. |
-| `F` / `C` | Move the cursor up / down a storey (the game's own keys). For a flying soldier, raise / lower the flight height instead; at the limit it says "Highest flight level." or "Lowest flight level." |
+| `F` / `C` | Move the cursor up / down a storey (the game's own keys: whatever Ascend / Descend floor are bound to, and the mouse wheel). For a flying soldier, raise / lower the flight height instead; at the limit it says "Highest flight level." or "Lowest flight level." |
 
 **Flying.** Once a soldier in Archangel armour has used Toggle Flight, the
 cursor moves through the air at the flight height: a tile says "In the air, 2
@@ -188,7 +192,9 @@ Some of the game's keys are taken over in a mission: `Home` is the scanner's (it
 only centred the camera), `End` is the scanner's (it was a second End Turn key;
 `Backspace` still ends the turn), and `Delete` and `Insert` are the mod's (they
 moved the camera). While you are navigating with the cursor, the arrows and
-`Space` are the cursor's, not the game's.
+`Space` are the cursor's, not the game's. So are `M`, `Page Up` / `Page Down`
+and the numpad: a game action bound to one of these does not work in a
+mission, which the Controls screen warns about.
 
 ### Sounds and options
 
