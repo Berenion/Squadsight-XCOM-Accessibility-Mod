@@ -528,7 +528,7 @@ static void move_finish(const float* loc, const char* why)
 #define INTERACT_POLL_MS    200
 
 static FieldSlot g_mv_ipoints, g_mv_icon, g_mv_owner;
-static struct { void* unit; void* actor; ULONGLONG next; int v_down; } g_ia;
+static struct { void* unit; void* actor; ULONGLONG next; } g_ia;
 
 // What the actor is, for the words: the level designer's icon
 // (XComInteractiveLevelActor.IconSocket: door 0, window 1, button 2), the
@@ -554,16 +554,18 @@ static int interact_words(void* actor, const char** what, const char** verb)
     return 1;
 }
 
+// The game's Interact (V unless rebound) as it goes down, with what the
+// soldier could act on: the next log says whether a press had anything to
+// open. Called from hook_moviecheck on the game's own press (InputEvent 536),
+// so it follows whatever key the action is bound to.
+void move_interact_pressed(void)
+{
+    logf_("move: interact pressed -- %s\n", g_ia.actor ? "something to open in reach" : "nothing in reach");
+}
+
 static void interact_poll(void)
 {
     ULONGLONG now = GetTickCount64();
-
-    // V as it goes down, with what the soldier could act on: the next log
-    // says whether a press had anything to open.
-    int v_down = game_has_focus() && (GetAsyncKeyState('V') & 0x8000) != 0;
-    if (v_down && !g_ia.v_down)
-        logf_("move: V pressed -- %s\n", g_ia.actor ? "something to open in reach" : "nothing in reach");
-    g_ia.v_down = v_down;
 
     if (now < g_ia.next) return;
     g_ia.next = now + INTERACT_POLL_MS;

@@ -7932,7 +7932,8 @@ static void weapon_costs_load(const char* dir, int is_ew)
 // X switches weapons (X_Key_Press -> CycleWeapons, and the container is
 // redrawn). A change of the equipped weapon this soon after X is that switch
 // and is said; one without it is a soldier switch, which says the weapon
-// itself.
+// itself. "X" is the action, on whatever key it is bound to: the press is
+// the game's own (game_press_note, numpad.c).
 //
 // Not the clock alone: X on a soldier who cannot switch (a heavy's rocket
 // launcher is not drawn) followed by Tab to a sniper with a pistol out read
@@ -7941,7 +7942,6 @@ static void weapon_costs_load(const char* dir, int is_ew)
 // for the same soldier with the same two.
 #define WEAPON_SWITCH_MS 1500
 static ULONGLONG g_weapon_x_at;
-int              g_weapon_x_down;
 static void*     g_weapon_x_unit;
 static char      g_weapon_x_types[2][48];
 

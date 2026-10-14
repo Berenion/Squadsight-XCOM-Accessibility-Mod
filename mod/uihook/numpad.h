@@ -57,7 +57,6 @@ void sight_poll(void);
 void soldier_poll(void);
 void soldier_readout(void);
 void weapon_x_pressed(void);
-extern int g_weapon_x_down;
 
 extern volatile LONG g_calls;           // the capture's call counter, for log lines
 extern int  g_speak;                    // speech on at all

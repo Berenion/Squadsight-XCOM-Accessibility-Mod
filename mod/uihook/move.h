@@ -16,6 +16,10 @@ int move_confirmed(int tx, int ty, float floor);
 // Every frame: follows the soldier until the move is over.
 void move_poll(void);
 
+// The game's Interact was pressed (hook_moviecheck, on InputEvent 536):
+// logged with whether anything is in reach to open.
+void move_interact_pressed(void);
+
 // The last point of the path a pathing pawn holds -- where a move along it
 // would end, which is not always where it was asked to go. 0 when unreadable.
 int path_end(void* ppawn, float* end);

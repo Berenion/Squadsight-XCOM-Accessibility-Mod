@@ -1311,9 +1311,50 @@ void nav_focus(int tx, int ty, float ground, const char* what)
 // or a crate top, closer than FLOOR_STEP_MIN, is still passed over. The
 // target is then put there exactly as Home puts it on a scanner item, so a
 // move gets its path verdict and an aim its odds, with "Floor N." in front.
-#define FLOOR_KEYS 2
+//
+// The keys are whatever the game has bound to the action, not F and C
+// themselves: a key rebound on the Controls screen moved the game's floor
+// while the mod went on reading the letters. F_Key_Press and C_Key_Press
+// (XComPlayerController, both builds) raise InputEvent(520) and (517), mask
+// 1 on the press, from whichever key holds the command -- the mouse wheel's
+// too ([XComGame.XComTacticalInput] binds MouseScrollUp / Down to them) -- so
+// hook_moviecheck notes the press and nav_poll acts on it, on the same frame
+// or the next. A press nav_poll has not taken within FLOOR_PRESS_STALE_MS
+// (practice on, the game in the background) is dropped, not acted on late.
 #define FLOOR_STEP_MIN 96.0f
-static int g_floor_down[FLOOR_KEYS];      // F, C
+#define INPUT_CMD_FLOOR_UP   520
+#define INPUT_CMD_FLOOR_DOWN 517
+#define FLOOR_PRESS_STALE_MS 500
+static int       g_floor_press;           // 1 up, -1 down, 0 none waiting
+static ULONGLONG g_floor_press_at;
+
+// The game's other two actions the mod listens to, read from the same press
+// for the same reason: Swap Weapon (X_Key_Press, 538), whose switch
+// weapon_note says only after a press was noted (weapon_x_pressed), and
+// Interact (V_Key_Press, 536), which move.c logs. Swap Weapon is noted here,
+// before the game acts on it, so the HUD's redraw of the weapon cannot come
+// first; not under another screen, where the game does not switch either and
+// a noted press would wait for a change that never comes.
+#define INPUT_CMD_INTERACT    536
+#define INPUT_CMD_SWAP_WEAPON 538
+
+static void game_press_note(int cmd, int mask)
+{
+    if (!(mask & 1)) return;
+    if (cmd == INPUT_CMD_FLOOR_UP || cmd == INPUT_CMD_FLOOR_DOWN) {
+        g_floor_press = cmd == INPUT_CMD_FLOOR_UP ? 1 : -1;
+        g_floor_press_at = GetTickCount64();
+    } else if (cmd == INPUT_CMD_SWAP_WEAPON) {
+        if (hud_has_keys()) {
+            logf_("weapon: swap from InputEvent %d\n", cmd);
+            weapon_x_pressed();
+        } else {
+            logf_("weapon: swap with another screen first -- not noted\n");
+        }
+    } else if (cmd == INPUT_CMD_INTERACT) {
+        move_interact_pressed();
+    }
+}
 
 // `seen` gets what each layer tried answered, for the log: "6:- 5:F0@212.6"
 // is no floor on layer 6, a floor at 212.6 in storey 0 on layer 5.
@@ -1689,7 +1730,7 @@ static void fly_floor_key(int dir)
     g_fly_key_down = GetTickCount64();
     g_fly_key_at = g_fly_key_down + FLY_KEY_MS;
     logf_("nav: %s in flight at %d, %d, plane at %.1f -- the game moves it\n",
-          dir > 0 ? "F" : "C", tx, ty, g_fly_key_from);
+          dir > 0 ? "floor up" : "floor down", tx, ty, g_fly_key_from);
 }
 
 // Each frame while a key waits: the new height as soon as the plane moves,
@@ -1776,7 +1817,7 @@ static void nav_floor(int dir)
             found = 0);
     if (!found) {
         logf_("nav: %s at %d, %d from %.1f -- no floor that way (%s)\n",
-              dir > 0 ? "F" : "C", tx, ty, from, seen);
+              dir > 0 ? "floor up" : "floor down", tx, ty, from, seen);
         char missed[256] = "", say[384];
         GUARDED("nav: floor missed",
                 floor_missed(tx, ty, from, 0, from, dir, missed, sizeof missed),
@@ -1788,7 +1829,7 @@ static void nav_floor(int dir)
         speech_say_now(say);
         return;
     }
-    logf_("nav: %s at %d, %d: %.1f -> %.1f, storey %d (%s)\n", dir > 0 ? "F" : "C",
+    logf_("nav: %s at %d, %d: %.1f -> %.1f, storey %d (%s)\n", dir > 0 ? "floor up" : "floor down",
           tx, ty, from, to, storey, seen);
     nav_focus(tx, ty, to, dir > 0 ? "the floor above" : "the floor below");
     // The floor is known, so no search: it starts 32 above the ground, and on
@@ -2295,6 +2336,7 @@ static void nav_poll(void)
         scan_keys_forget();
         g_radar_down[0] = g_radar_down[1] = 0;
         g_walls_down = 0;
+        g_floor_press = 0;
         g_glide_digit = 0;
         g_glide_steps = 0;
         walls_rescan();
@@ -2400,6 +2442,7 @@ static void nav_poll(void)
         scan_keys_forget();
         g_radar_down[0] = g_radar_down[1] = 0;
         g_walls_down = 0;
+        g_floor_press = 0;
         g_glide_digit = 0;
         g_glide_steps = 0;
         // And the walls go quiet: a field playing on over another window is
@@ -2551,16 +2594,21 @@ static void nav_poll(void)
     }
     g_walls_down = walls;
 
-    // F and C: the target a storey up or down. They are the game's own keys
-    // for it and reach the game as well; see nav_floor.
-    static const int floor_keys[FLOOR_KEYS] = { 'F', 'C' };
-    for (int k = 0; k < FLOOR_KEYS; k++) {
-        int down = (GetAsyncKeyState(floor_keys[k]) & 0x8000) != 0;
-        if (down && !g_floor_down[k]) {
-            if (blocked) logf_("nav: %c with another screen first -- not read\n", floor_keys[k]);
-            else nav_floor(k == 0 ? 1 : -1);
+    // The game's floor keys (F and C unless rebound): the target a storey up
+    // or down. The press reached the game as well; see nav_floor.
+    if (g_floor_press) {
+        int dir = g_floor_press;
+        ULONGLONG age = GetTickCount64() - g_floor_press_at;
+        g_floor_press = 0;
+        if (age > FLOOR_PRESS_STALE_MS)
+            logf_("nav: floor %s press %llu ms old -- dropped\n", dir > 0 ? "up" : "down", age);
+        else if (blocked)
+            logf_("nav: floor %s with another screen first -- not read\n", dir > 0 ? "up" : "down");
+        else {
+            logf_("nav: floor %s from InputEvent %d\n", dir > 0 ? "up" : "down",
+                  dir > 0 ? INPUT_CMD_FLOOR_UP : INPUT_CMD_FLOOR_DOWN);
+            nav_floor(dir);
         }
-        g_floor_down[k] = down;
     }
     // M: the mission's objectives, as the HUD lists them. M is bound in no
     // section of DefaultInput.ini or BaseInput.ini, so it never reaches the
@@ -2591,14 +2639,6 @@ static void nav_poll(void)
         speech_say_now(say);
     }
     mission_key_down = mkey;
-
-    // X: the game's weapon switch. Only noted; the change it makes is said
-    // when the HUD redraws the equipped weapon (weapon_note).
-    int x = (GetAsyncKeyState('X') & 0x8000) != 0;
-    // Not under another screen: the game does not switch there either, and a
-    // press noted would wait for a change that never comes.
-    if (x && !g_weapon_x_down && !blocked) weapon_x_pressed();
-    g_weapon_x_down = x;
 
     if (g_floor_check_at && GetTickCount64() >= g_floor_check_at) {
         g_floor_check_at = 0;
@@ -3677,6 +3717,8 @@ void __fastcall hook_moviecheck(void* self, void* edx, void* stack, void* result
             swallow = 2;
         if (!swallow && nav_keys_swallow(stack, cmd, mask))
             swallow = 3;
+        // Only a press the game goes on to act on is followed.
+        if (!swallow) game_press_note(cmd, mask);
         if (swallow == 1 && !g_end_swallowed) {
             g_end_swallowed = 1;
             logf_("scan: End taken from the game (cmd %d, mask %d) -- "
