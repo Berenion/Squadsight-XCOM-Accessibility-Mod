@@ -124,19 +124,62 @@ static const char* const KEY_NAMES[] = {
 
 
 // The keys Squadsight takes in a mission, unmodified, from whatever the game
-// bound them to (README, "Some of the game's keys are taken over"): Home and
-// End are the scanner's, Delete and Insert the mod's, and Space is numpad 5's
-// stand-in (nav_keys_swallow keeps it from the game while the HUD has the
-// keys) -- the 2026-10-13 (19:26) log listed it under "Open shot hud /
-// confirm action", which only Enter still is. Not listed under the
-// game's actions, which would be telling the player a key does what it no
-// longer does.
-static int taken_in_mission(const char* key, uint32_t bits)
+// bound them to (README, "Some of the game's keys are taken over"): Home, End
+// and Page Up / Down are the scanner's, Delete, Insert and M the mod's, the
+// numpad navigation's and its menus', and the arrows and Space stand in for
+// numpad 8, 2, 4, 6 and 5 (nav_keys_swallow keeps them from the game while
+// the HUD has the keys) -- the 2026-10-13 (19:26) log listed Space under
+// "Open shot hud / confirm action", which only Enter still is. Not listed
+// under the game's actions, which would be telling the player a key does what
+// it no longer does; and a mission action bound to one is warned about on the
+// Controls screen (controls.c) -- the 2026-10-14 log had Descend floor land
+// on Down, which the mod reads as numpad 2.
+static const char* const MISSION_TAKEN[] = {
+    "Home", "End", "PageUp", "PageDown", "Delete", "Insert", "SpaceBar", "M",
+    "Up", "Down", "Left", "Right",
+    "Multiply", "Add", "Subtract", "Divide", "Decimal",
+};
+
+// Taken by position, not by name (input_key_at): the key right of P (numpad
+// 5's move), two right of P (the ability menu), right of L and two right of
+// L (numpad + and -). UE3 names such a key by the virtual key the layout gives
+// it, as WinDrv does.
+static const int MISSION_TAKEN_SCAN[] = { 0x1A, 0x1B, 0x28, 0x2B };
+static const char* const MISSION_TAKEN_SCAN_NAME[] = {
+    "the key right of P", "the key two right of P", "the key right of L",
+    "the key two right of L",
+};
+
+static const char* oem_key_name(int vk)
+{
+    switch (vk) {
+    case VK_OEM_1:      return "Semicolon";
+    case VK_OEM_PLUS:   return "Equals";
+    case VK_OEM_COMMA:  return "Comma";
+    case VK_OEM_MINUS:  return "Underscore";
+    case VK_OEM_PERIOD: return "Period";
+    case VK_OEM_2:      return "Slash";
+    case VK_OEM_3:      return "Tilde";
+    case VK_OEM_4:      return "LeftBracket";
+    case VK_OEM_5:      return "Backslash";
+    case VK_OEM_6:      return "RightBracket";
+    case VK_OEM_7:      return "Quote";
+    }
+    return NULL;
+}
+
+int keys_taken_in_mission(const char* key, uint32_t bits)
 {
     if (bits & (KB_CONTROL | KB_SHIFT | KB_ALT)) return 0;
-    return !_stricmp(key, "Home") || !_stricmp(key, "End") ||
-           !_stricmp(key, "Delete") || !_stricmp(key, "Insert") ||
-           !_stricmp(key, "SpaceBar");
+    for (size_t i = 0; i < sizeof MISSION_TAKEN / sizeof *MISSION_TAKEN; i++)
+        if (!_stricmp(key, MISSION_TAKEN[i])) return 1;
+    if (!_strnicmp(key, "NumPad", 6)) return 1;
+    for (size_t i = 0; i < sizeof MISSION_TAKEN_SCAN / sizeof *MISSION_TAKEN_SCAN; i++) {
+        const char* name = oem_key_name(input_key_at(MISSION_TAKEN_SCAN[i],
+                                                     MISSION_TAKEN_SCAN_NAME[i]));
+        if (name && !_stricmp(key, name)) return 1;
+    }
+    return 0;
 }
 
 // A key as the Controls screen names it: "CTRL + F5", "NUM 4", "Spacebar".
@@ -227,7 +270,7 @@ static int game_lines(void* input, int mission, char (*lines)[HISTORY_PAGE_TEXT]
             if (!command_is(command, cmd)) continue;
             if (!name_to_string(&binds[b].Name, key, sizeof key)) continue;
             if (text_find_ci(key, "Mouse")) continue;
-            if (mission && taken_in_mission(key, binds[b].bits)) continue;
+            if (mission && keys_taken_in_mission(key, binds[b].bits)) continue;
             char words[96];
             key_words(key, binds[b].bits, words, sizeof words);
             if (len) {

@@ -101,6 +101,10 @@ int screen_mouse_event(void* screen, int cmd, const char* const* args, int nargs
 // `callback` sends. OnMouseEvent reads args from the end -- the callback
 // object last, "primarySlot" or not before it, the slot's index before that
 // -- so the same three serve a slot, a tab and a button.
+// Set while the mod's own click or cancel runs the screen's script, so what
+// that script draws is not taken for the screen acting on a key.
+static int g_own_call;
+
 static int click(void* screen, const char* callback, int index, int secondary)
 {
     char index_text[16];
@@ -108,7 +112,10 @@ static int click(void* screen, const char* callback, int index, int secondary)
     const char* args[3] = { index_text, secondary ? "secondarySlot" : "primarySlot", callback };
     logf_("controls: click %s (slot %d, %s)\n", callback, index,
           secondary ? "secondary" : "primary");
-    return screen_mouse_event(screen, MOUSE_CLICK, args, 3);
+    g_own_call = 1;
+    int sent = screen_mouse_event(screen, MOUSE_CLICK, args, 3);
+    g_own_call = 0;
+    return sent;
 }
 
 // screen.OnCancel(""): what Escape does, called while a slot is waiting so
@@ -121,7 +128,9 @@ static int cancel(void* screen)
     memset(parms, 0, sizeof parms);
     void** vtable = *(void***)screen;
     if (!readable(vtable + PROCESS_EVENT_VSLOT, sizeof(void*))) return 0;
+    g_own_call = 1;
     ((ProcessEventFn)vtable[PROCESS_EVENT_VSLOT])(screen, NULL, (void*)func, parms, NULL);
+    g_own_call = 0;
     return 1;
 }
 
@@ -135,7 +144,7 @@ typedef struct {
     uint32_t block;
 } UIKeyBind;
 
-static FieldSlot g_arr_slot, g_cat_slot, g_bound_slot, g_second_slot;
+static FieldSlot g_arr_slot, g_cat_slot, g_bound_slot, g_second_slot, g_conflict_slot;
 
 static const UIKeyBind* rows(void* screen, int* n)
 {
@@ -413,7 +422,27 @@ int controls_capture(LONG n, void* object, const char* obj_name, const char* fn_
             g_row = slot;
             if (second >= 0) g_secondary = second;
         }
-        say_row(n, object, 0);
+        // A mission action on a key the mod takes in a mission works only
+        // in the menus: the 2026-10-14 log had Descend floor bound to Down,
+        // which a mission reads as numpad 2. Bound as asked, and said.
+        char text[768], key[64] = "", words[96] = "";
+        row_words(object, g_row, 0, text, sizeof text);
+        int count, cat = screen_int(object, "m_eBindingCategory", &g_cat_slot, 1);
+        const UIKeyBind* r = rows(object, &count);
+        if (cat == 1 && r && g_row < count) {
+            const KeyBind* kb = g_secondary ? &r[g_row].Secondary : &r[g_row].Primary;
+            if (name_to_string(&kb->Name, key, sizeof key) &&
+                keys_taken_in_mission(key, kb->bits) &&
+                keys_bind_words(kb, words, sizeof words)) {
+                size_t len = strlen(text);
+                if (len + 1 < sizeof text) { text[len++] = ' '; text[len] = 0; }
+                tfmt_cat(text, sizeof text, &len, CONTROLS_MOD_KEY, words);
+            }
+        }
+        logf_("[%ld] controls: bound row %d %s to %s%s \"%s\"\n", n, g_row,
+              g_secondary ? "secondary" : "primary", key[0] ? key : "?",
+              words[0] ? ", a key the mod takes in missions" : "", text);
+        say(text);
         return 1;
     }
     // A list drawn afresh (a tab, a reset): the cursor stays if it still fits.
@@ -421,6 +450,27 @@ int controls_capture(LONG n, void* object, const char* obj_name, const char* fn_
         int count;
         rows(object, &count);
         if (g_row >= count) g_row = 0;
+    }
+    // A key the slot's own action already has: RawInputHandler finds it on
+    // the slot being bound (IsKeyAlreadyBound), deactivates the slot and
+    // returns -- nothing changes and nothing is drawn. The 2026-10-14 (16:53)
+    // log had a key pressed three times for Ascend floor, which already had
+    // B and F, each time in silence. Told apart from the other paths that
+    // deactivate a slot: a bind (conflicting -1), the conflict dialog
+    // (another slot), Escape (OnCancel, still awaiting at the call) and the
+    // mod's own clicks.
+    if (!strcmp(fn_name, "AS_DeactivateSlot") && !g_own_call &&
+        screen_bool(object, "m_bAwaitingInputForBind") == 0) {
+        int being = screen_int(object, "m_iKeySlotBeingBound", &g_bound_slot, 4);
+        int conflict = screen_int(object, "m_iKeySlotConflicting", &g_conflict_slot, 4);
+        if (being >= 0 && conflict == being) {
+            char row[512], text[768];
+            row_words(object, being, 0, row, sizeof row);
+            _snprintf_s(text, sizeof text, _TRUNCATE, "%s %s", T(CONTROLS_SAME_ACTION), row);
+            logf_("[%ld] controls: row %d refused a key it already has \"%s\"\n", n, being, text);
+            say(text);
+            return 1;
+        }
     }
     logf_("[%ld] controls: %s (not said)\n", n, fn_name);
     return 1;

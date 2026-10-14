@@ -24,3 +24,8 @@ typedef struct {
 // A binding's key as the game's Controls screen words it ("CTRL + F5",
 // "NUM 4"), in the game's language. 0, with `out` empty, for no key (None).
 int keys_bind_words(const KeyBind* kb, char* out, size_t out_sz);
+
+// Whether Squadsight takes this key (a UE3 key name, "Down", "NumPadTwo")
+// for itself in a mission, so a game action bound to it does not work there.
+// Only unmodified: a binding with Ctrl, Shift or Alt is the game's.
+int keys_taken_in_mission(const char* key, uint32_t bits);
