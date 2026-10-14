@@ -63,42 +63,52 @@ static void fstring_of(FString* s, wchar_t* buf, size_t buf_n, const char* text)
     s->Max = n;
 }
 
+#define MOUSE_ARGS_MAX 8
+
+int screen_mouse_event(void* screen, int cmd, const char* const* args, int nargs)
+{
+    if (nargs < 0 || nargs > MOUSE_ARGS_MAX) return 0;
+    const void* func = object_field_prop(screen, "OnMouseEvent");
+    uint32_t cmd_off = 0, args_off = 0;
+    if (!func || !param_offsets(func, &cmd_off, &args_off) ||
+        cmd_off > 0xF0 || args_off > 0xF0) {
+        logf_("mouse event: no OnMouseEvent to call (%p)\n", func);
+        return 0;
+    }
+    // Static: the array is ours and is never freed by the game (see above),
+    // and only the game's thread ever gets here.
+    static wchar_t texts[MOUSE_ARGS_MAX][32];
+    static FString fargs[MOUSE_ARGS_MAX];
+    for (int i = 0; i < nargs; i++)
+        fstring_of(&fargs[i], texts[i], 32, args[i] ? args[i] : "");
+
+    uint8_t parms[0x100];
+    memset(parms, 0, sizeof parms);
+    *(int32_t*)(parms + cmd_off) = cmd;
+    FArray* arr = (FArray*)(parms + args_off);
+    arr->Data = fargs;
+    arr->Num = nargs;
+    arr->Max = nargs;
+
+    void** vtable = *(void***)screen;
+    if (!readable(vtable + PROCESS_EVENT_VSLOT, sizeof(void*))) return 0;
+    ProcessEventFn pe = (ProcessEventFn)vtable[PROCESS_EVENT_VSLOT];
+    pe(screen, NULL, (void*)func, parms, NULL);
+    return 1;
+}
+
 // screen.OnMouseEvent(391, [index, slot, callback]): what a click on
 // `callback` sends. OnMouseEvent reads args from the end -- the callback
 // object last, "primarySlot" or not before it, the slot's index before that
 // -- so the same three serve a slot, a tab and a button.
 static int click(void* screen, const char* callback, int index, int secondary)
 {
-    const void* func = object_field_prop(screen, "OnMouseEvent");
-    uint32_t cmd_off = 0, args_off = 0;
-    if (!func || !param_offsets(func, &cmd_off, &args_off) ||
-        cmd_off > 0xF0 || args_off > 0xF0) {
-        logf_("controls: no OnMouseEvent to call (%p)\n", func);
-        return 0;
-    }
-    static wchar_t texts[3][32];
-    static FString args[3];
     char index_text[16];
     _snprintf_s(index_text, sizeof index_text, _TRUNCATE, "%d", index);
-    fstring_of(&args[0], texts[0], 32, index_text);
-    fstring_of(&args[1], texts[1], 32, secondary ? "secondarySlot" : "primarySlot");
-    fstring_of(&args[2], texts[2], 32, callback);
-
-    uint8_t parms[0x100];
-    memset(parms, 0, sizeof parms);
-    *(int32_t*)(parms + cmd_off) = MOUSE_CLICK;
-    FArray* arr = (FArray*)(parms + args_off);
-    arr->Data = args;
-    arr->Num = 3;
-    arr->Max = 3;
-
-    void** vtable = *(void***)screen;
-    if (!readable(vtable + PROCESS_EVENT_VSLOT, sizeof(void*))) return 0;
-    ProcessEventFn pe = (ProcessEventFn)vtable[PROCESS_EVENT_VSLOT];
+    const char* args[3] = { index_text, secondary ? "secondarySlot" : "primarySlot", callback };
     logf_("controls: click %s (slot %d, %s)\n", callback, index,
           secondary ? "secondary" : "primary");
-    pe(screen, NULL, (void*)func, parms, NULL);
-    return 1;
+    return screen_mouse_event(screen, MOUSE_CLICK, args, 3);
 }
 
 // screen.OnCancel(""): what Escape does, called while a slot is waiting so

@@ -2037,6 +2037,69 @@ static char      g_gollop_said[512];
 static int       g_gollop_key;
 static ULONGLONG g_gollop_key_at;
 
+// Work a capture wants done once the native it rides on has run (THUNK): a
+// script call that redraws the screen would, from inside the capture, draw
+// before the very call it follows, which then overwrote it with the stale
+// row. One at a time, taken before it runs, so the redraw's own calls cannot
+// set off another.
+static void (*g_after_fn)(void*);
+static void*   g_after_arg;
+
+static void after_call(void (*fn)(void*), void* arg)
+{
+    g_after_fn = fn;
+    g_after_arg = arg;
+}
+
+static void after_call_run(const char* tag)
+{
+    void (*fn)(void*) = g_after_fn;
+    if (!fn) return;
+    g_after_fn = NULL;
+    Fault f;
+    __try { fn(g_after_arg); }
+    __except (fault_note(GetExceptionInformation(), &f)) {
+        char prefix[64];
+        _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "%s after call", tag);
+        fault_log(prefix, &f, NULL);
+    }
+}
+
+// The Gray Market after a sale: the row to put the highlight on, and what the
+// sale's own draw would have said, held until that row is drawn (see the
+// Gray Market in base_call).
+static int  g_grey_target = -1;
+static char g_grey_sold_total[32];
+static char g_grey_sold_say[2048];
+
+static void grey_speak_held(void)
+{
+    if (!g_grey_sold_say[0]) return;
+    speech_cancel_pending();
+    if (g_speak && !muted()) speech_say_now(g_grey_sold_say);
+    g_grey_sold_say[0] = 0;
+    g_grey_sold_total[0] = 0;
+}
+
+// The click a sighted player makes on the row: OnMouseEvent(392, args), whose
+// handler is GetMgr().SetHighlighted(int(args[6])) and RealizeSelected (EU
+// and EW alike). SetHighlighted redraws the screen, and that draw says the
+// sale with the row.
+static void grey_reselect(void* screen)
+{
+    int target = g_grey_target;
+    g_grey_target = -1;
+    if (target < 0 || !screen || !unit_is_live(screen)) { grey_speak_held(); return; }
+    char index[16];
+    _snprintf_s(index, sizeof index, _TRUNCATE, "%d", target);
+    const char* args[7] = { "", "", "", "", "", "", index };
+    int sent = screen_mouse_event(screen, 392, args, 7);
+    logf_("grey: after the sale, row %d %s\n", target,
+          sent ? "highlighted" : "not reached -- no OnMouseEvent");
+    // Said here if the redraw did not say it.
+    grey_speak_held();
+}
+
 static int base_call(const Call* c)
 {
     const char* tag = c->tag;
@@ -2515,6 +2578,14 @@ static int base_call(const Call* c)
     // the count and the total on Right or Left, which change the item's stock
     // with its count; the sale on Enter, which empties the total and leaves
     // the stock as it was.
+    //
+    // The sale (XGGreyMarketUI.OnCompleteTransaction) ends in BuildItemList,
+    // which sets m_iHighlight to 0, so after every sale the highlight was back
+    // on the first row and the player had to walk down again. The row after
+    // the one the sale was made on is highlighted instead, by the click a
+    // sighted player would make (grey_reselect), once the sale's draw is
+    // through; a row sold out is gone from the rebuilt list, so "after" is
+    // found by name in the list as it was before the sale.
     if (strncmp(obj_name, "UIGreyMarket", 12) == 0) {
         #define GREY_ROWS 48
         typedef struct { char name[96], store[16], price[32], sell[16], total[32]; int can; } GreyRow;
@@ -2522,16 +2593,25 @@ static int base_call(const Call* c)
         static GreyRow s_prev;                  // the selected row as last said
         static char s_title[96], s_head_total[32], s_prev_total[32];
         static int  s_n, s_sel = -1;
+        static char s_was[GREY_ROWS][96];       // the rows' names as last said
+        static int  s_was_n, s_was_sel = -1;
         static void* s_obj;                     // a new screen is a new visit
         if (object != s_obj) {
             s_obj = object;
             s_n = 0;
             s_sel = -1;
+            s_was_n = 0;
+            s_was_sel = -1;
             memset(&s_prev, 0, sizeof s_prev);
             s_prev_total[0] = 0;
+            g_grey_sold_say[0] = 0;
+            g_grey_sold_total[0] = 0;
         }
         if (strcmp(fn_name, "AS_SetTitle") == 0) {
             frame_string(node, locals, 0, s_title, sizeof s_title);
+            // The first call of every draw (UpdateData): the rows are counted
+            // afresh, since a sale that sells one out leaves one fewer.
+            s_n = 0;
             return 1;
         }
         if (strcmp(fn_name, "AS_SetHeader") == 0 && p->nnumbers) {
@@ -2601,11 +2681,38 @@ static int base_call(const Call* c)
             int sold = !counted && s_prev_total[0] && strcmp(s_prev_total, s_head_total) != 0 &&
                        (!s_head_total[0] || strncmp(s_head_total, "0 ", 2) == 0);
             char say[2048] = "";
-            if (fresh)
+            int held = 0;
+            if (g_grey_sold_total[0] && r) {
+                // The row grey_reselect asked for, after a sale.
+                tfmt(say, sizeof say, MAIN_GREY_SOLD, g_grey_sold_total, item);
+                g_grey_sold_total[0] = 0;
+                g_grey_sold_say[0] = 0;
+            }
+            else if (fresh)
                 _snprintf_s(say, sizeof say, _TRUNCATE, "%s%s%s %s %s",
                             s_title, s_title[0] ? ". " : "", item, info, T(MAIN_GREY_KEYS));
-            else if (sold)
+            else if (sold) {
                 tfmt(say, sizeof say, MAIN_GREY_SOLD, s_prev_total, item);
+                // The row after the one sold on: the first of those that
+                // followed it still in the list, else that row itself, else
+                // the last.
+                int target = -1;
+                for (int j = s_was_sel + 1; j < s_was_n && target < 0; j++)
+                    for (int i = 0; i < s_n; i++)
+                        if (strcmp(s_row[i].name, s_was[j]) == 0) { target = i; break; }
+                for (int i = 0; target < 0 && s_was_sel >= 0 && s_was_sel < s_was_n && i < s_n; i++)
+                    if (strcmp(s_row[i].name, s_was[s_was_sel]) == 0) target = i;
+                if (target < 0 && s_n > 0) target = s_n - 1;
+                logf_("[%ld] grey: sold on row %d of %d; now %d rows, row %d next\n",
+                      n, s_was_sel, s_was_n, s_n, target);
+                if (target > 0 && target != s_sel) {
+                    held = 1;
+                    g_grey_target = target;
+                    strncpy_s(g_grey_sold_total, sizeof g_grey_sold_total, s_prev_total, _TRUNCATE);
+                    strncpy_s(g_grey_sold_say, sizeof g_grey_sold_say, say, _TRUNCATE);
+                    after_call(grey_reselect, object);
+                }
+            }
             else if (counted && marked)
                 tfmt(say, sizeof say, MAIN_GREY_SELLING_TOTAL, r->sell, r->total, s_head_total);
             else if (counted) {
@@ -2619,8 +2726,13 @@ static int base_call(const Call* c)
             else memset(&s_prev, 0, sizeof s_prev);
             if (!s_prev.name[0]) strcpy_s(s_prev.name, sizeof s_prev.name, "-");
             strncpy_s(s_prev_total, sizeof s_prev_total, s_head_total, _TRUNCATE);
-            logf_("[%ld] %s %s.%s  GREY %d \"%s\"\n", n, tag, obj_name, fn_name, s_sel, say);
-            if (say[0]) {
+            for (int i = 0; i < s_n; i++)
+                strncpy_s(s_was[i], sizeof s_was[i], s_row[i].name, _TRUNCATE);
+            s_was_n = s_n;
+            s_was_sel = s_sel;
+            logf_("[%ld] %s %s.%s  GREY %d \"%s\"%s\n", n, tag, obj_name, fn_name, s_sel, say,
+                  held ? " -- held for the next row" : "");
+            if (say[0] && !held) {
                 speech_cancel_pending();
                 if (g_speak && !muted()) speech_say_now(say);
             }
@@ -7030,6 +7142,7 @@ static int rewrite_cmd(LONG n, void* stack)
             fault_log(prefix, &f, tls_where);                                 \
         }                                                                     \
         g_orig_##id(self, edx, stack, result);                                \
+        after_call_run(tag);                                                  \
     }
 
 

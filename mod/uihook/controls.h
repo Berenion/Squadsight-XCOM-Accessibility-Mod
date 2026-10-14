@@ -22,3 +22,9 @@ int controls_capture(LONG n, void* object, const char* obj_name, const char* fn_
 // Whether the Controls screen was the last to take a key or draw, for the key
 // list (Ctrl + /).
 int controls_up(void);
+
+// screen.OnMouseEvent(cmd, args) through UObject::ProcessEvent: what Flash
+// sends for a mouse event on any screen. Runs the screen's script on the
+// calling thread, so only from a hook the game's thread is in. 0 when the
+// screen has no OnMouseEvent to call.
+int screen_mouse_event(void* screen, int cmd, const char* const* args, int nargs);
