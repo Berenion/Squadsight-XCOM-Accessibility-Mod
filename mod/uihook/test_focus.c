@@ -2973,6 +2973,33 @@ int main(void)
             hq_sat_reset();
         }
 
+        // The raid on a country: the wait for Enter the 2026-10-15 (11:54)
+        // log never got past, and the two results.
+        {
+            static char say[2 * HQ_SIT_TEXT];
+            check(!hq_raid_mode(2), "the wait is not a return to the map");
+            hq_raid_wait("Analyzing Intelligence Data...");
+            hq_raid_wait_say("CONFIRM", say, sizeof say);
+            check(strcmp(say, "Analyzing Intelligence Data... Enter: CONFIRM") == 0,
+                  "the raid's wait names its key");
+            hq_raid_mode(3);
+            hq_raid_results("CHINA", "IS HARBORING THE EXALT BASE",
+                            "We can now send a squad to assault the base.", "", -1);
+            hq_raid_results_say("CONFIRM", say, sizeof say);
+            check(strcmp(say, "CHINA IS HARBORING THE EXALT BASE. We can now send a squad "
+                              "to assault the base. Enter: CONFIRM") == 0,
+                  "a raid that found the base");
+            hq_raid_mode(4);
+            hq_raid_results("FRANCE", "HAS WITHDRAWN FROM XCOM",
+                            "France has withdrawn all support.", "DOOM TRACKER", 2);
+            hq_raid_results_say("CONFIRM", say, sizeof say);
+            check(strcmp(say, "FRANCE HAS WITHDRAWN FROM XCOM. France has withdrawn all "
+                              "support. DOOM TRACKER: 2. Enter: CONFIRM") == 0,
+                  "a raid on the wrong country, with the doom tracker");
+            check(hq_raid_mode(1) && hq_raid_back() && !hq_raid_back(),
+                  "closing a result says the country once");
+        }
+
         // The Situation Room, as the EW log of 2026-09-24 drew it.
         {
             static char sit[HQ_SIT_LINES][HQ_SIT_TEXT];

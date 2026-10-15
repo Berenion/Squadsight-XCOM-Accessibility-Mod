@@ -876,6 +876,79 @@ int hq_sat_say(char* out, size_t out_sz)
     return 1;
 }
 
+// ---- covert ops: the raid on the EXALT base ------------------------------------
+
+static struct {
+    char wait[160];
+    char title[64], subtitle[128], body[HQ_SIT_TEXT], doom[64];
+    int  doom_n;
+    int  mode;
+    int  back;              // a result was closed: say the country again
+} g_raid;
+
+int hq_raid_mode(int mode)
+{
+    if ((g_raid.mode == 3 || g_raid.mode == 4) && mode == 1) g_raid.back = 1;
+    g_raid.mode = mode;
+    return g_raid.back;
+}
+
+int hq_raid_back(void)
+{
+    int b = g_raid.back;
+    g_raid.back = 0;
+    return b;
+}
+
+void hq_raid_wait(const char* desc)
+{
+    strncpy_s(g_raid.wait, sizeof g_raid.wait, desc ? desc : "", _TRUNCATE);
+}
+
+void hq_raid_wait_say(const char* button, char* out, size_t out_sz)
+{
+    size_t w = 0;
+    out[0] = 0;
+    sat_put(out, out_sz, &w, g_raid.wait);
+    if (button && *button) {
+        char part[128];
+        _snprintf_s(part, sizeof part, _TRUNCATE, "%s: %s", T(KEY_ENTER), button);
+        sat_put(out, out_sz, &w, part);
+    }
+}
+
+void hq_raid_results(const char* title, const char* subtitle, const char* body,
+                     const char* doom, int doom_n)
+{
+    strncpy_s(g_raid.title, sizeof g_raid.title, title ? title : "", _TRUNCATE);
+    strncpy_s(g_raid.subtitle, sizeof g_raid.subtitle, subtitle ? subtitle : "", _TRUNCATE);
+    strncpy_s(g_raid.body, sizeof g_raid.body, body ? body : "", _TRUNCATE);
+    strncpy_s(g_raid.doom, sizeof g_raid.doom, doom ? doom : "", _TRUNCATE);
+    g_raid.doom_n = doom_n;
+}
+
+void hq_raid_results_say(const char* ok, char* out, size_t out_sz)
+{
+    size_t w = 0;
+    char part[HQ_SIT_TEXT];
+    out[0] = 0;
+    // The country and the verdict are one sentence on screen: "CHINA" over
+    // "IS HARBORING THE EXALT BASE" (XGInfiltratorSitRoomUI.UpdateResults*).
+    _snprintf_s(part, sizeof part, _TRUNCATE, "%s%s%s", g_raid.title,
+                g_raid.title[0] && g_raid.subtitle[0] ? " " : "", g_raid.subtitle);
+    sat_put(out, out_sz, &w, part);
+    sat_put(out, out_sz, &w, g_raid.body);
+    // Only a failed raid draws the doom tracker; a success passes "" and -1.
+    if (g_raid.doom[0] && g_raid.doom_n >= 0) {
+        _snprintf_s(part, sizeof part, _TRUNCATE, "%s: %d", g_raid.doom, g_raid.doom_n);
+        sat_put(out, out_sz, &w, part);
+    }
+    if (ok && *ok) {
+        _snprintf_s(part, sizeof part, _TRUNCATE, "%s: %s", T(KEY_ENTER), ok);
+        sat_put(out, out_sz, &w, part);
+    }
+}
+
 // ---- a day passing ------------------------------------------------------------
 
 static char g_day[96];

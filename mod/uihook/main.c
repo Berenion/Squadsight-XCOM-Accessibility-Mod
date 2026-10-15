@@ -4022,6 +4022,75 @@ static int base_call(const Call* c)
                   a.nb > 0 && a.b[0] ? "" : " (off)");
             return 1;
         }
+        // The raid on a country (hq.h). None of it was said: the 2026-10-15
+        // (11:54) log confirms the warning, then "Analyzing Intelligence
+        // Data..." waits for an Enter that never came -- arrows and Escape,
+        // which that state ignores, and the log ends.
+        static char say[2 * HQ_SIT_TEXT];
+        if (strcmp(fn_name, "AS_SetDisplayMode") == 0 && p->nnumbers) {
+            // A byte parameter: only the low byte of the slot is the mode
+            // (the log read 18559234 for 2).
+            int mode = (int)p->numbers[0] & 0xFF;
+            int back = hq_raid_mode(mode);
+            logf_("[%ld] %s %s.%s  MODE %d%s\n", n, tag, obj_name, fn_name, mode,
+                  back ? " (back from a result)" : "");
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetTransitionDescription") == 0) {
+            frame_args(node, locals, &a);
+            hq_raid_wait(a.ns > 0 ? a.s[0] : "");
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetTransitionButton") == 0) {
+            frame_args(node, locals, &a);
+            hq_raid_wait_say(a.ns > 1 ? a.s[1] : "", say, sizeof say);
+            logf_("[%ld] %s %s.%s  RAID wait \"%s\"\n", n, tag, obj_name, fn_name, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetResults") == 0) {
+            frame_args(node, locals, &a);
+            frame_lines(node, locals, "Body", body, sizeof body);
+            int doom_n = p->nnumbers ? (int)p->numbers[p->nnumbers - 1] : -1;
+            hq_raid_results(a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
+                            body[0] ? body : (a.ns > 2 ? a.s[2] : ""), a.ns > 4 ? a.s[4] : "",
+                            doom_n);
+            logf_("[%ld] %s %s.%s  RAID results \"%s\" \"%s\" doom \"%s\" %d\n", n, tag,
+                  obj_name, fn_name, a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
+                  a.ns > 4 ? a.s[4] : "", doom_n);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_SetOkButton") == 0) {
+            frame_args(node, locals, &a);
+            hq_raid_results_say(a.ns > 1 ? a.s[1] : "", say, sizeof say);
+            logf_("[%ld] %s %s.%s  RAID says \"%s\"\n", n, tag, obj_name, fn_name, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return 1;
+        }
+        // Drawn straight after the OK button, on a success only: queued
+        // behind the result.
+        if (strcmp(fn_name, "AS_SetCancelButton") == 0) {
+            frame_args(node, locals, &a);
+            if (a.ns > 1 && a.s[1][0]) {
+                _snprintf_s(say, sizeof say, _TRUNCATE, "%s: %s", T(KEY_ESCAPE), a.s[1]);
+                logf_("[%ld] %s %s.%s  RAID cancel \"%s\"\n", n, tag, obj_name, fn_name, say);
+                if (g_speak && !muted()) speech_say(say);
+            }
+            return 1;
+        }
+        // The last thing the map's redraw sends after a result is closed
+        // (InfiltratorState.OnAccept / OnUCancel); the selection did not
+        // move, so the country is said from what the HUD just drew.
+        if (strcmp(fn_name, "AS_SetIntelLabel") == 0 && hq_raid_back()) {
+            if (hq_sat_say(say, sizeof say)) {
+                logf_("[%ld] %s %s.%s  RAID back -> \"%s\"\n", n, tag, obj_name, fn_name, say);
+                speech_cancel_pending();
+                if (g_speak && !muted()) speech_say_now(say);
+            }
+            return 1;
+        }
     }
     if (strncmp(obj_name, "UISituationRoom_", 16) == 0 &&
         obj_name[16] >= '0' && obj_name[16] <= '9') {

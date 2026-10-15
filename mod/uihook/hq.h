@@ -333,6 +333,44 @@ void hq_sat_reset(void);
 // Returns 0, with nothing written, when no country is known.
 int  hq_sat_say(char* out, size_t out_sz);
 
+// ---- covert ops: the raid on the EXALT base (EW) ----------------------------
+//
+// Accuse (1, sent as X) on a country, and Confirm on the warning, run
+// UISituationRoom.InfiltratorState.OnAccuseCallback -> PushState
+// ('TransitionState'):
+//
+//     UISituationRoomHUD.AS_SetDisplayMode(2)
+//     UISituationRoomHUD.AS_SetTransitionDescription("Analyzing Intelligence Data...")
+//     UISituationRoomHUD.AS_SetTransitionButton(icon, "CONFIRM")
+//
+// and only Enter leaves it (TransitionState.OnAccept; the class's OnUCancel is
+// empty). That runs XGInfiltratorSitRoomUI.OnAccuse, whose GoToView(2 or 1)
+// draws the result (UpdateSuccessResults / UpdateFailResults):
+//
+//     AS_SetDisplayMode(3 success, 4 fail)
+//     AS_SetResults(title, subtitle, body, countryLabel, doom, doomValue)
+//         -- "CHINA", "IS HARBORING THE EXALT BASE", ...; doom "" and -1 on
+//            a success, "DOOM TRACKER" and the countries lost on a failure
+//     AS_SetOkButton(icon, "CONFIRM")
+//     AS_SetCancelButton(icon, "CANCEL")      -- success only
+//
+// Enter then launches the raid (squad select) or closes the failure; Escape
+// backs out. Both return to the map with AS_SetDisplayMode(1) and redraw the
+// HUD, ending in AS_SetIntelLabel, but no SetSelected: nothing named the
+// country again.
+
+// The HUD's display mode; returns 1 when it went from a result back to the
+// map (hq_raid_back then says so once).
+int  hq_raid_mode(int mode);
+int  hq_raid_back(void);
+void hq_raid_wait(const char* desc);
+// "Analyzing Intelligence Data... Enter: CONFIRM"
+void hq_raid_wait_say(const char* button, char* out, size_t out_sz);
+void hq_raid_results(const char* title, const char* subtitle, const char* body,
+                     const char* doom, int doom_n);
+// "CHINA IS HARBORING THE EXALT BASE. We've successfully ... Enter: CONFIRM"
+void hq_raid_results_say(const char* ok, char* out, size_t out_sz);
+
 // ---- a day passing (the geoscape's clock) ------------------------------------
 //
 // UIStrategyComponent_Clock.UpdateData sends AS_SetDateTime whenever the game's
