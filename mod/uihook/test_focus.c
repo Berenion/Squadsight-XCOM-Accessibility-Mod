@@ -3000,6 +3000,36 @@ int main(void)
                   "closing a result says the country once");
         }
 
+        // The campaign's recap, as the 2026-10-15 (15:31) log drew it.
+        {
+            static char say[1024];
+            hq_recap_labels("Victory", "Normal Difficulty", "Next", "Previous", "World");
+            hq_recap_page(0, "Game Summary");
+            hq_recap_line(0, "Overall Score", "7174", "-");
+            hq_recap_line(0, "Days until Victory", "207 Days", "-");
+            hq_recap_page(1, "Combat");
+            hq_recap_line(1, "Battles Fought", "49", "-");
+            hq_recap_first(say, sizeof say);
+            check(strcmp(say, "Victory. Normal Difficulty. Game Summary, page 1 of 2. "
+                              "Overall Score: 7174, 1 of 2. Up and Down read the stats. "
+                              "Enter: Next. Escape: Previous") == 0,
+                  "the recap opens on its result and first stat");
+            hq_recap_step(-1, say, sizeof say);
+            check(strcmp(say, "Overall Score: 7174, 1 of 2") == 0, "Up stops on the first stat");
+            hq_recap_step(1, say, sizeof say);
+            hq_recap_step(1, say, sizeof say);
+            check(strcmp(say, "Days until Victory: 207 Days, 2 of 2") == 0,
+                  "Down stops on the last");
+            hq_recap_world(1, 0, "38");
+            hq_recap_turn(1, say, sizeof say);
+            check(strcmp(say, "Combat, page 2 of 2. Battles Fought: 49, World: 38, 1 of 1") == 0,
+                  "the next page starts on its first stat, with the world's figure");
+            check(hq_recap_page_at() == 1, "and is the page now");
+            hq_recap_turn(-1, say, sizeof say);
+            check(hq_recap_page_at() == 0 && strncmp(say, "Game Summary", 12) == 0,
+                  "Escape goes back a page");
+        }
+
         // The Situation Room, as the EW log of 2026-09-24 drew it.
         {
             static char sit[HQ_SIT_LINES][HQ_SIT_TEXT];

@@ -1885,6 +1885,7 @@ static CallFamily call_family(const char* o)
         if (name_is(o, "UIOTS") || name_is(o, "UIObjectivesScreen_")) return FAM_BASE;
         break;
     case 'P': if (name_is(o, "UIPsiLabs")) return FAM_BASE; break;
+    case 'R': if (name_is(o, "UIRecap")) return FAM_BASE; break;
     case 'S':
         if (name_is(o, "UISituationRoom") || name_is(o, "UISoldierGeneMods") ||
             name_is(o, "UISoldierAugmentation") ||
@@ -2162,6 +2163,62 @@ static int base_call(const Call* c)
         speech_cancel_pending();
         if (g_speak && !muted()) speech_say_now(g_gollop_said);
         return 1;
+    }
+    // The campaign's end (UIRecap; hq.h). Drawn whole by OnInit, kept here,
+    // and said a page and a stat at a time; Up and Down are in rewrite_cmd.
+    // The values come through GetHTMLColoredText, so the markup is taken off.
+    if (strncmp(obj_name, "UIRecap", 7) == 0) {
+        static FrameArgs a;
+        static char say[1024];
+        if (strcmp(fn_name, "AS_SetLabels") == 0) {
+            frame_args(node, locals, &a);
+            for (int i = 0; i < a.ns; i++) strip_markup(a.s[i]);
+            hq_recap_labels(a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "",
+                            a.ns > 2 ? a.s[2] : "", a.ns > 3 ? a.s[3] : "",
+                            a.ns > 6 ? a.s[6] : "");
+            logf_("[%ld] %s %s.%s  RECAP \"%s\" \"%s\"\n", n, tag, obj_name, fn_name,
+                  a.ns > 0 ? a.s[0] : "", a.ns > 1 ? a.s[1] : "");
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_AddPage") == 0) {
+            frame_args(node, locals, &a);
+            hq_recap_page(a.ns > 0 ? atoi(a.s[0]) : -1, a.ns > 1 ? a.s[1] : "");
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_AddLine") == 0) {
+            frame_args(node, locals, &a);
+            for (int i = 0; i < a.ns; i++) strip_markup(a.s[i]);
+            hq_recap_line(a.ns > 0 ? atoi(a.s[0]) : -1, a.ns > 1 ? a.s[1] : "",
+                          a.ns > 2 ? a.s[2] : "", a.ns > 3 ? a.s[3] : "");
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_UpdateWorldValue") == 0) {
+            frame_args(node, locals, &a);
+            for (int i = 0; i < a.ns; i++) strip_markup(a.s[i]);
+            // (pageId, Idx, worldValue): the int is not among the strings.
+            int index = p->nnumbers ? (int)p->numbers[0] : -1;
+            hq_recap_world(a.ns > 0 ? atoi(a.s[0]) : -1, index,
+                           a.ns > 1 ? a.s[a.ns - 1] : "");
+            return 1;
+        }
+        // Queued, not cut in: the Second Wave notice is drawn and said just
+        // before the recap on a won campaign (the 15:31 log).
+        if (strcmp(fn_name, "AS_ShowFirstPage") == 0) {
+            hq_recap_first(say, sizeof say);
+            logf_("[%ld] %s %s.%s  RECAP says \"%s\"\n", n, tag, obj_name, fn_name, say);
+            if (g_speak && !muted()) speech_say(say);
+            return 1;
+        }
+        if (strcmp(fn_name, "AS_NextPage") == 0 || strcmp(fn_name, "AS_PreviousPage") == 0) {
+            hq_recap_turn(fn_name[3] == 'N' ? 1 : -1, say, sizeof say);
+            logf_("[%ld] %s %s.%s  RECAP says \"%s\"\n", n, tag, obj_name, fn_name, say);
+            speech_cancel_pending();
+            if (g_speak && !muted()) speech_say_now(say);
+            return 1;
+        }
+        // Scrolled by the arrows, which rewrite_cmd says.
+        if (strcmp(fn_name, "AS_ScrollUp") == 0 || strcmp(fn_name, "AS_ScrollDown") == 0)
+            return 1;
     }
     if (strncmp(obj_name, "UIStrategyComponent_Clock", 25) == 0 &&
         strcmp(fn_name, "AS_SetDateTime") == 0) {
@@ -7046,6 +7103,25 @@ static int rewrite_cmd(LONG n, void* stack)
                    strncmp(screen, "UIStrategyHUD", 13) == 0) {
             *cmd_slot = CMD_INERT;
             return SUPPRESS;
+        }
+    }
+
+    // The campaign's recap (hq.h): Up and Down read its stats one at a time
+    // -- the screen scrolls on them too (OnScrollUp / OnScrollDown) -- Left
+    // and Right, which it ignores, say the stat again, and Escape on the first
+    // page, where OnCancel draws nothing, says the page again. Enter and
+    // Escape otherwise turn the page, and AS_NextPage / AS_PreviousPage say it.
+    if (press && strncmp(screen, "UIRecap", 7) == 0) {
+        static char say[1024];
+        say[0] = 0;
+        if (cmd == FXS_ARROW_UP) hq_recap_step(-1, say, sizeof say);
+        else if (cmd == FXS_ARROW_DOWN) hq_recap_step(1, say, sizeof say);
+        else if (cmd >= FXS_ARROW_UP && cmd <= FXS_ARROW_LEFT) hq_recap_step(0, say, sizeof say);
+        else if (cmd == FXS_KEY_ESCAPE && hq_recap_page_at() == 0) hq_recap_turn(0, say, sizeof say);
+        if (say[0]) {
+            logf_("[%ld] Input        %s  RECAP \"%s\"\n", n, screen, say);
+            speech_cancel_pending();
+            if (g_speak) speech_say_now(say);
         }
     }
 

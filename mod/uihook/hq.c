@@ -1332,3 +1332,141 @@ void hq_report_text(char* out, size_t out_sz)
         put_piece(out, out_sz, &used, used ? " " : "", piece);
     }
 }
+
+// ---- the campaign's end -------------------------------------------------------
+
+#define RECAP_PAGES 8
+#define RECAP_LINES 48
+typedef struct {
+    char stat[96];
+    char value[48];
+    char world[48];
+} RecapLine;
+static struct {
+    char result[96], difficulty[96], next[48], previous[48], world[48];
+    int  npages;
+    struct {
+        char      title[96];
+        int       n;
+        RecapLine line[RECAP_LINES];
+    } page[RECAP_PAGES];
+    int at, line;
+} g_recap;
+
+void hq_recap_labels(const char* result, const char* difficulty, const char* next,
+                     const char* previous, const char* world)
+{
+    // The first call of a new recap: the pages that follow are its own.
+    memset(&g_recap, 0, sizeof g_recap);
+    strncpy_s(g_recap.result, sizeof g_recap.result, result ? result : "", _TRUNCATE);
+    strncpy_s(g_recap.difficulty, sizeof g_recap.difficulty, difficulty ? difficulty : "",
+              _TRUNCATE);
+    strncpy_s(g_recap.next, sizeof g_recap.next, next ? next : "", _TRUNCATE);
+    strncpy_s(g_recap.previous, sizeof g_recap.previous, previous ? previous : "",
+              _TRUNCATE);
+    strncpy_s(g_recap.world, sizeof g_recap.world, world ? world : "", _TRUNCATE);
+}
+
+void hq_recap_page(int page, const char* title)
+{
+    if (page < 0 || page >= RECAP_PAGES) return;
+    strncpy_s(g_recap.page[page].title, sizeof g_recap.page[page].title,
+              title ? title : "", _TRUNCATE);
+    if (page >= g_recap.npages) g_recap.npages = page + 1;
+}
+
+void hq_recap_line(int page, const char* stat, const char* value, const char* world)
+{
+    if (page < 0 || page >= RECAP_PAGES) return;
+    int i = g_recap.page[page].n;
+    if (i >= RECAP_LINES) return;
+    RecapLine* l = &g_recap.page[page].line[i];
+    strncpy_s(l->stat, sizeof l->stat, stat ? stat : "", _TRUNCATE);
+    strncpy_s(l->value, sizeof l->value, value ? value : "", _TRUNCATE);
+    strncpy_s(l->world, sizeof l->world, world ? world : "", _TRUNCATE);
+    g_recap.page[page].n = i + 1;
+    if (page >= g_recap.npages) g_recap.npages = page + 1;
+}
+
+void hq_recap_world(int page, int index, const char* world)
+{
+    if (page < 0 || page >= RECAP_PAGES || index < 0 || index >= g_recap.page[page].n)
+        return;
+    RecapLine* l = &g_recap.page[page].line[index];
+    strncpy_s(l->world, sizeof l->world, world ? world : "", _TRUNCATE);
+}
+
+int hq_recap_page_at(void) { return g_recap.at; }
+
+// "Overall Score: 7174, 1 of 10", with the world's figure when there is one:
+// the column says "-" until the world stats arrive, and offline they never do.
+static void recap_line_say(char* out, size_t out_sz)
+{
+    out[0] = 0;
+    if (g_recap.at < 0 || g_recap.at >= g_recap.npages) return;
+    int n = g_recap.page[g_recap.at].n;
+    if (n <= 0 || g_recap.line < 0 || g_recap.line >= n) return;
+    const RecapLine* l = &g_recap.page[g_recap.at].line[g_recap.line];
+    char stat[HQ_RECAP_TEXT];
+    int world = l->world[0] && strcmp(l->world, "-") != 0;
+    _snprintf_s(stat, sizeof stat, _TRUNCATE, "%s: %s%s%s%s%s", l->stat, l->value,
+                world ? ", " : "", world ? g_recap.world : "", world ? ": " : "",
+                world ? l->world : "");
+    tfmt(out, out_sz, TXT_NAME_N_OF, stat, g_recap.line + 1, n);
+}
+
+// "Game Summary, page 1 of 4" and its first stat.
+static void recap_page_say(char* out, size_t out_sz, size_t* w)
+{
+    char part[2 * HQ_RECAP_TEXT];
+    if (g_recap.at < 0 || g_recap.at >= g_recap.npages) return;
+    tfmt(part, sizeof part, RECAP_PAGE, g_recap.page[g_recap.at].title, g_recap.at + 1,
+         g_recap.npages);
+    sat_put(out, out_sz, w, part);
+    recap_line_say(part, sizeof part);
+    sat_put(out, out_sz, w, part);
+}
+
+void hq_recap_first(char* out, size_t out_sz)
+{
+    size_t w = 0;
+    char part[2 * HQ_RECAP_TEXT];
+    out[0] = 0;
+    g_recap.at = 0;
+    g_recap.line = 0;
+    sat_put(out, out_sz, &w, g_recap.result);
+    sat_put(out, out_sz, &w, g_recap.difficulty);
+    recap_page_say(out, out_sz, &w);
+    sat_put(out, out_sz, &w, T(RECAP_KEYS));
+    if (g_recap.next[0]) {
+        _snprintf_s(part, sizeof part, _TRUNCATE, "%s: %s", T(KEY_ENTER), g_recap.next);
+        sat_put(out, out_sz, &w, part);
+    }
+    if (g_recap.previous[0]) {
+        _snprintf_s(part, sizeof part, _TRUNCATE, "%s: %s", T(KEY_ESCAPE), g_recap.previous);
+        sat_put(out, out_sz, &w, part);
+    }
+}
+
+void hq_recap_turn(int dir, char* out, size_t out_sz)
+{
+    size_t w = 0;
+    out[0] = 0;
+    int at = g_recap.at + dir;
+    if (at < 0) at = 0;
+    if (at >= g_recap.npages) at = g_recap.npages - 1;
+    g_recap.at = at;
+    g_recap.line = 0;
+    recap_page_say(out, out_sz, &w);
+}
+
+void hq_recap_step(int dir, char* out, size_t out_sz)
+{
+    int n = g_recap.at >= 0 && g_recap.at < g_recap.npages ? g_recap.page[g_recap.at].n : 0;
+    int line = g_recap.line + dir;
+    if (line < 0) line = 0;
+    if (line >= n) line = n - 1;
+    if (line < 0) line = 0;
+    g_recap.line = line;
+    recap_line_say(out, out_sz);
+}

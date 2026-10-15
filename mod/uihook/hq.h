@@ -503,3 +503,37 @@ void hq_report_text(char* out, size_t out_sz);
 
 // The pieces, as above. Returns how many.
 int  hq_report_pieces(char pieces[][HQ_REPORT_TEXT], int max);
+
+// ---- the campaign's end: UIRecap ----------------------------------------------
+//
+// After the last mission (and on a lost campaign) UIRecap.OnInit draws the
+// whole recap at once, from XGRecapUI.m_arrPages:
+//
+//     AS_SetLabels(result, difficulty, "Next", "Previous", "Stat", "You", "World")
+//     AS_AddPage(pageId, title)                   -- per page
+//     AS_AddLine(pageId, stat, value, worldValue) -- per stat on it
+//     AS_ShowFirstPage()
+//
+// and GoToView(1) later redraws the world column (AS_UpdateWorldValue(pageId,
+// index, value)), "-" when there is none. Enter (OnAccept) shows the next page
+// with AS_NextPage, and past the last one leaves (XGRecapUI.OnLeaveRecap);
+// Escape (OnCancel) shows the previous one with AS_PreviousPage, and does
+// nothing on the first; Up and Down scroll. Nothing of it was said in the
+// 2026-10-15 (15:31) log. Here: the page and one stat at a time, Up and Down
+// moving through the stats.
+#define HQ_RECAP_TEXT 160
+
+void hq_recap_labels(const char* result, const char* difficulty, const char* next,
+                     const char* previous, const char* world);
+void hq_recap_page(int page, const char* title);
+void hq_recap_line(int page, const char* stat, const char* value, const char* world);
+void hq_recap_world(int page, int index, const char* world);
+int  hq_recap_page_at(void);
+// "Victory. Normal Difficulty. Game Summary, page 1 of 4. Overall Score:
+// 7174, 1 of 10. Up and Down read the stats. Enter: Next. Escape: Previous."
+void hq_recap_first(char* out, size_t out_sz);
+// A page turned by `dir` (AS_NextPage / AS_PreviousPage): the page and its
+// first stat. "Combat, page 2 of 4. Battles Fought: 49, 1 of 20."
+void hq_recap_turn(int dir, char* out, size_t out_sz);
+// Up (-1), Down (+1), or 0 for the stat again; stops at either end.
+void hq_recap_step(int dir, char* out, size_t out_sz);
