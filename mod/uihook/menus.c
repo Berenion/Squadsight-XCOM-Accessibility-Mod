@@ -14,6 +14,7 @@
 #include "ue3.h"
 #include "input.h"
 #include "cursor.h"
+#include "controls.h"
 
 // Keys still owed to a mod menu that just closed: the key that closed it has
 // events left to come, and they must not reach whatever is underneath.
@@ -210,8 +211,16 @@ static int g_menu_was[MENU_KEYS];
 // the first selects the ability and raises targeting, and picking the one
 // already selected fires it (DirectPickAbility -> OnAccept).
 //
-// An ability past the tenth has no number key and so cannot be picked this
-// way; the menu says so.
+// An ability past the tenth has no number key (a psionic soldier's Rift was
+// 11th of 12 in the 2026-10-15 log, and the menu could only say "No key for
+// this ability"). For those the press is not rewritten: the hook calls the
+// container's DirectPickAbility(index) itself, through ProcessEvent -- the
+// function cases 612-621 call, which takes any index below
+// m_arrAbilities.Length -- and the Enter press is swallowed at
+// IsAnyMoviePlaying (abar_menu_swallow, in the grace after the menu closes),
+// so its release has no tracker and is dropped. DirectPickAbility is called
+// by name rather than EW's TacticalInputRequestSelectAbility, which only
+// forwards to it and which EU does not have.
 #define INPUT_CMD_ENTER     513
 #define INPUT_CMD_ABILITY_1 612
 #define ABILITY_KEYS        10
@@ -287,8 +296,8 @@ int abar_menu_poll(void)
     if (pressed[6]) { abar_menu_end("Escape"); return 0; }
     if (pressed[7] || pressed[8]) {
         int i = abar_menu_index();
-        if (i < 0 || i >= ABILITY_KEYS) {
-            logf_("abar: %d has no number key -- cannot be picked\n", i + 1);
+        if (i < 0 || i >= abar_count()) {
+            logf_("abar: %d is not on the bar -- cannot be picked\n", i + 1);
             speech_cancel_pending();
             speech_say_now(T(MENU_NO_KEY));
             return 1;
@@ -362,7 +371,27 @@ void abar_menu_pick(void* stack)
     int i = -1;
     if (abar_menu_is_open()) i = abar_menu_index();
     else if (g_pick_index >= 0 && GetTickCount64() < g_pick_until) i = g_pick_index;
-    if (i < 0 || i >= ABILITY_KEYS) { g_pick_release_to = -1; return; }
+    if (i < 0) { g_pick_release_to = -1; return; }
+
+    if (i >= ABILITY_KEYS) {
+        // No number key: the game's own pick, called here on its thread.
+        g_pick_release_to = -1;
+        g_pick_index = -1;
+        if (abar_menu_is_open()) abar_menu_close();
+        g_menu_grace_until = GetTickCount64() + MENU_GRACE_MS;
+        void* bar = abar_container();
+        int called = 0;
+        Fault f;
+        __try {
+            called = bar && unit_is_live(bar) &&
+                     object_call_int(bar, "DirectPickAbility", i);
+        } __except (fault_note(GetExceptionInformation(), &f)) {
+            fault_log("abar: DirectPickAbility", &f, NULL);
+        }
+        logf_("abar: Enter picks ability %d -> DirectPickAbility(%d)%s\n",
+              i + 1, i, called ? "" : " -- could not be called");
+        return;
+    }
 
     *slot = INPUT_CMD_ABILITY_1 + i;
     g_pick_release_to = *slot;

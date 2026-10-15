@@ -97,6 +97,26 @@ int screen_mouse_event(void* screen, int cmd, const char* const* args, int nargs
     return 1;
 }
 
+int object_call_int(void* obj, const char* name, int arg)
+{
+    const void* func = object_field_prop(obj, name);
+    uint32_t off = 0, unused = 0;
+    if (!func) {
+        logf_("call: no %s to call\n", name);
+        return 0;
+    }
+    // param_offsets wants two; a function of one leaves `unused` alone.
+    param_offsets(func, &off, &unused);
+    if (off > 0x3C) return 0;
+    uint8_t parms[0x40];
+    memset(parms, 0, sizeof parms);
+    *(int32_t*)(parms + off) = arg;
+    void** vtable = *(void***)obj;
+    if (!readable(vtable + PROCESS_EVENT_VSLOT, sizeof(void*))) return 0;
+    ((ProcessEventFn)vtable[PROCESS_EVENT_VSLOT])(obj, NULL, (void*)func, parms, NULL);
+    return 1;
+}
+
 // screen.OnMouseEvent(391, [index, slot, callback]): what a click on
 // `callback` sends. OnMouseEvent reads args from the end -- the callback
 // object last, "primarySlot" or not before it, the slot's index before that

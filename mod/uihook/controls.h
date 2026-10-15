@@ -28,3 +28,8 @@ int controls_up(void);
 // calling thread, so only from a hook the game's thread is in. 0 when the
 // screen has no OnMouseEvent to call.
 int screen_mouse_event(void* screen, int cmd, const char* const* args, int nargs);
+
+// obj.<name>(arg) through UObject::ProcessEvent, for a script function whose
+// first parameter is an int. The same rules: the game's thread only. 0 when
+// `obj` has no such function.
+int object_call_int(void* obj, const char* name, int arg);
