@@ -222,6 +222,14 @@ typedef struct KineticStrikeInfo {
 typedef void (__fastcall* KineticStrikeFn)(void* self, void* edx, void* pawn,
                                            const float* target, KineticStrikeInfo* out);
 
+// XComPathingPawn.QueryTileCacheForReachability(XGUnitNativeBase kAIXGUnit,
+//     const out Vector Destination, out ReachabilityStatus Reachability):
+// whether the tile is in the pathfinder's tile cache, the one the movement
+// border is drawn from, and if so whether it is a standard move (0) or a dash
+// (1). Both `out`s go by pointer; the enum is a byte.
+typedef int (__fastcall* ReachQueryFn)(void* self, void* edx, void* unit,
+                                       const float* dest, uint8_t* reach);
+
 extern int   g_tile_slot_cover, g_tile_slot_smoke, g_tile_slot_poison;
 extern int   g_tile_slot_occupied;      // XComWorldData.IsTileOccupied
 extern int   g_tile_slot_unitblock;     // XComWorldData.IsTileBlockedByUnitFlag
@@ -243,6 +251,7 @@ extern int   g_volume_slot_encompass;   // Volume.EncompassesPoint
 extern void* g_volume_fn_encompass;     // ...called outright by its thunk
 extern int   g_unit_slot_range;         // XGUnitNativeBase.IsPointWithinFiringRange
 extern int   g_unit_slot_flankedby;     // XGUnitNativeBase.IsFlankedBy_EnemyAtLocation
+extern int   g_pawn_slot_reach;         // XComPathingPawn.QueryTileCacheForReachability
 
 // The game's image, to check a vtable entry points into it before calling it.
 // Set by tile_arm.

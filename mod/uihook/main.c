@@ -7898,6 +7898,7 @@ static void tile_arm(const NativeEntry* tbl, int n, HMODULE mod)
         { "XGUnitNativeBaseexecIsAliveAndVisible",   &g_unit_slot_visible,  NULL },
         { "XGUnitNativeBaseexecIsAlive",             &g_unit_slot_alive,    NULL },
         { "XGUnitNativeBaseexecIsInOverwatch",       &g_unit_slot_overwatch, NULL },
+        { "XComPathingPawnexecQueryTileCacheForReachability", &g_pawn_slot_reach, NULL },
         { "XGTacticalGameCoreNativeBaseexecGetAmmoCost", &g_core_slot_ammocost, NULL },
         { "UI_FxsPanelexecIsVisible",                &g_panel_slot_visible, NULL },
         { "XCom3DCursorexecWorldZToCursorFloor",     &g_cursor_slot_floor,  NULL },

@@ -135,6 +135,43 @@ int tile_dash(int* cost_out, int* std_out, int* max_out, int* moves_out,
     return can_dash(*moves_out) ? *cost_out >= *std_out : *cost_out > *std_out;
 }
 
+// ---- the game's own movement border ----------------------------------------
+
+// The blue and yellow border the game draws around a soldier is the
+// pathfinder's tile cache: UpdateTileCacheVisuals (vtable +0x558 EW) and
+// QueryTileCacheForReachability (+0x560) read the same one, a single cache
+// the whole game shares. Built by BuildTileCacheForUnit out to the unit's
+// mobility, doubled while it may dash. The query, from the EW disassembly:
+// the tile is looked up in the cache, and when it is there its path cost is
+// compared with (mobility + bonus) * 64 -- Standard below it, Dash at or past
+// it -- and it returns whether the tile was in the cache at all. Being in the
+// cache is being inside the border; the split is the AI's, on the bare
+// mobility stat, and not the border's (tile_report). XGAIBehavior.
+// UpdateDestinations asks it the same way for the aliens' moves.
+//
+// Returns 0 a standard move, 1 a dash, 2 not in the cache (past this turn's
+// reach), -1 when it cannot be asked.
+static FieldSlot g_reach_gameunit;
+
+static int tile_cache_reach(float x, float y, float z)
+{
+    void* pawn = g_path_pawn;
+    void* soldier = NULL;
+    const void* v;
+    if (!pawn || !unit_is_live(pawn) || !cursor_chained_pawn(&soldier) || !soldier ||
+        !field_ptr(soldier, "m_kGameUnit", &g_reach_gameunit, sizeof(void*), &v))
+        return -1;
+    void* unit = *(void* const*)v;
+    if (!unit || !unit_is_live(unit)) return -1;
+    ReachQueryFn query = (ReachQueryFn)tile_vfn(pawn, g_pawn_slot_reach);
+    if (!query) return -1;
+    float dest[3] = { x, y, z };
+    uint8_t reach = 0xFF;
+    int found = query(pawn, NULL, unit, dest, &reach) != 0;
+    if (!found) return 2;
+    return reach == 0 ? 0 : reach == 1 ? 1 : -1;
+}
+
 int path_out_of_range(void* ppawn)
 {
     if (!ppawn || !unit_is_live(ppawn)) return -1;
@@ -673,6 +710,45 @@ int tile_report(int tx, int ty, float floor, int with_dash, int with_who,
     // out of range at max 12, then cost 12 of 12 at max 24, said without
     // "Dash", and the move took both actions under the game's "Dashing".
     if (reach == 0 && with_dash == TILE_DASH_FELL_SHORT && can_dash(moves)) reach = 1;
+    // Inside the border or not, where the game can be asked; the cost above
+    // only where it cannot. Not for a flier: ComputeJetpackPath moves them,
+    // not the ground pathfinder the cache belongs to.
+    //
+    // The cache says only whether the tile is inside: its own move / dash
+    // split is not the border's. The 2026-10-15 (15:31) log had it say "dash"
+    // 64 times at costs like 13 against a standard move of 19 -- it compares
+    // with the mobility stat alone (see tile_cache_reach), while
+    // UpdateTileCacheVisuals draws the yellow grid from an int on the pathing
+    // pawn (+0x6F0 EW, read as a float for the dash grid's lower bound and the
+    // standard grid's upper one), which is what StandardMoveLength holds. So
+    // inside the border the split stays the path's cost against the standard
+    // move, dashing from a cost of exactly one move, as tile_dash has it.
+    if (reach >= 0 && !soldier_flying()) {
+        int border = -1;
+        GUARDED("tile: border", border = tile_cache_reach(x, y, z), border = -1);
+        static int said_once;
+        if (!said_once && border >= 0) {
+            said_once = 1;
+            logf_("tile: the game's movement border answers (first: %d); "
+                  "StandardMoveLength is at +0x%X\n", border, (unsigned)g_std_off);
+        }
+        int inside = border < 0 ? -1 : border != 2;
+        int by_border = reach;
+        if (inside == 0) by_border = 2;
+        // Inside: a dash only on the first move (XGUnit.SetDashing); the
+        // cache is built one move deep otherwise (BuildTileCacheForUnit
+        // doubles the reach only while the unit may dash).
+        else if (inside == 1)
+            by_border = can_dash(moves) && cost >= std ? 1 : 0;
+        if (by_border != reach)
+            logf_("tile: %d, %d floor %.1f: the border says %s, the path cost said %s "
+                  "(cost %d, standard %d, max %d, moves %d)\n", tx, ty, floor,
+                  by_border == 0 ? "move" : by_border == 1 ? "dash" : "past reach",
+                  reach == 0 ? "move" : reach == 1 ? "dash" : "past reach",
+                  cost, std, maxc, moves);
+        if (by_border == 2 && reach != 2 && turns < 2) turns = 2;
+        reach = by_border;
+    }
     r.dash = reach == 1;
     r.turns = reach == 2 ? turns : 0;
     // Past reach, and the path stops short with moves to spare: no route.

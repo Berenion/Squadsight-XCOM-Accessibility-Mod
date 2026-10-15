@@ -37,6 +37,7 @@ int   g_volume_slot_encompass = -1;
 void* g_volume_fn_encompass;
 int   g_unit_slot_range = -1;
 int   g_unit_slot_flankedby = -1;
+int   g_pawn_slot_reach = -1;
 uint8_t* g_image_lo;
 uint8_t* g_image_hi;
 
