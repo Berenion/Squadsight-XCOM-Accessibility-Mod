@@ -3586,10 +3586,23 @@ static int ui_hud_first(void* input, char* who, size_t who_sz)
     if (!mgr || !unit_is_live(mgr) ||
         !field_ptr(mgr, "m_arrScreenInputStack", &g_ui_stack, sizeof(FArray), &v)) return 0;
     const FArray* arr = (const FArray*)v;
-    if (arr->Num <= 0 || arr->Num > 64 ||
-        !readable(arr->Data, arr->Num * sizeof(void*))) {
+    // The stack grows over a long mission: the 2026-10-15 (19:16) log had the
+    // keys refused while aiming (State_EnemyArrows pushes one more screen) and
+    // then for good, which a cap of 64 read as "an empty input stack". The game
+    // walks it whatever its length (UIFxsMovieMgr.OnInput), so only a size no
+    // real stack reaches is refused.
+    if (arr->Num <= 0) {
         strcpy_s(who, who_sz, "an empty input stack");
         return 0;
+    }
+    if (arr->Num > 4096 || !readable(arr->Data, arr->Num * sizeof(void*))) {
+        _snprintf_s(who, who_sz, _TRUNCATE, "an unreadable input stack (%d)", arr->Num);
+        return 0;
+    }
+    static int big_noted;
+    if (arr->Num > 64 && !big_noted) {
+        big_noted = 1;
+        logf_("nav: the screen input stack holds %d screens\n", arr->Num);
     }
     for (int i = 0; i < arr->Num; i++) {
         void* scr = ((void* const*)arr->Data)[i];
