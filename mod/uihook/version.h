@@ -10,10 +10,10 @@
 #ifndef VERSION_H
 #define VERSION_H
 
-#define MOD_VERSION       "0.15.2"
+#define MOD_VERSION       "0.15.3"
 #define MOD_VERSION_MAJOR 0
 #define MOD_VERSION_MINOR 15
-#define MOD_VERSION_PATCH 2
+#define MOD_VERSION_PATCH 3
 
 #define MOD_NAME    "Squadsight"
 #define MOD_REPO    "Berenion/Squadsight-XCOM-Accessibility-Mod"
