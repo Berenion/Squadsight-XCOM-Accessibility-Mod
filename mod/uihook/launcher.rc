@@ -19,6 +19,7 @@ BEGIN
     PUSHBUTTON      "&Install the mod", IDC_INSTALL, 12, 108, 100, 14
     PUSHBUTTON      "Unin&stall the mod", IDC_UNINSTALL, 120, 108, 100, 14
     PUSHBUTTON      "Check for &updates", IDC_UPDATE, 12, 126, 100, 14
+    PUSHBUTTON      "Read the &documentation", IDC_DOCS, 120, 126, 100, 14
     PUSHBUTTON      "Cancel", IDCANCEL, 170, 144, 50, 14
 END
 

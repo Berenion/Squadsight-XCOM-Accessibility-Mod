@@ -33,6 +33,7 @@
 #include "update.h"
 #include "version.h"
 
+#include <shellapi.h>
 #include <shlwapi.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -45,6 +46,10 @@
 #define DEFAULT_DLL  "xcom_uihook.dll"
 #define LOG_NAME     "xcom_uihook.log"
 #define TITLE        "XCOM Accessibility Launcher"
+
+// The README on GitHub is the documentation: the keys, the options, the install.
+// Linked rather than shipped, so that it is never older than the latest release.
+#define DOCS_URL     "https://github.com/" MOD_REPO "#readme"
 
 // What the publisher's own launcher passes, and it is not cosmetic: started
 // without -FROMLAUNCHER the game boots all the way to the main menu and then
@@ -589,6 +594,16 @@ static INT_PTR CALLBACK dialog_proc(HWND dlg, UINT msg, WPARAM wparam, LPARAM lp
         case IDC_UPDATE:
             if (offer_update(dlg, TRUE, "")) EndDialog(dlg, CHOICE_UPDATING);
             return TRUE;
+
+        case IDC_DOCS: {
+            // ShellExecute returns a value above 32 on success.
+            INT_PTR r = (INT_PTR)ShellExecuteA(dlg, "open", DOCS_URL, NULL, NULL, SW_SHOWNORMAL);
+            launcher_log("docs: opened %s (%d)\n", DOCS_URL, (int)r);
+            if (r <= 32)
+                say_error("The documentation could not be opened (error %d).\n\nIt is at %s",
+                          (int)r, DOCS_URL);
+            return TRUE;
+        }
         }
         return FALSE;
 

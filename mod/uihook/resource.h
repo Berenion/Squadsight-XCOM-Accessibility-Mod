@@ -12,5 +12,6 @@
 #define IDC_UNINSTALL 1006
 #define IDC_UPDATE    1007
 #define IDC_PROGRESS_TEXT 1008
+#define IDC_DOCS      1009
 
 #endif
