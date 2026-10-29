@@ -5610,6 +5610,8 @@ static int screens_call(const Call* c)
     return 0;
 }
 
+static void squad_cancel_unlock(LONG n, void* panel, const char* screen);
+
 static void capture_body(const char* tag, LONG n, void* stack)
 {
     if (!readable(stack, 0x20)) {
@@ -6247,6 +6249,10 @@ static void capture_body(const char* tag, LONG n, void* stack)
             g_soldier_info_at = GetTickCount64();
             logf_("[%ld] %s %s.%s  SOLDIER INFO \"%s\"\n", n, tag, obj_name, fn_name,
                   g_soldier_info);
+            // The summary and the promotion screen both draw this header as
+            // they open, before any key: Escape is given back here, so it
+            // works as the first key. See squad_cancel_unlock.
+            squad_cancel_unlock(n, object, obj_name);
             return;
         }
         // Between the two: the medals, as icons. Said with the soldier.
@@ -6758,6 +6764,7 @@ static void capture(const char* tag, LONG n, void* stack)
 // would still run the rest of the handler.
 static void hq_locked_note(LONG n, void* sub, const char* screen);
 static void loadout_leave_locker(LONG n, void* loadout, const char* screen);
+static void squad_cancel_relock(LONG n, void* panel, const char* screen);
 
 // Whether a key reaching `screen` says the player is in the Situation Room or
 // somewhere else. Every key in the room passes through its own screens
@@ -7185,6 +7192,18 @@ static int rewrite_cmd(LONG n, void* stack)
         strncmp(screen, "UIBaseFinances", 14) == 0)
         fin_walk(n, screen, cmd == FXS_ARROW_DOWN);
 
+    // Escape on a soldier opened from the tutorial's squad select, and the
+    // lock put back on the squad select. See squad_cancel_unlock. Asked on
+    // every key as well as when the header is drawn, so a soldier screen the
+    // header capture missed still gets its Escape by the second key.
+    if (press && (strncmp(screen, "UISoldierSummary", 16) == 0 ||
+                  strncmp(screen, "UISoldierPromotion", 18) == 0 ||
+                  strncmp(screen, "UISoldierLoadout", 16) == 0 ||
+                  strncmp(screen, "UISoldierCustomize", 18) == 0))
+        squad_cancel_unlock(n, object, screen);
+    else if (press && strncmp(screen, "UISquadSelect", 13) == 0)
+        squad_cancel_relock(n, object, screen);
+
     // Left in the loadout's locker. See loadout_leave_locker.
     if (cmd == FXS_ARROW_LEFT && strncmp(screen, "UISoldierLoadout", 16) == 0)
         loadout_leave_locker(n, object, screen);
@@ -7388,6 +7407,89 @@ static void hq_locked_note(LONG n, void* sub, const char* screen)
     logf_("[%ld] Input        %s  LOCKED \"%s\"\n", n, screen, say);
     speech_cancel_pending();
     if (g_speak) speech_say_now(say);
+}
+
+// Escape out of a soldier opened from the tutorial's squad select. All three
+// launch steps of the tutorial (XGSetupPhaseManager: Base1_MissionControl,
+// Base2_SituationRoom2, Base3_MissionControl2) lock Escape on the squad
+// select and open it again from OnViewSoldier, a watch on
+// HQPRES.m_kSoldierSummary -- but that watch is registered only from a
+// narrative's completion callback (OnMissionSelectedComplete,
+// OnCouncilMissionComplete, OnScan), and those are transient. Loaded from a
+// save past that point, nothing registers it: the 2026-10-29 (15:38) log has
+// the summary and the promotion screen draw no Back button
+// (UIStrategyHUD.ShowBackButton skips it while m_bDisableCancel is set), and
+// no Escape ever reaches a screen -- XComHeadquartersInput.
+// PreProcessCheckGameLogic drops 510 before OnUnrealCommand. With the
+// promotion screen pushed over the squad select there was no way back to
+// Launch. So while the squad select is up (HQPRES.m_kSquadSelect), a soldier
+// screen gets Escape back, as OnViewSoldier would have given it, and the
+// squad select gets its lock back when a key reaches it again.
+//
+// Only under the squad select: the barracks step (Base1_Barracks,
+// OnSoldierSummaryToggled) locks Escape on the summary on purpose, until the
+// first promotion is taken.
+static FieldSlot g_panel_ctrl, g_ctrl_pres, g_pres_squad;
+static int g_cancel_released;
+
+// The headquarters input behind `panel`, and the property of its
+// m_bDisableCancel; 0 if either cannot be found.
+static int hq_cancel_flag(void* panel, uint8_t** input_out, const void** prop_out,
+                          void** ctrl_out)
+{
+    const void* v;
+    if (!field_ptr(panel, "controllerRef", &g_panel_ctrl, sizeof(void*), &v)) return 0;
+    void* ctrl = *(void* const*)v;
+    if (!ctrl || !field_ptr(ctrl, "PlayerInput", &g_ctrl_input, sizeof(void*), &v)) return 0;
+    uint8_t* input = *(uint8_t* const*)v;
+    if (!input) return 0;
+    const void* prop = object_field_prop(input, "m_bDisableCancel");
+    if (!prop) return 0;
+    *input_out = input;
+    *prop_out = prop;
+    *ctrl_out = ctrl;
+    return 1;
+}
+
+static void squad_cancel_unlock(LONG n, void* panel, const char* screen)
+{
+    uint8_t* input;
+    const void* prop;
+    void* ctrl;
+    const void* v;
+    int locked = 0;
+    if (!hq_cancel_flag(panel, &input, &prop, &ctrl)) return;
+    if (!props_read_object_bool(prop, input, &locked) || !locked) return;
+    if (!field_ptr(ctrl, "m_Pres", &g_ctrl_pres, sizeof(void*), &v)) return;
+    void* pres = *(void* const*)v;
+    if (!pres || !field_ptr(pres, "m_kSquadSelect", &g_pres_squad, sizeof(void*), &v)) return;
+    if (!*(void* const*)v) {
+        // Once: in the barracks step this is every key.
+        static int said;
+        if (!said++)
+            logf_("[%ld] %s  Escape locked, no squad select under it -- left to the tutorial\n",
+                  n, screen);
+        return;
+    }
+    if (props_write_object_bool(prop, input, 0)) {
+        g_cancel_released = 1;
+        logf_("[%ld] %s  Escape locked over the squad select -- unlocked\n", n, screen);
+    } else {
+        logf_("[%ld] %s  Escape locked over the squad select -- could not unlock\n",
+              n, screen);
+    }
+}
+
+static void squad_cancel_relock(LONG n, void* panel, const char* screen)
+{
+    uint8_t* input;
+    const void* prop;
+    void* ctrl;
+    if (!g_cancel_released) return;
+    g_cancel_released = 0;
+    if (hq_cancel_flag(panel, &input, &prop, &ctrl) &&
+        props_write_object_bool(prop, input, 1))
+        logf_("[%ld] %s  Escape locked again on the squad select\n", n, screen);
 }
 
 // A bool inside a struct field of an object: `owner.field.member`, e.g.
