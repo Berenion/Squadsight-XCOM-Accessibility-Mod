@@ -841,17 +841,26 @@ static void nav_confirm(void)
         }
     }
     g_nav_confirm_at = GetTickCount64();
+    // SendInput's buttons are physical ones: with "Switch primary and
+    // secondary buttons" on, Windows swaps them like a real mouse's, and
+    // RIGHTDOWN arrives as a left click. A player's 2026-11-03 EU tutorial log
+    // showed exactly that -- "InputEvent 390 mask 1" (FXS_L_MOUSE_DOWN,
+    // UI_FxsInput) and Left_Mouse_Button_Press after every confirm, "never
+    // moved" each time -- where the same move on an unswapped mouse logged 405
+    // and RMouse -> ClickToPath. So the swapped setting gets the left button.
+    int swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
     INPUT in[2];
     ZeroMemory(in, sizeof in);
     in[0].type = INPUT_MOUSE;
-    in[0].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
+    in[0].mi.dwFlags = swapped ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_RIGHTDOWN;
     in[1].type = INPUT_MOUSE;
-    in[1].mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+    in[1].mi.dwFlags = swapped ? MOUSEEVENTF_LEFTUP : MOUSEEVENTF_RIGHTUP;
     UINT sent = SendInput(2, in, sizeof(INPUT));
     int tx = -1, ty = -1;
     nav_target(&tx, &ty);
-    logf_("nav: confirm -- right click sent (%u of 2), target %d, %d\n",
-          sent, tx, ty);
+    logf_("nav: confirm -- right click sent (%u of 2)%s, target %d, %d\n",
+          sent, swapped ? " as the left button, the mouse buttons are swapped" : "",
+          tx, ty);
 }
 
 // ---- holding a direction ---------------------------------------------------
