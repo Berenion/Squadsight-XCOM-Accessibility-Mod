@@ -4349,6 +4349,25 @@ static int tactical_call(const Call* c)
         }
         if (strstr(fn_name, "SetNumActiveAbilities") && p->nnumbers > 0) {
             abar_set_count((int)p->numbers[0]);
+        } else if (strcmp(fn_name, "AS_AddAbilityItem") == 0 && p->nnumbers > 0) {
+            // EU's bar (abar.h). Only this fed nothing before, so in EU numpad .
+            // always found 0 abilities: a player's 2026-11-03 EU log had
+            // "abar: menu opened ..., 0 abilities" on every press, with the
+            // slots passing as AS_AddAbilityItem just above. Id is the call's
+            // one int and isActive its first bool; the strings go by name.
+            char icon[64], cd[32], charge[32], name[128], key[32];
+            frame_local_raw(node, locals, "Icon", icon, sizeof icon);
+            frame_local_raw(node, locals, "CoolDown", cd, sizeof cd);
+            frame_local_raw(node, locals, "charge", charge, sizeof charge);
+            frame_local_raw(node, locals, "antennaDesc", name, sizeof name);
+            frame_local_raw(node, locals, "hotkeyLabel", key, sizeof key);
+            int id = (int)p->numbers[0];
+            int on = p->nbools > 0 ? p->bools[0] : 1;
+            abar_add_item(id, icon, on, cd, charge, name, key);
+            logf_("[%ld] abar: EU slot %d \"%s\" (%s), key \"%s\"%s, cooldown \"%s\", "
+                  "charge \"%s\" -> %d slots\n",
+                  n, id, name, icon, key, on ? "" : ", unavailable", cd, charge,
+                  abar_count());
         } else if (strcmp(fn_name, "PopulateFlash") == 0) {
             int got = abar_from_frame(stack);
             if (got < 0 && !g_abar_logged_fail) {

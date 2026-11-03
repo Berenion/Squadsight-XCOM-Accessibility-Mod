@@ -17,6 +17,7 @@ typedef struct {
 
 static Slot g_slots[ABAR_SLOTS];
 static int  g_count;
+static int  g_last_id = -1;     // EU: the last AS_AddAbilityItem's Id
 
 static void set(char* dst, size_t sz, const char* text)
 {
@@ -27,6 +28,7 @@ void abar_reset(void)
 {
     memset(g_slots, 0, sizeof g_slots);
     g_count = 0;
+    g_last_id = -1;
     abar_menu_close();      // a new bar is a new mission; nothing is open
 }
 
@@ -79,6 +81,25 @@ int abar_feed(const AbarValue* v, int n)
     }
     memcpy(g_slots, next, sizeof g_slots);
     return touched;
+}
+
+void abar_add_item(int id, const char* icon, int available, const char* cooldown,
+                   const char* charge, const char* name, const char* hotkey)
+{
+    if (id < 0 || id >= ABAR_SLOTS) return;
+    if (id <= g_last_id) {          // a new PopulateFlash: the bar was cleared
+        memset(g_slots, 0, sizeof g_slots);
+        g_count = 0;
+    }
+    g_last_id = id;
+    Slot* s = &g_slots[id];
+    set(s->icon, sizeof s->icon, icon);
+    set(s->cooldown, sizeof s->cooldown, cooldown);
+    set(s->charge, sizeof s->charge, charge);
+    set(s->name, sizeof s->name, name);
+    set(s->hotkey, sizeof s->hotkey, hotkey);
+    s->available = available != 0;
+    if (id + 1 > g_count) g_count = id + 1;
 }
 
 // "HUNKER DOWN" -> "Hunker Down". The bar sends names in capitals

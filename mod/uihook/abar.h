@@ -56,6 +56,17 @@ void abar_set_count(int n);
 // when the stream did not parse -- in which case nothing it said is kept.
 int  abar_feed(const AbarValue* v, int n);
 
+// EU's bar, one slot per call. EU has no UITacticalHUD_AbilityItem and no
+// stream: its PopulateFlash does Invoke("Clear"), then for each ability
+// AS_AddAbilityItem(Id, Icon, isActive, CoolDown, charge, bgLabel,
+// antennaDesc, antennaOK, canBeFreeAimed, hotkeyLabel) with every value
+// whole, then Invoke("AllAbilitiesAdded"), and it never sends
+// SetNumActiveAbilities. So a slot is replaced rather than patched, an Id no
+// higher than the last one starts a new bar, and the count is the highest Id
+// plus one.
+void abar_add_item(int id, const char* icon, int available, const char* cooldown,
+                   const char* charge, const char* name, const char* hotkey);
+
 // ---- the menu --------------------------------------------------------------
 //
 // Numpad . opens the bar as a menu of its own, walked one ability at a time.
