@@ -3620,6 +3620,28 @@ static int ui_hud_first(void* input, char* who, size_t who_sz)
         big_noted = 1;
         logf_("nav: the screen input stack holds %d screens\n", arr->Num);
     }
+    // What the stack holds, each time its size changes, to find what makes it
+    // grow. The decompile shows every way out of aiming popping
+    // State_EnemyArrows (OnAccept, OnFireActionCanceled -> PopTargetingStates),
+    // yet the 2026-10-15 (19:16) log ran out at about the 54th aim of the
+    // mission. Object names, not classes, so one screen pushed twice
+    // (UIFxsMovie.LoadScreen pushes without looking) shows as itself.
+    static int last_num = -1;
+    if (arr->Num != last_num) {
+        last_num = arr->Num;
+        char list[4096];
+        size_t n = 0;
+        list[0] = 0;
+        for (int i = 0; i < arr->Num && n + 80 < sizeof list; i++) {
+            char name[64];
+            void* scr = ((void* const*)arr->Data)[i];
+            if (!object_name(scr, name, sizeof name)) strcpy_s(name, sizeof name, "?");
+            int w = _snprintf_s(list + n, sizeof list - n, _TRUNCATE, "%s%s", i ? ", " : "", name);
+            if (w < 0) break;
+            n += (size_t)w;
+        }
+        logf_("screens: %d on the input stack: %s\n", arr->Num, list);
+    }
     for (int i = 0; i < arr->Num; i++) {
         void* scr = ((void* const*)arr->Data)[i];
         if (!scr || !unit_is_live(scr) ||
