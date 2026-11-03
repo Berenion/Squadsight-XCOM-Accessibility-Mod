@@ -99,17 +99,26 @@ Interact.
 Home, End, Page Up and Page Down, and the mod reads it wrong.
 
 **Without a numpad**, a mission's numpad keys have stand-ins, given next to each
-key below: the arrows, `Space`, and four keys beside `P` and `L`. Those four are
-found by their position, not by what they type, so they work on any keyboard
-layout:
+key below: the arrows, `Space`, and six keys beside `P`, `L` and right `Shift`.
+Those six are found by their position, not by what they type, so they work on
+any keyboard layout:
 
 - the key right of `P` (`[` on a US layout) for numpad `0`;
 - the key two right of `P` (`]` on US) for numpad `.`;
 - the key right of `L` (`'` on US) for numpad `+`;
-- the key two right of `L` (`\` on US) for numpad `-`.
+- the key two right of `L` (`\` on US) for numpad `-`;
+- the key left of right `Shift` (`/` on US, `-` on Hungarian) for numpad `/`,
+  the options menu, anywhere in the game (with `Ctrl` it is the key list);
+- the key two left of right `Shift` (`.` on US) for numpad `*`.
 
 The arrows only move straight; diagonal steps need the numpad. Enter still opens
 the shot screen.
+
+In the options menu, the arrows, `Space` and `Enter` stand in for numpad `8`,
+`2`, `4`, `6` and `5`, and the game does not get them while it is open. In sound
+practice the arrows pick a wall's direction (straight only), the keys right of
+`L` move it further and nearer, and the keys two and three left of right `Shift`
+(`.` and `,` on US) make it louder and quieter.
 
 ### In menus and at the base
 
@@ -200,8 +209,8 @@ mission, which the Controls screen warns about.
 
 | Key | What it does |
 |---|---|
-| Numpad `*` | Wall sound off / on. |
-| Numpad `/` | The mod's options menu: numpad `8` / `2` to choose a setting, `4` / `6` to change it, `5` to switch it or start an entry, `/` to close. Settings are saved in `xcom_uihook_settings.ini` beside the game. |
+| Numpad `*`, or the key two left of right `Shift` | Wall sound off / on. |
+| Numpad `/`, or the key left of right `Shift` | The mod's options menu: numpad `8` / `2` to choose a setting, `4` / `6` to change it, `5` to switch it or start an entry, `/` to close. Settings are saved in `xcom_uihook_settings.ini` beside the game. |
 
 These two need the numpad.
 

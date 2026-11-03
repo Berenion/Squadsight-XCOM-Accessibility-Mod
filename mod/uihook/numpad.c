@@ -2593,12 +2593,19 @@ static void nav_poll(void)
     }
     // Numpad *: the wall field off and on. Answered in words, because a
     // feature that has just gone quiet cannot announce itself with a sound.
-    int walls = (GetAsyncKeyState(VK_MULTIPLY) & 0x8000) != 0;
+    // Without a numpad, the key two left of right Shift (scan 0x34: . on US
+    // and Hungarian layouts; Period is bound nowhere in
+    // [XComGame.XComTacticalInput]), beside the options menu's stand-in.
+    int walls_pad = (GetAsyncKeyState(VK_MULTIPLY) & 0x8000) != 0;
+    int walls_alt = input_key_at_down(0x34, "the key two left of right Shift");
+    int walls = walls_pad || walls_alt;
     if (walls && !g_walls_down && blocked) {
-        logf_("walls: numpad * with another screen first -- not read\n");
+        logf_("walls: %s with another screen first -- not read\n",
+              walls_pad ? "numpad *" : "the key two left of right Shift");
     } else if (walls && !g_walls_down) {
         int on = settings_step(SET_FIELD, 1);
-        logf_("walls: field %s\n", on ? "on" : "off");
+        logf_("walls: field %s (%s)\n", on ? "on" : "off",
+              walls_pad ? "numpad *" : "the key two left of right Shift");
         speech_say_now(T(on ? NUMPAD_WALLS_ON : NUMPAD_WALLS_OFF));
     }
     g_walls_down = walls;
@@ -3737,6 +3744,17 @@ void __fastcall hook_moviecheck(void* self, void* edx, void* stack, void* result
         swallow = input_is_our_end(cmd);
         if (!swallow && abar_menu_swallow(cmd, mask))
             swallow = 2;
+        // The options menu's stand-ins for the numpad (learn.c, alt_hits):
+        // the arrows and Enter would otherwise also move the screen under it.
+        if (!swallow && learn_swallow(cmd, mask)) {
+            static int logged;
+            if (!logged) {
+                logged = 1;
+                logf_("learn: InputEvent %d taken from the game while the options "
+                      "menu is open\n", cmd);
+            }
+            swallow = 4;
+        }
         if (!swallow && nav_keys_swallow(stack, cmd, mask))
             swallow = 3;
         // Only a press the game goes on to act on is followed.

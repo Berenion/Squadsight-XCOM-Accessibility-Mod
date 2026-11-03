@@ -76,6 +76,11 @@ int learn_start(char* why, size_t why_sz);
 // the demonstration.
 int learn_active(void);
 
+// 1 when InputEvent `cmd` (with `mask`) is a key the open menu or practice
+// reads in place of the numpad -- an arrow, Enter or Space -- and must be
+// kept from the game. 0 while it is closed.
+int learn_swallow(int cmd, int mask);
+
 // Hands every saved level (settings.h) to the mixer. Call once the mixer is
 // up; `why` receives a line for the log, naming any level the mixer clamped.
 void learn_apply_levels(char* why, size_t why_sz);

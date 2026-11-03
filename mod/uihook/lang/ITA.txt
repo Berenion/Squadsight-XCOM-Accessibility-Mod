@@ -706,7 +706,7 @@ KEYS_GAME = "I tasti del gioco, come sono assegnati ora."
 KEYS_OR = " o "
 KEYS_THIS = "Ctrl + barra, il tasto a sinistra del Maiusc destro: questo elenco. Su e Giù lo percorrono, Esc lo chiude."
 KEYS_HISTORY = "Ins: gli annunci recenti."
-KEYS_OPTIONS = "Barra del tastierino: le opzioni di Squadsight e la pratica dei suoni."
+KEYS_OPTIONS = "Barra del tastierino, o il tasto a sinistra del Maiusc destro: le opzioni di Squadsight e la pratica dei suoni. Al loro interno, le frecce, Spazio e Invio valgono come 8, 2, 4, 6 e 5 del tastierino."
 KEYS_BUTTONS = "0: i pulsanti della schermata con i loro tasti, anche come menu."
 KEYS_DIGITS = "Da 1 a 9: comandi che il gioco ha dato solo a un pulsante del controller, nelle schermate che li hanno. 0 li nomina."
 KEYS_BASE = "Canc: alla base, la data, le risorse e cosa sta per arrivare. Nella sala situazione, in ingegneria e nella ricerca, quella sala come elenco."
@@ -727,7 +727,7 @@ KEYS_ENEMIES = "Più del tastierino, o il tasto a destra di L: i nemici in vista
 KEYS_OBJECTIVES = "M: gli obiettivi e i contatori dei turni."
 KEYS_ABILITIES = "Punto del tastierino, o il secondo tasto a destra di P: la barra delle abilità come menu."
 KEYS_TARGET_INFO = "F1 mentre miri: il dettaglio della probabilità di colpire, letto ad alta voce."
-KEYS_WALLS = "Asterisco del tastierino: suono dei muri spento, acceso."
+KEYS_WALLS = "Asterisco del tastierino, o il secondo tasto a sinistra del Maiusc destro: suono dei muri spento, acceso."
 
 # ---- Controls (controls.c) ----
 CONTROLS_HINT = "Comandi: Su e Giù scelgono un'azione, Sinistra e Destra il suo primo o secondo tasto. Invio, poi il nuovo tasto, lo assegna. 1 cancella il tasto, 2 ripristina tutti i tasti, 3 salva ed esce, Tab passa dai tasti generali a quelli di missione, Esc esce senza salvare."

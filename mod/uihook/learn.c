@@ -8,6 +8,7 @@
 #include "audio.h"
 #include "speech.h"
 #include "strings.h"
+#include "log.h"
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
@@ -452,6 +453,83 @@ static void menu_poll(const int* hit)
     }
 }
 
+// ---- without a numpad ---------------------------------------------------------
+//
+// Stand-ins, folded into poll()'s hit[] so that everything below reads one
+// set of presses. Taken by position, like the mission's stand-ins
+// (input_key_at), so they are the same keys on every layout:
+//
+//   the key left of right Shift  (0x35: / US, - Hungarian)   numpad /
+//   the key two left of it       (0x34: . US and Hungarian)   numpad *
+//   the key three left of it     (0x33: , US and Hungarian)   numpad .
+//   the key right of L           (0x28: ' US, a acute HU)     numpad +
+//   the key two right of L       (0x2B: \ US, u dbl acute HU) numpad -
+//   the arrows                                               numpad 8 2 4 6
+//   Space, Enter                                             numpad 5
+//
+// The first opens and closes the menu from anywhere, so it is taken only
+// without Ctrl: Ctrl and the same key is the key list (keys.c). The others are
+// read only while the menu, the heartbeats or practice is open; closed, the
+// arrows, Space and Enter are the game's. While it is open the game does not
+// get them either (learn_swallow).
+//
+// input_key_at itself is not used: it keeps its answers in a table the game
+// thread writes, and asks GetKeyboardLayout(0), which is this thread's layout,
+// not the one the game is typing with. So the layout is the foreground
+// window's thread's -- has_focus() has just said that window is the game's.
+static int pos_down(int scan)
+{
+    HWND w = GetForegroundWindow();
+    HKL hkl = GetKeyboardLayout(w ? GetWindowThreadProcessId(w, NULL) : 0);
+    int vk = (int)MapVirtualKeyExW((UINT)scan, MAPVK_VSC_TO_VK_EX, hkl);
+    return vk && (GetAsyncKeyState(vk) & 0x8000) != 0;
+}
+
+#define ALT_N 10
+static int g_alt_was[ALT_N];
+
+static void alt_hits(int* hit)
+{
+    // hit[] follows WATCH in poll(): 0 /, 1 +, 2 -, 3 *, 4 ., 5 + d digit d.
+    static const int TO[ALT_N] = { 0, 3, 4, 1, 2, 5 + 8, 5 + 2, 5 + 4, 5 + 6, 5 + 5 };
+    static const char* const NAME[ALT_N] = {
+        "the key left of right Shift", "the key two left of right Shift",
+        "the key three left of right Shift", "the key right of L",
+        "the key two right of L", "Up", "Down", "Left", "Right", "Space or Enter",
+    };
+    int open = g_mode != MODE_OFF;
+    int now[ALT_N];
+    now[0] = pos_down(0x35) && !(GetAsyncKeyState(VK_CONTROL) & 0x8000);
+    now[1] = open && pos_down(0x34);
+    now[2] = open && pos_down(0x33);
+    now[3] = open && pos_down(0x28);
+    now[4] = open && pos_down(0x2B);
+    now[5] = open && (GetAsyncKeyState(VK_UP) & 0x8000) != 0;
+    now[6] = open && (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
+    now[7] = open && (GetAsyncKeyState(VK_LEFT) & 0x8000) != 0;
+    now[8] = open && (GetAsyncKeyState(VK_RIGHT) & 0x8000) != 0;
+    now[9] = open && ((GetAsyncKeyState(VK_SPACE) & 0x8000) ||
+                      (GetAsyncKeyState(VK_RETURN) & 0x8000));
+    for (int k = 0; k < ALT_N; k++) {
+        if (now[k] && !g_alt_was[k]) {
+            hit[TO[k]] = 1;
+            logf_("learn: %s read as a numpad key\n", NAME[k]);
+        }
+        g_alt_was[k] = now[k];
+    }
+}
+
+int learn_swallow(int cmd, int mask)
+{
+    // InputEvent's codes (UI_FxsInput): FXS_ARROW_UP 500 .. FXS_ARROW_LEFT
+    // 503, FXS_KEY_ENTER 511 and FXS_KEY_SPACEBAR 513 (in a mission Enter
+    // raises 513 too). Presses only; a release whose press was taken has no
+    // tracker and is dropped by the game itself (see MENU_GRACE_MS in
+    // menus.c).
+    if (g_mode == MODE_OFF || (mask & 32)) return 0;
+    return (cmd >= 500 && cmd <= 503) || cmd == 511 || cmd == 513;
+}
+
 // One pass over the keys. `down` is the previous state, updated in place.
 static void poll(int* down)
 {
@@ -477,6 +555,7 @@ static void poll(int* down)
         hit[i] = now && !down[k];
         down[k] = now;
     }
+    alt_hits(hit);
 
     // Numpad / first, and on its own: it is the only key that means anything
     // while the menu is closed. From practice or the heartbeats it goes back

@@ -706,7 +706,7 @@ KEYS_GAME = "Les touches du jeu, telles qu'elles sont attribuées maintenant."
 KEYS_OR = " ou "
 KEYS_THIS = "Ctrl + barre oblique, la touche à gauche de Maj droite : cette liste. Haut et Bas la parcourent, Échap la ferme."
 KEYS_HISTORY = "Inser : les annonces récentes."
-KEYS_OPTIONS = "Pavé numérique barre oblique : les options de Squadsight et l'entraînement aux sons."
+KEYS_OPTIONS = "Pavé numérique barre oblique, ou la touche à gauche de Maj droite : les options de Squadsight et l'entraînement aux sons. Dedans, les flèches, Espace et Entrée font office de pavé numérique 8, 2, 4, 6 et 5."
 KEYS_BUTTONS = "0 : les boutons de l'écran avec leurs touches, aussi sous forme de menu."
 KEYS_DIGITS = "1 à 9 : les commandes que le jeu n'a données qu'à un bouton de manette, sur les écrans qui en ont. 0 les nomme."
 KEYS_BASE = "Suppr : à la base, la date, les ressources et ce qui arrive. Dans la salle de situation, l'ingénierie et la recherche, cette salle sous forme de liste."
@@ -727,7 +727,7 @@ KEYS_ENEMIES = "Pavé numérique plus, ou la touche à droite de L : les ennemis
 KEYS_OBJECTIVES = "M : les objectifs et les compteurs de tours."
 KEYS_ABILITIES = "Pavé numérique point, ou la deuxième touche à droite de P : la barre des capacités sous forme de menu."
 KEYS_TARGET_INFO = "F1 en visant : le détail des chances de toucher, lu à voix haute."
-KEYS_WALLS = "Pavé numérique étoile : son des murs désactivé, activé."
+KEYS_WALLS = "Pavé numérique étoile, ou la deuxième touche à gauche de Maj droite : son des murs désactivé, activé."
 
 # ---- Controls (controls.c) ----
 CONTROLS_HINT = "Commandes : Haut et Bas choisissent une action, Gauche et Droite sa première ou sa seconde touche. Entrée, puis la nouvelle touche, l'attribue. 1 efface la touche, 2 réinitialise toutes les touches, 3 enregistre et quitte, Tab passe des touches générales à celles des missions, Échap quitte sans enregistrer."

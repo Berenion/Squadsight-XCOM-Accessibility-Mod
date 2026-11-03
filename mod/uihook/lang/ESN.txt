@@ -707,7 +707,7 @@ KEYS_GAME = "Las teclas del juego, tal como están asignadas ahora."
 KEYS_OR = " o "
 KEYS_THIS = "Ctrl + barra, la tecla a la izquierda de Mayúsculas derecha: esta lista. Arriba y Abajo la recorren, Escape la cierra."
 KEYS_HISTORY = "Insert: los anuncios recientes."
-KEYS_OPTIONS = "Barra del teclado numérico: las opciones de Squadsight y la práctica de sonidos."
+KEYS_OPTIONS = "Barra del teclado numérico, o la tecla a la izquierda de Mayúsculas derecha: las opciones de Squadsight y la práctica de sonidos. Dentro, las flechas, Espacio e Intro funcionan como 8, 2, 4, 6 y 5 del teclado numérico."
 KEYS_BUTTONS = "0: los botones de la pantalla con sus teclas, también como menú."
 KEYS_DIGITS = "1 a 9: órdenes que el juego solo dio a un botón del mando, en las pantallas que las tienen. 0 las nombra."
 KEYS_BASE = "Supr: en la base, la fecha, los recursos y lo que se avecina. En la sala de situación, ingeniería e investigación, esa sala como lista."
@@ -728,7 +728,7 @@ KEYS_ENEMIES = "Más del teclado numérico, o la tecla a la derecha de L: los en
 KEYS_OBJECTIVES = "M: los objetivos de misión y los contadores de turnos."
 KEYS_ABILITIES = "Punto del teclado numérico, o la segunda tecla a la derecha de P: la barra de habilidades como menú."
 KEYS_TARGET_INFO = "F1 al apuntar: el desglose de la probabilidad de impacto, leído en voz alta."
-KEYS_WALLS = "Asterisco del teclado numérico: sonido de las paredes desactivado, activado."
+KEYS_WALLS = "Asterisco del teclado numérico, o la segunda tecla a la izquierda de Mayúsculas derecha: sonido de las paredes desactivado, activado."
 
 # ---- Controls (controls.c) ----
 CONTROLS_HINT = "Controles: Arriba y Abajo eligen una acción, Izquierda y Derecha su primera o segunda tecla. Intro y luego la nueva tecla la asigna. 1 borra la tecla, 2 restablece todas las teclas, 3 guarda y sale, Tab cambia entre teclas generales y de misión, Escape sale sin guardar."

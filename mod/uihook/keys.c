@@ -142,12 +142,14 @@ static const char* const MISSION_TAKEN[] = {
 
 // Taken by position, not by name (input_key_at): the key right of P (numpad
 // 5's move), two right of P (the ability menu), right of L and two right of
-// L (numpad + and -). UE3 names such a key by the virtual key the layout gives
-// it, as WinDrv does.
-static const int MISSION_TAKEN_SCAN[] = { 0x1A, 0x1B, 0x28, 0x2B };
+// L (numpad + and -), left of right Shift (numpad /, the options menu) and two
+// left of it (numpad *). UE3 names such a key by the virtual key the layout
+// gives it, as WinDrv does.
+static const int MISSION_TAKEN_SCAN[] = { 0x1A, 0x1B, 0x28, 0x2B, 0x35, 0x34 };
 static const char* const MISSION_TAKEN_SCAN_NAME[] = {
     "the key right of P", "the key two right of P", "the key right of L",
-    "the key two right of L",
+    "the key two right of L", "the key left of right Shift",
+    "the key two left of right Shift",
 };
 
 static const char* oem_key_name(int vk)

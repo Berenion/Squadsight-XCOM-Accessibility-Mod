@@ -705,7 +705,7 @@ KEYS_GAME = "게임의 키, 지금 할당된 대로."
 KEYS_OR = " 또는 "
 KEYS_THIS = "Ctrl + 슬래시, 오른쪽 Shift 왼쪽의 키: 이 목록. 위아래로 이동, Escape로 닫기."
 KEYS_HISTORY = "Insert: 최근 안내."
-KEYS_OPTIONS = "숫자 패드 슬래시: Squadsight 옵션과 소리 연습."
+KEYS_OPTIONS = "숫자 패드 슬래시 또는 오른쪽 Shift 왼쪽의 키: Squadsight 옵션과 소리 연습. 그 안에서는 화살표, 스페이스, Enter가 숫자 패드 8, 2, 4, 6, 5로 동작."
 KEYS_BUTTONS = "0: 화면의 버튼과 그 키, 메뉴로도 열림."
 KEYS_DIGITS = "1~9: 게임이 게임패드 버튼에만 할당한 명령, 그런 화면에서. 0이 이름을 알려 줌."
 KEYS_BASE = "Delete: 기지에서는 날짜, 자원, 다가오는 일. 상황실, 공학부, 연구실에서는 그 방을 목록으로."
@@ -726,7 +726,7 @@ KEYS_ENEMIES = "숫자 패드 더하기 또는 L 오른쪽 키: 시야 안의 �
 KEYS_OBJECTIVES = "M: 임무 목표와 턴 카운터."
 KEYS_ABILITIES = "숫자 패드 점 또는 P 오른쪽 두 번째 키: 능력 막대를 메뉴로."
 KEYS_TARGET_INFO = "조준 중 F1: 명중 확률 내역을 읽어 줌."
-KEYS_WALLS = "숫자 패드 별표: 벽 소리 끔, 켬."
+KEYS_WALLS = "숫자 패드 별표 또는 오른쪽 Shift 왼쪽 두 번째 키: 벽 소리 끔, 켬."
 
 # ---- Controls (controls.c) ----
 CONTROLS_HINT = "조작: 위아래로 동작을 고르고, 왼쪽 오른쪽으로 첫째 또는 둘째 키를 고름. Enter 후 새 키를 누르면 할당. 1은 키 지우기, 2는 모든 키 초기화, 3은 저장 후 나가기, Tab은 일반 키와 임무 키 전환, Escape는 저장하지 않고 나가기."

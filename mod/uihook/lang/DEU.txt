@@ -706,7 +706,7 @@ KEYS_GAME = "Die Tasten des Spiels, wie sie jetzt belegt sind."
 KEYS_OR = " oder "
 KEYS_THIS = "Strg + Schrägstrich, die Taste links der rechten Umschalttaste: diese Liste. Pfeil hoch und runter gehen sie durch, Escape schließt sie."
 KEYS_HISTORY = "Einfügen: die letzten Ansagen."
-KEYS_OPTIONS = "Ziffernblock Schrägstrich: die Optionen von Squadsight und die Klangübung."
+KEYS_OPTIONS = "Ziffernblock Schrägstrich oder die Taste links der rechten Umschalttaste: die Optionen von Squadsight und die Klangübung. Darin wirken die Pfeiltasten, Leertaste und Eingabe wie Ziffernblock 8, 2, 4, 6 und 5."
 KEYS_BUTTONS = "0: die Schaltflächen des Bildschirms mit ihren Tasten, auch als Menü."
 KEYS_DIGITS = "1 bis 9: Befehle, die das Spiel nur auf eine Gamepad-Taste gelegt hat, auf den Bildschirmen, die sie haben. 0 nennt sie."
 KEYS_BASE = "Entfernen: in der Basis das Datum, die Vorräte und was ansteht. Im Lageraum, in der Technik und in der Forschung dieser Raum als Liste."
@@ -727,7 +727,7 @@ KEYS_ENEMIES = "Ziffernblock Plus oder die Taste rechts von L: die Feinde in Sic
 KEYS_OBJECTIVES = "M: die Einsatzziele und die Rundenzähler."
 KEYS_ABILITIES = "Ziffernblock Komma oder die zweite Taste rechts von P: die Fähigkeitenleiste als Menü."
 KEYS_TARGET_INFO = "F1 beim Zielen: die Aufschlüsselung der Trefferchance, vorgelesen."
-KEYS_WALLS = "Ziffernblock Stern: Wandklang aus, an."
+KEYS_WALLS = "Ziffernblock Stern oder die zweite Taste links der rechten Umschalttaste: Wandklang aus, an."
 
 # ---- Controls (controls.c) ----
 CONTROLS_HINT = "Steuerung: Pfeil hoch und runter wählen eine Aktion, links und rechts ihre erste oder zweite Taste. Eingabe, dann die neue Taste, belegt sie. 1 löscht die Taste, 2 setzt alle Tasten zurück, 3 speichert und verlässt, Tab wechselt zwischen allgemeinen und Einsatztasten, Escape verlässt ohne Speichern."

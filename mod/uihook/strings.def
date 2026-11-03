@@ -712,7 +712,7 @@ S(KEYS_GAME,             "The game's keys, as they are bound now.")
 S(KEYS_OR,               " or ")
 S(KEYS_THIS,             "Ctrl + slash, the key left of right Shift: this list. Up and Down walk it, Escape closes it.")
 S(KEYS_HISTORY,          "Insert: the recent announcements.")
-S(KEYS_OPTIONS,          "Numpad slash: Squadsight's options and sound practice.")
+S(KEYS_OPTIONS,          "Numpad slash, or the key left of right Shift: Squadsight's options and sound practice. In them, the arrows, Space and Enter work as numpad 8, 2, 4, 6 and 5.")
 S(KEYS_BUTTONS,          "0: the screen's buttons with their keys, also as a menu.")
 S(KEYS_DIGITS,           "1 to 9: commands the game gave only a gamepad button, on the screens that have them. 0 names them.")
 S(KEYS_BASE,             "Delete: at the base, the date, the resources and what is coming up. In the Situation Room, Engineering and Research, that room as a list.")
@@ -733,7 +733,7 @@ S(KEYS_ENEMIES,          "Numpad plus, or the key right of L: the enemies in sig
 S(KEYS_OBJECTIVES,       "M: the objectives and the turn counters.")
 S(KEYS_ABILITIES,        "Numpad period, or the key two right of P: the ability bar as a menu.")
 S(KEYS_TARGET_INFO,      "F1 while aiming: the hit chance breakdown, read out.")
-S(KEYS_WALLS,            "Numpad star: wall sound off, on.")
+S(KEYS_WALLS,            "Numpad star, or the key two left of right Shift: wall sound off, on.")
 
 // ---- the game's Controls screen (controls.c) ------------------------------------
 S(CONTROLS_HINT,         "Controls: Up and Down choose an action, Left and Right its first or second key. Enter, then the new key, binds it. 1 clears the key, 2 resets every key, 3 saves and leaves, Tab switches between general and mission keys, Escape leaves without saving.")

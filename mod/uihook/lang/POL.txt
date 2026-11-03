@@ -707,7 +707,7 @@ KEYS_GAME = "Klawisze gry, tak jak są teraz przypisane."
 KEYS_OR = " lub "
 KEYS_THIS = "Ctrl + ukośnik, klawisz na lewo od prawego Shift: ta lista. Strzałki w górę i w dół ją przeglądają, Escape ją zamyka."
 KEYS_HISTORY = "Insert: ostatnie komunikaty."
-KEYS_OPTIONS = "Ukośnik na klawiaturze numerycznej: opcje Squadsight i ćwiczenie dźwięków."
+KEYS_OPTIONS = "Ukośnik na klawiaturze numerycznej lub klawisz na lewo od prawego Shift: opcje Squadsight i ćwiczenie dźwięków. W nich strzałki, Spacja i Enter działają jak 8, 2, 4, 6 i 5 na klawiaturze numerycznej."
 KEYS_BUTTONS = "0: przyciski ekranu z ich klawiszami, także jako menu."
 KEYS_DIGITS = "1 do 9: polecenia, które gra przypisała tylko do przycisku pada, na ekranach, które je mają. 0 je wymienia."
 KEYS_BASE = "Delete: w bazie data, zasoby i to, co nadchodzi. W pokoju sytuacyjnym, inżynierii i badaniach ten pokój jako lista."
@@ -728,7 +728,7 @@ KEYS_ENEMIES = "Plus na klawiaturze numerycznej lub klawisz na prawo od L: wrogo
 KEYS_OBJECTIVES = "M: cele misji i liczniki tur."
 KEYS_ABILITIES = "Kropka na klawiaturze numerycznej lub drugi klawisz na prawo od P: pasek umiejętności jako menu."
 KEYS_TARGET_INFO = "F1 podczas celowania: rozbicie szansy trafienia, odczytane."
-KEYS_WALLS = "Gwiazdka na klawiaturze numerycznej: dźwięk ścian wyłączony, włączony."
+KEYS_WALLS = "Gwiazdka na klawiaturze numerycznej lub drugi klawisz na lewo od prawego Shift: dźwięk ścian wyłączony, włączony."
 
 # ---- Controls (controls.c) ----
 CONTROLS_HINT = "Sterowanie: strzałki w górę i w dół wybierają akcję, w lewo i w prawo jej pierwszy lub drugi klawisz. Enter, a potem nowy klawisz, przypisuje go. 1 czyści klawisz, 2 przywraca wszystkie klawisze, 3 zapisuje i wychodzi, Tab przełącza między klawiszami ogólnymi i misji, Escape wychodzi bez zapisu."
