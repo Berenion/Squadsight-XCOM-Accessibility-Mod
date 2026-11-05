@@ -10,9 +10,9 @@
 #ifndef VERSION_H
 #define VERSION_H
 
-#define MOD_VERSION       "0.16.0"
+#define MOD_VERSION       "0.17.0"
 #define MOD_VERSION_MAJOR 0
-#define MOD_VERSION_MINOR 16
+#define MOD_VERSION_MINOR 17
 #define MOD_VERSION_PATCH 0
 
 #define MOD_NAME    "Squadsight"
