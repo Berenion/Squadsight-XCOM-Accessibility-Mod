@@ -50,6 +50,19 @@ void game_set_ew(int ew);
 int game_localize(const char* package, const char* section, const char* key,
                   char* out, size_t out_sz);
 
+// Every [section] key=value line of `package` under `root` in `lang`, in
+// order, to `fn`; the value unquoted, in place. `fn` returns 0 to stop. 0 when
+// the file cannot be read. For reading a whole section at once -- a cutscene's
+// subtitles (subtitles.c) -- rather than one line per pass of the file.
+typedef int (*LocLineFn)(const wchar_t* section, const wchar_t* key, const wchar_t* value,
+                         void* ctx);
+int game_loc_each(const char* root, const char* lang, const char* package, LocLineFn fn,
+                  void* ctx);
+
+// The game's folder, the one with XComGame in it (EW: XEW\), with a trailing
+// backslash: two above its exe (Binaries\Win32).
+void game_root(char* root, size_t root_sz);
+
 // The same, from `root` (the folder with XComGame in it) and the language
 // given; for the offline check. No cache.
 int game_localize_from(const char* root, const char* lang, const char* package,

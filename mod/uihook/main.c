@@ -90,6 +90,7 @@
 #include "controls.h"
 #include "numpad.h"
 #include "strings.h"
+#include "subtitles.h"
 
 #define MAX_NATIVES 8192
 #define MAX_STR     4096
@@ -4888,13 +4889,16 @@ static int screens_call(const Call* c)
                             s_tip[0] ? ". " : "", s_tip);
                 s_where[0] = s_intel[0] = s_goals[0] = s_tip[0] = 0;
                 logf_("[%ld] %s %s.%s  BRIEFING \"%s\"\n", n, tag, obj_name, fn_name, say);
-                announce(say);
+                // EU's first mission draws it before the intro and the mission
+                // prep play over it (2026-11-05, 12:19 EU log): held until the
+                // movies are over (subtitles.c), so it follows them as in EW.
+                subtitles_say_after_movies(say, announce);
             }
             // "LOADING..." is what the briefing is said under; the rest --
-            // "READY TO ENGAGE" -- is news.
+            // "READY TO ENGAGE" -- is news, and queues behind a held briefing.
             if (!strstr(msg, "...")) {
                 logf_("[%ld] %s %s.%s  BRIEFING \"%s\"\n", n, tag, obj_name, fn_name, msg);
-                announce(msg);
+                subtitles_say_after_movies(msg, announce);
             }
             return 1;
         }
@@ -6028,6 +6032,12 @@ static void capture_body(const char* tag, LONG n, void* stack)
     // "HQ_headCommClerk". Left to the general path as a lone line, a screen
     // reader said "Chief Scientist" even with the comm-link lines turned off
     // (reported 2026-10-12). It is a picture: never said.
+    // A narrative line drawn here is said from here: subtitles.c, which says
+    // the lines GetCurrentDialogue gives that no screen draws, lets it go.
+    if ((strncmp(obj_name, "UINarrativeCommLink", 19) == 0 ||
+         strncmp(obj_name, "UINarrativePopup", 16) == 0) &&
+        strcmp(fn_name, "AS_SetText") == 0 && p->nstrings)
+        subtitles_dialogue_shown(p->strings[0]);
     if ((strncmp(obj_name, "UINarrativeCommLink", 19) == 0 ||
          strncmp(obj_name, "UINarrativePopup", 16) == 0) &&
         strcmp(fn_name, "AS_SetPortrait") == 0) {
@@ -8936,12 +8946,15 @@ static void lang_poll(void)
     logf_("language: the game is %s -- %s\n", code, why);
 }
 
+static void movie_player_try(void);
+
 static DWORD WINAPI review_pump(LPVOID unused)
 {
     (void)unused;
     while (!g_review_stop) {
         Sleep(REVIEW_POLL_MS);
         GUARDED("language: poll", lang_poll());
+        GUARDED("subtitles: movie player", movie_player_try());
         if (!game_has_focus()) continue;
         GUARDED("status: poll", status_poll());
         GUARDED("hooks: late UFunction pass", hooks_sweep_retry());
@@ -8952,6 +8965,253 @@ static DWORD WINAPI review_pump(LPVOID unused)
     return 0;
 }
 
+// A cutscene's subtitles (subtitles.c). The engine draws them itself, so the
+// only sign of a cutscene is the script starting one: XComEngine.PlayMovie
+// from UIPlayMovie, PlaySpecificLoadingMovie from XGBattle_SP. The name is
+// read from the calling frame before the native runs (it steps its own
+// arguments), and the clock starts once it has. WaitForMovie returns when the
+// movie has ended or been skipped (UIPlayMovie then stops it), and
+// StopCurrentMovie ends one the game cuts short.
+static void subtitle_say(const char* text)
+{
+    announce_as(SET_SUBTITLES, text);
+}
+
+// The intro's opening quote: said with the option off too (subtitles.c).
+static void subtitle_say_always(const char* text)
+{
+    announce(text);
+}
+
+static ExecFn g_orig_playmovie, g_orig_loadingmovie, g_orig_waitmovie, g_orig_stopmovie;
+
+static void movie_start_hook(ExecFn orig, const char* how, void* self, void* edx,
+                             void* stack, void* result)
+{
+    char name[160];
+    int got = 0;
+    GUARDED("subtitles: movie name", got = subtitles_movie_name(stack, 0, name, sizeof name));
+    orig(self, edx, stack, result);
+    if (got) GUARDED("subtitles: start", subtitles_movie_started(name, how));
+    else logf_("subtitles: %s with no name read -- its lines will not be said\n", how);
+}
+
+static void __fastcall hook_playmovie(void* self, void* edx, void* stack, void* result)
+{
+    movie_start_hook(g_orig_playmovie, "PlayMovie", self, edx, stack, result);
+}
+
+static void __fastcall hook_loadingmovie(void* self, void* edx, void* stack, void* result)
+{
+    movie_start_hook(g_orig_loadingmovie, "PlaySpecificLoadingMovie", self, edx, stack, result);
+}
+
+// A movie a map's Kismet plays (SeqAct_ControlGameMovie, native): the engine
+// raises GamePlayerController.ClientPlayMovie / ClientStopMovie for it, which
+// no script call goes through -- the tutorial's landing, SR_hover_02_LOC
+// ("Central, this is Big Sky. Looks like we found the crash site."), said
+// nothing through two builds (2026-11-05, 11:51 and 12:01 logs: no PlayMovie,
+// and no narrative line for it either). Raised by the engine, the frame is
+// the event's own (Node ClientPlayMovie, Locals its parameters, MovieName
+// first); called from script it is the caller's, and the name must then
+// look like a movie's.
+static ExecFn g_orig_clientplaymovie, g_orig_clientstopmovie;
+
+static void frame_caller(void* stack, char* out, size_t out_sz);
+
+static int client_movie_name(void* stack, char* out, size_t out_sz)
+{
+    char node[64];
+    frame_caller(stack, node, sizeof node);
+    int own = strcmp(node, "ClientPlayMovie") == 0;
+    int got = subtitles_movie_name(stack, own, out, out_sz);
+    logf_("subtitles: ClientPlayMovie, frame of %s, name %s\n", node[0] ? node : "?",
+          got ? out : "not read");
+    return got;
+}
+
+static void __fastcall hook_clientplaymovie(void* self, void* edx, void* stack, void* result)
+{
+    char name[160];
+    int got = 0;
+    GUARDED("subtitles: client movie name", got = client_movie_name(stack, name, sizeof name));
+    g_orig_clientplaymovie(self, edx, stack, result);
+    if (got) GUARDED("subtitles: client start", subtitles_movie_started(name, "ClientPlayMovie"));
+}
+
+static void __fastcall hook_clientstopmovie(void* self, void* edx, void* stack, void* result)
+{
+    GUARDED("subtitles: client stop", subtitles_movie_ended("ClientStopMovie"));
+    g_orig_clientstopmovie(self, edx, stack, result);
+}
+
+// The engine's own movie player, under every way a movie starts. EU's landing
+// (SR_hover_02_LOC) raised neither PlayMovie nor ClientPlayMovie (2026-11-05,
+// 12:11 EU log) though EW's did, so its map plays it natively. Every play
+// ends at GFullScreenMovie->GameThreadPlayMovie(mode, name, start frame, -1,
+// -1), a virtual function: execPlayMovie, in both builds, is
+//     mov ecx,[GFullScreenMovie] ; mov edx,[ecx] ; ... mov eax,[edx+14h] ; call eax
+// So the global and the slot are read out of that code at run time, and the
+// slot of the player's vtable is swapped. The player is made during the
+// engine's start, possibly after this DLL is in, so it is tried until found.
+typedef int (__fastcall* MoviePlayFn)(void* self, void* edx, int mode, const wchar_t* name,
+                                      int start_frame, int from_frame, int to_frame);
+static MoviePlayFn     g_orig_gtplay;
+static const uint8_t*  g_playmovie_code;     // execPlayMovie, from the native table
+static volatile LONG   g_movie_player_done;  // 1 armed, 2 given up
+
+static void gtplay_note(const wchar_t* name)
+{
+    char n[160];
+    if (!name || !readable(name, 2) ||
+        !WideCharToMultiByte(CP_UTF8, 0, name, -1, n, sizeof n, NULL, NULL) || !n[0])
+        return;
+    subtitles_movie_started(n, "the engine's movie player");
+}
+
+static int __fastcall hook_gtplay(void* self, void* edx, int mode, const wchar_t* name,
+                                  int start_frame, int from_frame, int to_frame)
+{
+    int r = g_orig_gtplay(self, edx, mode, name, start_frame, from_frame, to_frame);
+    GUARDED("subtitles: engine movie", gtplay_note(name));
+    return r;
+}
+
+static void movie_player_try(void)
+{
+    if (g_movie_player_done || !g_playmovie_code) return;
+    const uint8_t* c = g_playmovie_code;
+    if (!readable(c, 0x240)) { g_movie_player_done = 2; return; }
+    void** global = NULL;
+    int slot = -1;
+    for (int i = 0; i < 0x200 && slot < 0; i++) {
+        if (c[i] != 0x8B || c[i + 1] != 0x0D || c[i + 6] != 0x8B || c[i + 7] != 0x11) continue;
+        global = *(void** const*)(c + i + 2);
+        for (int j = i + 8; j < i + 48; j++) {
+            if (c[j] == 0x8B && c[j + 1] == 0x42) { slot = c[j + 2] / 4; break; }   // mov eax,[edx+N]
+            if (c[j] == 0xFF && c[j + 1] == 0x52) { slot = c[j + 2] / 4; break; }   // call [edx+N]
+        }
+    }
+    if (!global || slot < 0 || !readable(global, sizeof(void*))) {
+        logf_("subtitles: the movie player's call not found in execPlayMovie -- movies a map "
+              "plays itself will be silent\n");
+        g_movie_player_done = 2;
+        return;
+    }
+    void* player = *global;
+    if (!player || !readable(player, sizeof(void*))) return;          // not made yet
+    void** vtbl = *(void***)player;
+    if (!readable(vtbl + slot, sizeof(void*))) { g_movie_player_done = 2; return; }
+    DWORD old;
+    if (!VirtualProtect(vtbl + slot, sizeof(void*), PAGE_READWRITE, &old)) {
+        logf_("subtitles: the movie player's vtable cannot be written (0x%08lx)\n", GetLastError());
+        g_movie_player_done = 2;
+        return;
+    }
+    g_orig_gtplay = (MoviePlayFn)vtbl[slot];
+    InterlockedExchangePointer(&vtbl[slot], (void*)hook_gtplay);
+    VirtualProtect(vtbl + slot, sizeof(void*), old, &old);
+    g_movie_player_done = 1;
+    logf_("subtitles: the engine's movie player %p, GameThreadPlayMovie at slot %d (%p) hooked\n",
+          player, slot, (void*)g_orig_gtplay);
+}
+
+static void __fastcall hook_waitmovie(void* self, void* edx, void* stack, void* result)
+{
+    g_orig_waitmovie(self, edx, stack, result);
+    GUARDED("subtitles: end", subtitles_movie_ended("WaitForMovie returned"));
+}
+
+static void __fastcall hook_stopmovie(void* self, void* edx, void* stack, void* result)
+{
+    GUARDED("subtitles: stop", subtitles_movie_ended("StopCurrentMovie"));
+    g_orig_stopmovie(self, edx, stack, result);
+}
+
+// The narrative's voice-only lines (subtitles.c): the Skyranger's "Central,
+// this is Big Sky..." on landing went unsaid (reported 2026-11-05) -- no
+// screen shows them, so no AS_SetText. UINarrativeMgr.BeginVOOnlyConversation
+// plays them with Actor.CreateAudioComponent(ResolvedCue, true, true); the
+// component it returns is read once the native has made it. Other callers are
+// logged once each, so a log shows what else plays voice without a screen.
+static ExecFn g_orig_createaudio, g_orig_audiostop, g_orig_audiofade;
+
+static void frame_caller(void* stack, char* out, size_t out_sz)
+{
+    void* node = readable(stack, 0x20) ? *(void**)((uint8_t*)stack + FFRAME_NODE) : NULL;
+    if (!node || !object_name(node, out, out_sz)) out[0] = 0;
+}
+
+static void voice_from_result(void* result, const char* caller)
+{
+    void* ac = readable(result, sizeof(void*)) ? *(void**)result : NULL;
+    subtitles_voice_started(ac, caller);
+}
+
+static void tentpole_from_result(void* result)
+{
+    void* ac = readable(result, sizeof(void*)) ? *(void**)result : NULL;
+    subtitles_tentpole_started(ac);
+}
+
+// Every narrative line the game steps to (UINarrativeMgr.
+// UpdateConversationDialogueBox -> ConversationNode.GetCurrentDialogue): the
+// string it returns, once the native has written it. Said by subtitles.c
+// unless a comm link or popup draws it -- the landing's tentpole lines drew
+// nothing (2026-11-05, 11:51 log).
+static ExecFn g_orig_curdialogue;
+
+static void dialogue_from_result(void* result)
+{
+    char text[1024];
+    if (readable(result, sizeof(FString)) &&
+        read_fstring((const FString*)result, text, sizeof text) && text[0]) {
+        logf_("subtitles: GetCurrentDialogue \"%s\"\n", text);
+        subtitles_dialogue(text);
+    }
+}
+
+static void __fastcall hook_curdialogue(void* self, void* edx, void* stack, void* result)
+{
+    g_orig_curdialogue(self, edx, stack, result);
+    GUARDED("subtitles: dialogue", dialogue_from_result(result));
+}
+
+static void __fastcall hook_createaudio(void* self, void* edx, void* stack, void* result)
+{
+    char caller[64] = "";
+    GUARDED("subtitles: audio caller", frame_caller(stack, caller, sizeof caller));
+    g_orig_createaudio(self, edx, stack, result);
+    if (strcmp(caller, "BeginVOOnlyConversation") == 0) {
+        GUARDED("subtitles: voice", voice_from_result(result, caller));
+        return;
+    }
+    if (strcmp(caller, "StartTentpoleRemoteEvent") == 0) {
+        GUARDED("subtitles: tentpole", tentpole_from_result(result));
+        return;
+    }
+    static char s_seen[24][64];
+    static int s_nseen;
+    for (int i = 0; i < s_nseen; i++)
+        if (strcmp(s_seen[i], caller) == 0) return;
+    if (s_nseen < 24) {
+        strcpy_s(s_seen[s_nseen++], 64, caller);
+        logf_("subtitles: CreateAudioComponent from %s (not a voice-only conversation)\n",
+              caller[0] ? caller : "?");
+    }
+}
+
+static void __fastcall hook_audiostop(void* self, void* edx, void* stack, void* result)
+{
+    GUARDED("subtitles: audio stop", subtitles_voice_stopped(self, "AudioComponent.Stop"));
+    g_orig_audiostop(self, edx, stack, result);
+}
+
+static void __fastcall hook_audiofade(void* self, void* edx, void* stack, void* result)
+{
+    GUARDED("subtitles: audio fade", subtitles_voice_stopped(self, "AudioComponent.FadeOut"));
+    g_orig_audiofade(self, edx, stack, result);
+}
 
 // This one rewrites rather than captures, so it gets its own thunk: the work
 // has to happen before the native reads its arguments, not alongside it.
@@ -9013,7 +9273,7 @@ THUNK(panel_invoke, "Invoke/Panel ")
 // the native's name holding it. The script VM calls Function->Func (or
 // GNatives[i]) on every call, so a swapped pointer sees every call the
 // patched code did. The original is the untouched function itself.
-#define MAX_HOOKS 24
+#define MAX_HOOKS 32
 
 typedef struct {
     const char* name;       // "UGFxMoviePlayerexecActionScriptVoid"
@@ -9323,6 +9583,10 @@ static DWORD WINAPI init(LPVOID param)
     mouse_start(mouse_why, sizeof mouse_why);
     logf_("mouse: %s\n", mouse_why);
 
+    char sub_why[128];
+    subtitles_start(subtitle_say, subtitle_say_always, sub_why, sizeof sub_why);
+    logf_("subtitles: %s\n", sub_why);
+
     if (CreateThread(NULL, 0, review_pump, NULL, 0, NULL))
         logf_("review: Insert polled every %d ms, everywhere\n", REVIEW_POLL_MS);
     else
@@ -9410,6 +9674,29 @@ static DWORD WINAPI init(LPVOID param)
     // A flying soldier's path. Its loss costs only flight.
     arm(tbl, n, mod, "AXComPathingPawnexecComputeJetpackPath",
         (LPVOID)hook_jetpackpath, (LPVOID*)&g_orig_jetpackpath);
+    // A cutscene's subtitles. Their loss costs only those.
+    arm(tbl, n, mod, "UXComEngineexecPlayMovie",
+        (LPVOID)hook_playmovie, (LPVOID*)&g_orig_playmovie);
+    g_playmovie_code = (const uint8_t*)natives_find(tbl, n, "UXComEngineexecPlayMovie");
+    movie_player_try();
+    arm(tbl, n, mod, "UXComEngineexecPlaySpecificLoadingMovie",
+        (LPVOID)hook_loadingmovie, (LPVOID*)&g_orig_loadingmovie);
+    arm(tbl, n, mod, "UXComEngineexecWaitForMovie",
+        (LPVOID)hook_waitmovie, (LPVOID*)&g_orig_waitmovie);
+    arm(tbl, n, mod, "UXComEngineexecStopCurrentMovie",
+        (LPVOID)hook_stopmovie, (LPVOID*)&g_orig_stopmovie);
+    arm(tbl, n, mod, "AActorexecCreateAudioComponent",
+        (LPVOID)hook_createaudio, (LPVOID*)&g_orig_createaudio);
+    arm(tbl, n, mod, "UAudioComponentexecStop",
+        (LPVOID)hook_audiostop, (LPVOID*)&g_orig_audiostop);
+    arm(tbl, n, mod, "UAudioComponentexecFadeOut",
+        (LPVOID)hook_audiofade, (LPVOID*)&g_orig_audiofade);
+    arm(tbl, n, mod, "UXComConversationNodeexecGetCurrentDialogue",
+        (LPVOID)hook_curdialogue, (LPVOID*)&g_orig_curdialogue);
+    arm(tbl, n, mod, "AGamePlayerControllerexecClientPlayMovie",
+        (LPVOID)hook_clientplaymovie, (LPVOID*)&g_orig_clientplaymovie);
+    arm(tbl, n, mod, "AGamePlayerControllerexecClientStopMovie",
+        (LPVOID)hook_clientstopmovie, (LPVOID*)&g_orig_clientstopmovie);
 
     free(tbl);
 

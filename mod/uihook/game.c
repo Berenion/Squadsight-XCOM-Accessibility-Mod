@@ -344,14 +344,8 @@ int game_loc(const char* cls, const char* field, int index, char* out, size_t ou
     return have;
 }
 
-// Every [section] key=value line of a localization file, in order, to `fn`;
-// the value unquoted, in place. `fn` returns 0 to stop. 0 when the file
-// cannot be read.
-typedef int (*LocLineFn)(const wchar_t* section, const wchar_t* key, const wchar_t* value,
-                         void* ctx);
-
-static int loc_each(const char* root, const char* lang, const char* package, LocLineFn fn,
-                    void* ctx)
+int game_loc_each(const char* root, const char* lang, const char* package, LocLineFn fn,
+                  void* ctx)
 {
     char ext[8];
     size_t i = 0;
@@ -443,7 +437,7 @@ int game_localize_from(const char* root, const char* lang, const char* package,
     MultiByteToWideChar(CP_UTF8, 0, section, -1, wsec, 128);
     MultiByteToWideChar(CP_UTF8, 0, key, -1, wkey, 128);
     LocFind f = { wsec, wkey, out, out_sz, 0 };
-    loc_each(root, lang, package, loc_find, &f);
+    game_loc_each(root, lang, package, loc_find, &f);
     if (!f.found) out[0] = 0;
     return f.found;
 }
@@ -509,14 +503,14 @@ int game_localize_like_from(const char* root, const char* lang, const char* pack
     MultiByteToWideChar(CP_UTF8, 0, key_part, -1, wkey, 64);
     MultiByteToWideChar(CP_UTF8, 0, english_part, -1, wval, 64);
     LocLike l = { wkey, wval, sec, key, 0, max };
-    if (!loc_each(root, "INT", package, loc_like, &l) || !l.n) return 0;
+    if (!game_loc_each(root, "INT", package, loc_like, &l) || !l.n) return 0;
     LocPick k = { sec, key, l.n, out, 0 };
-    loc_each(root, lang, package, loc_pick, &k);
+    game_loc_each(root, lang, package, loc_pick, &k);
     return k.got;
 }
 
 // The game's folder: two above its exe (Binaries\Win32).
-static void game_root(char* root, size_t root_sz)
+void game_root(char* root, size_t root_sz)
 {
     GetModuleFileNameA(NULL, root, (DWORD)root_sz);
     for (int up = 0; up < 3; up++) {

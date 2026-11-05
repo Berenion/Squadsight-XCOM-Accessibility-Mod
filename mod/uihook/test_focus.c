@@ -24,6 +24,7 @@
 #include "info.h"
 #include "sight.h"
 #include "mission.h"
+#include "subtitles.h"
 #include "abar.h"
 #include "props.h"
 #include "input.h"
@@ -736,6 +737,66 @@ int main(void)
             printf("  DEU ExpandText = \"%s\"\n", t);
             check(!game_localize_from(root, "INT", "XComStrategyGame", "UITellMeMore", "NoSuchKey",
                                       t, sizeof t), "Localize: a missing key");
+
+            // A cutscene's subtitles (subtitles.c): the timing file beside the
+            // movie, the lines from Subtitles.<lang>.
+            {
+                static SubtitleCue cue[96];
+                char file[MAX_PATH];
+                int n = subtitles_load_from(root, "INT", "XEW_CIN_Intro.bik", cue, 96,
+                                            file, sizeof file);
+                printf("  intro: %d lines from %s\n", n, file);
+                check(n == 8 && cue[0].start_ms == 3000 && cue[7].start_ms == 135200,
+                      "subtitles: the EW intro's timing, XEW_CIN_Intro_LOC.txt");
+                check(cue[0].found && cue[0].always && cue[2].always && !cue[3].always &&
+                      strcmp(cue[0].text, "Those who play with the devil's toys") == 0 &&
+                      strcmp(cue[2].text, "R. Buckminster Fuller") == 0,
+                      "subtitles: the English opening quote, blank in the game's file, "
+                      "from strings.def and said whatever the option");
+                check(strcmp(cue[3].text, "Hello, Commander. In light of the recent "
+                             "extraterrestrial incursion, this council of nations has convened "
+                             "to approve the activation of the XCOM project.") == 0,
+                      "subtitles: the English line, from Subtitles.int");
+                n = subtitles_load_from(root, "CHT", "XEW_CIN_Intro.bik", cue, 96, file, sizeof file);
+                check(n == 8 && cue[0].always && strcmp(cue[0].text, "Those who play with the "
+                                                         "devil's toys") != 0 && cue[0].text[0],
+                      "subtitles: the Chinese opening quote, the game's own");
+                // EU's intro has the quote at the same keys.
+                n = subtitles_load_from("D:\\SteamLibrary\\steamapps\\common\\XCom-Enemy-Unknown\\",
+                                        "INT", "CIN_Intro_Movie_LOC.bik", cue, 96, file, sizeof file);
+                check(n == 9 && cue[1].always && strcmp(cue[1].text, "will be brought by degrees "
+                                                        "to wield his sword.") == 0,
+                      "subtitles: EU's intro, the quote too");
+                static const char* const sublangs[] = { "DEU", "ESN", "FRA", "ITA", "POL",
+                                                        "RUS", "JPN", "KOR", "CHT" };
+                for (int k = 0; k < 9; k++) {
+                    n = subtitles_load_from(root, sublangs[k], "CIN_TP01_1stUFOShotDown_LOC.bik",
+                                            cue, 96, file, sizeof file);
+                    int texts = 0;
+                    for (int i = 0; i < n; i++) texts += cue[i].text[0] != 0;
+                    printf("  %s: first UFO down, %d lines, \"%s\"\n", sublangs[k], n,
+                           n ? cue[0].text : "");
+                    check(n == 8 && texts == 8, "subtitles: a cutscene in each language");
+                }
+                n = subtitles_load_from(root, "INT", "TP_UnloadScreen.bik", cue, 96, file, sizeof file);
+                check(n == 2 && strstr(file, "TUT_TP_UnloadScreen_LOC.txt"),
+                      "subtitles: the tutorial's unload screen, played as TUT_");
+                // The tutorial's landing, as Kismet names it: no extension.
+                n = subtitles_load_from(root, "INT", "SR_hover_02_LOC", cue, 96, file, sizeof file);
+                check(n == 4 && strcmp(cue[0].text, "Central, this is Big Sky. Looks like we "
+                                       "found the crash site.") == 0,
+                      "subtitles: the landing, SR_hover_02_LOC");
+                n = subtitles_load_from(root, "INT", "1080_SR_hover_02_LOC.bik", cue, 96, file,
+                                        sizeof file);
+                check(n == 4, "subtitles: the landing by its file's name, 1080_ and all");
+                n = subtitles_load_from("D:\\SteamLibrary\\steamapps\\common\\XCom-Enemy-Unknown\\",
+                                        "INT", "SR_hover_02.bik", cue, 96, file, sizeof file);
+                check(n == 4, "subtitles: EU's landing");
+                n = subtitles_load_from(root, "INT", "XEW_ShieldLogo.bik", cue, 96, file, sizeof file);
+                check(n == 0, "subtitles: the loading tips have no time");
+                n = subtitles_load_from(root, "INT", "NoSuchMovie.bik", cue, 96, file, sizeof file);
+                check(n == 0 && !file[0], "subtitles: a movie with no timing file");
+            }
 
             // The evac objectives, found by their English text and read in
             // the player's language (where.c, evac_objective_open).

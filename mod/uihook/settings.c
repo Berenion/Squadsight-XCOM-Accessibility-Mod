@@ -43,6 +43,7 @@ static const Spec SPEC[SET_COUNT] = {
     [SET_TICKER]     = { "Ticker",       SET_NAME_TICKER,      0, 1, 1, NULL },
     [SET_OBJECTIVES] = { "Objectives",   SET_NAME_OBJECTIVES,   0, 1, 1, NULL },
     [SET_NARRATIVE]  = { "Narrative",    SET_NAME_NARRATIVE,  0, 1, 1, NULL },
+    [SET_SUBTITLES]  = { "Subtitles",    SET_NAME_SUBTITLES,  0, 1, 1, NULL },
     [SET_MOUSE]      = { "BlockMouse",   SET_NAME_MOUSE,     0, 1, 1, NULL },
     [SET_DEBUG]      = { "DebugLog",     SET_NAME_DEBUG,           0, 1, 1, NULL },
 };

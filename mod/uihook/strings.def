@@ -61,6 +61,7 @@ S(SET_NAME_TURN,         "Turn changes")
 S(SET_NAME_TICKER,       "Message ticker")
 S(SET_NAME_OBJECTIVES,   "Objective changes")
 S(SET_NAME_NARRATIVE,    "Comm-link messages")
+S(SET_NAME_SUBTITLES,    "Cutscene subtitles")
 S(SET_NAME_MOUSE,        "Block the mouse")
 S(SET_NAME_DEBUG,        "Debug log")
 S(SET_ON,                "On")
@@ -745,3 +746,10 @@ S(CONTROLS_CANT_CLEAR,   "This key cannot be cleared.")
 S(CONTROLS_NOTHING,      "No actions on this tab.")
 F(CONTROLS_MOD_KEY,      "Squadsight uses %s in missions, so this action will not work with that key there.")
 S(CONTROLS_SAME_ACTION,  "Not changed: this action already has that key.")
+
+// ---- subtitles.c: the opening quote of the intro, which the English
+// subtitles leave blank (it is written in the picture); the other languages
+// subtitle it, and their files give the game's own wording ----
+S(SUB_QUOTE_1,           "Those who play with the devil's toys")
+S(SUB_QUOTE_2,           "will be brought by degrees to wield his sword.")
+S(SUB_QUOTE_AUTHOR,      "R. Buckminster Fuller")
